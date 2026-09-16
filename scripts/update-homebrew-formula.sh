@@ -74,7 +74,9 @@ formula = f'''class Clipsync < Formula
 {linux}
 
   def install
-    bin.install "clipsync"
+    binary = File.exist?("clipsync") ? "clipsync" : Dir["clipsync-*/clipsync"].first
+    odie "clipsync binary missing from archive" if binary.nil?
+    bin.install binary
   end
 
   def caveats
