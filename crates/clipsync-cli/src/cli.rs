@@ -71,7 +71,7 @@ pub enum Commands {
 
 #[derive(Debug, Subcommand)]
 pub enum RoomCmd {
-    /// Create a pairing room and print a 6-digit join code
+    /// Create a pairing room and print a 6-digit join code (waits in the background)
     Create {
         /// How long the code stays valid (e.g. 2m)
         #[arg(long)]
@@ -79,10 +79,13 @@ pub enum RoomCmd {
         /// Do not start the sync daemon after pairing
         #[arg(long)]
         no_auto_sync: bool,
-        /// Print the code and wait for the joiner in the background
-        #[arg(short = 'b', long, visible_alias = "detach")]
+        /// Wait in this terminal until the other device joins
+        #[arg(long, visible_alias = "wait", conflicts_with = "background")]
+        foreground: bool,
+        /// Kept for compatibility; background wait is the default
+        #[arg(short = 'b', long, visible_alias = "detach", hide = true)]
         background: bool,
-        /// Internal worker used by --background
+        /// Internal worker used by background room create
         #[arg(long, hide = true)]
         background_worker: bool,
     },

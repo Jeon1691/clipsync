@@ -92,7 +92,7 @@ async fn room_create_background_returns_then_pairs() {
     let create = clipsync(
         a.path(),
         &relay,
-        &["--json", "room", "create", "--background", "--no-auto-sync"],
+        &["--json", "room", "create", "--no-auto-sync"],
     );
     let elapsed = started.elapsed();
     assert!(
@@ -110,11 +110,7 @@ async fn room_create_background_returns_then_pairs() {
     assert_eq!(offer["background"], true);
     let pid = offer["pid"].as_u64().expect("pid") as u32;
 
-    let dup = clipsync(
-        a.path(),
-        &relay,
-        &["room", "create", "--background", "--no-auto-sync"],
-    );
+    let dup = clipsync(a.path(), &relay, &["room", "create", "--no-auto-sync"]);
     assert!(
         !dup.status.success(),
         "second background create should fail while first is waiting"

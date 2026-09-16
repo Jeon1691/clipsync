@@ -59,7 +59,8 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
         Commands::Room(RoomCmd::Create {
             ttl,
             no_auto_sync,
-            background,
+            foreground,
+            background: _,
             background_worker,
         }) => {
             let app = App::open()?;
@@ -70,7 +71,7 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
                 .transpose()
                 .map_err(|e| CoreError::Message(e.to_string()))?;
             let json = cli.json;
-            if background && !background_worker {
+            if !foreground && !background_worker {
                 return pairing_bg::spawn_background_create(
                     &app,
                     ttl_raw.as_deref(),

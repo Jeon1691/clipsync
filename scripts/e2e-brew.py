@@ -155,20 +155,39 @@ def main() -> int:
     log("wrong code rejected")
 
     log("== pairing ==")
-    pid, fd = spawn_create(a)
-    try:
-        code = read_until_code(fd, time.time() + TIMEOUT)
-        log(f"pairing code={code}")
+    create_help = subprocess.check_output([CS, "room", "create", "--help"], text=True)
+    if "--foreground" in create_help:
+        offer = run_json(a, "room", "create", "--no-auto-sync", timeout=TIMEOUT)
+        code = offer.get("pairing_code")
+        if not code:
+            raise Fail(f"no pairing code: {offer}")
+        log(f"pairing code={code} background={offer.get('background')}")
         join_out = run(b, "room", "join", code, "--no-auto-sync", timeout=TIMEOUT)
         log(join_out.strip())
-        rc = wait_exit(pid, TIMEOUT)
-        if rc != 0:
-            raise Fail(f"room create exited {rc}")
-    finally:
+        deadline = time.time() + TIMEOUT
+        while time.time() < deadline:
+            st = run_json(a, "status", timeout=5)
+            pairing = st.get("pairing") or {}
+            if st.get("room_id") or pairing.get("status") == "paired":
+                break
+            time.sleep(0.2)
+        else:
+            raise Fail("creator never recorded the room after background pairing")
+    else:
+        pid, fd = spawn_create(a)
         try:
-            os.close(fd)
-        except OSError:
-            pass
+            code = read_until_code(fd, time.time() + TIMEOUT)
+            log(f"pairing code={code}")
+            join_out = run(b, "room", "join", code, "--no-auto-sync", timeout=TIMEOUT)
+            log(join_out.strip())
+            rc = wait_exit(pid, TIMEOUT)
+            if rc != 0:
+                raise Fail(f"room create exited {rc}")
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     log("== status/devices/list ==")
     st_a = run_json(a, "status")
@@ -242,8 +261,9 @@ def main() -> int:
         "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
         "0000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082"
     )
+    imgdir = b / "inbox-img"
     img_proc = subprocess.Popen(
-        [CS, "--json", "pull", "--wait"],
+        [CS, "--json", "pull", "--wait", "--output", str(imgdir)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env_b,
@@ -261,6 +281,12 @@ def main() -> int:
         blob = (iout or "").lower()
         if "image" not in blob:
             raise Fail(f"image pull mismatch: out={iout!r} err={ierr!r}")
+        saved_img = imgdir / "clipboard.png"
+        if not saved_img.exists():
+            raise Fail(f"image was not written to --output. out={iout!r} err={ierr!r}")
+        if saved_img.read_bytes() != png:
+            raise Fail(f"image bytes mismatch at {saved_img}")
+        log(f"image saved at {saved_img}")
     finally:
         if img_proc.poll() is None:
             img_proc.kill()
