@@ -71,11 +71,20 @@ pub enum Commands {
 
 #[derive(Debug, Subcommand)]
 pub enum RoomCmd {
+    /// Create a pairing room and print a 6-digit join code
     Create {
+        /// How long the code stays valid (e.g. 2m)
         #[arg(long)]
         ttl: Option<String>,
+        /// Do not start the sync daemon after pairing
         #[arg(long)]
         no_auto_sync: bool,
+        /// Print the code and wait for the joiner in the background
+        #[arg(short = 'b', long, visible_alias = "detach")]
+        background: bool,
+        /// Internal worker used by --background
+        #[arg(long, hide = true)]
+        background_worker: bool,
     },
     Join {
         code: String,

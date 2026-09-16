@@ -22,7 +22,7 @@ use clipsync_clipboard::{ClipboardItem, FileRef, ImageMime, SystemClipboard};
 use clipsync_crypto::DeviceIdentity;
 use clipsync_daemon::{connect_ipc, install_and_start, stop_and_uninstall, IpcRequest};
 use clipsync_protocol::{clamp_ttl, DeviceId, DEFAULT_TTL_SECS};
-use clipsync_storage::LocalStore;
+use clipsync_storage::{LocalStore, PairingWait};
 use tracing::info;
 
 pub use clipsync_storage::AppPaths;
@@ -78,18 +78,42 @@ impl App {
             .map(|d| clamp_ttl(d.as_secs()))
             .unwrap_or(DEFAULT_TTL_SECS);
         let pending = begin_create_room(&identity, &cfg, ttl_secs).await?;
-        print_code(&pending.offer);
         let offer = RoomOffer {
             pairing_code: pending.offer.pairing_code.clone(),
             room_id: pending.offer.room_id.clone(),
             expires_at: pending.offer.expires_at,
         };
-        pending.wait(&self.store, &identity).await?;
-        if !no_auto_sync {
-            maybe_start_daemon(&self.store)?;
+        let wait_file = PairingWait {
+            status: "waiting".into(),
+            pairing_code: offer.pairing_code.clone(),
+            room_id: offer.room_id.to_string(),
+            expires_at: offer.expires_at.to_rfc3339(),
+            pid: std::process::id(),
+            error: None,
+        };
+        let _ = self.store.save_pairing_wait(&wait_file);
+        print_code(&pending.offer);
+        match pending.wait(&self.store, &identity).await {
+            Ok(()) => {
+                let _ = self.store.save_pairing_wait(&PairingWait {
+                    status: "paired".into(),
+                    ..wait_file
+                });
+                if !no_auto_sync {
+                    maybe_start_daemon(&self.store)?;
+                }
+                let _ = json;
+                Ok(offer)
+            }
+            Err(e) => {
+                let _ = self.store.save_pairing_wait(&PairingWait {
+                    status: "failed".into(),
+                    error: Some(e.to_string()),
+                    ..wait_file
+                });
+                Err(e)
+            }
         }
-        let _ = json;
-        Ok(offer)
     }
 
     pub async fn room_join(
@@ -109,6 +133,7 @@ impl App {
     pub fn room_leave(&self) -> Result<(), CoreError> {
         let _ = stop_and_uninstall();
         leave_room(&self.store)?;
+        self.store.clear_pairing_wait();
         Ok(())
     }
 
@@ -179,7 +204,7 @@ impl App {
         let cfg = self.store.load_config()?;
         let state = self.store.load_state()?;
         let identity = self.store.secrets.load_identity().ok();
-        Ok(serde_json::json!({
+        let mut v = serde_json::json!({
             "daemon": false,
             "paused": state.paused,
             "connected": false,
@@ -187,7 +212,13 @@ impl App {
             "room_id": state.current_room,
             "device_id": identity.as_ref().map(|i| i.device_id.clone()),
             "relay_url": cfg.relay_url,
-        }))
+        });
+        if let Ok(Some(pairing)) = self.store.load_pairing_wait() {
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("pairing".into(), serde_json::to_value(pairing)?);
+            }
+        }
+        Ok(v)
     }
 
     pub async fn pause(&self) -> Result<(), CoreError> {

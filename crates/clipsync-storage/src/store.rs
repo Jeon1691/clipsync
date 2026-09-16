@@ -36,6 +36,17 @@ pub struct StateFile {
     pub last_message_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PairingWait {
+    pub status: String,
+    pub pairing_code: String,
+    pub room_id: String,
+    pub expires_at: String,
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct LocalStore {
     pub paths: AppPaths,
@@ -90,6 +101,31 @@ impl LocalStore {
         std::fs::write(&path, serde_json::to_string_pretty(state)?)?;
         set_private_file(&path)?;
         Ok(())
+    }
+
+    pub fn save_pairing_wait(&self, wait: &PairingWait) -> Result<()> {
+        let path = self.paths.pairing_file();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(wait)?)?;
+        set_private_file(&tmp)?;
+        std::fs::rename(tmp, path)?;
+        Ok(())
+    }
+
+    pub fn load_pairing_wait(&self) -> Result<Option<PairingWait>> {
+        let path = self.paths.pairing_file();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = std::fs::read_to_string(path)?;
+        Ok(Some(serde_json::from_str(&raw)?))
+    }
+
+    pub fn clear_pairing_wait(&self) {
+        let _ = std::fs::remove_file(self.paths.pairing_file());
     }
 
     pub fn current_room(&self) -> Result<RoomRecord> {

@@ -8,7 +8,7 @@ mod store;
 pub use config::{AppConfig, NotifyConfig, SyncConfig};
 pub use paths::AppPaths;
 pub use secrets::SecretStore;
-pub use store::{LocalStore, PeerRecord, RoomRecord, StateFile};
+pub use store::{LocalStore, PairingWait, PeerRecord, RoomRecord, StateFile};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {

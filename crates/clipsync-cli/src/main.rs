@@ -1,5 +1,6 @@
 mod cli;
 mod output;
+mod pairing_bg;
 
 use std::io::{self, Write};
 
@@ -55,14 +56,29 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
             }
             Ok(())
         }
-        Commands::Room(RoomCmd::Create { ttl, no_auto_sync }) => {
+        Commands::Room(RoomCmd::Create {
+            ttl,
+            no_auto_sync,
+            background,
+            background_worker,
+        }) => {
             let app = App::open()?;
             let _ = app.identity()?;
+            let ttl_raw = ttl.clone();
             let dur = ttl
                 .map(|s| humantime::parse_duration(&s))
                 .transpose()
                 .map_err(|e| CoreError::Message(e.to_string()))?;
             let json = cli.json;
+            if background && !background_worker {
+                return pairing_bg::spawn_background_create(
+                    &app,
+                    ttl_raw.as_deref(),
+                    no_auto_sync,
+                    json,
+                )
+                .await;
+            }
             let offer = app
                 .room_create(dur, no_auto_sync, json, |offer| {
                     if json {

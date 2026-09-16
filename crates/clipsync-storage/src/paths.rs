@@ -89,6 +89,10 @@ impl AppPaths {
     pub fn log_file(&self) -> PathBuf {
         self.log_dir.join("clipsync.log")
     }
+
+    pub fn pairing_file(&self) -> PathBuf {
+        self.runtime_dir.join("pairing.json")
+    }
 }
 
 fn set_private_dir(path: &Path) -> std::io::Result<()> {

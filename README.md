@@ -29,7 +29,8 @@ Terminal A:
 
 ```bash
 clipsync init
-clipsync room create    # prints a 6-digit code and waits
+clipsync room create                 # prints a 6-digit code and waits
+clipsync room create --background    # print the code and wait in the background
 ```
 
 Terminal B (another machine or another `CLIPSYNC_HOME`):
@@ -56,7 +57,7 @@ clipsync push --file ./report.pdf --file ./diagram.png
 
 ```
 clipsync init
-clipsync room create [--ttl 10m] [--no-auto-sync]
+clipsync room create [--ttl 10m] [--no-auto-sync] [--background]
 clipsync room join <CODE> [--no-auto-sync]
 clipsync room leave --yes
 clipsync room list
