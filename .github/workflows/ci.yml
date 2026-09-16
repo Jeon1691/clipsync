@@ -33,6 +33,16 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked
       - name: Test
         run: cargo test --workspace --locked
+      - name: CLI smoke
+        run: |
+          cargo build -p clipsync-cli -p clipsync-relay --locked
+          ./target/debug/clipsync --version
+          ./target/debug/clipsync --help | grep -q "Usage: clipsync"
+          ./target/debug/clipsync-relay --help
+      - name: Scripts compile
+        run: |
+          python3 -m py_compile scripts/e2e-brew.py
+          bash -n scripts/update-homebrew-formula.sh
 
   e2e-local-relay:
     name: e2e (in-process relay)
@@ -42,5 +52,5 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Pairing and transfer e2e
+      - name: Pairing, text, file, and image e2e
         run: cargo test -p clipsync-relay --test e2e --locked -- --nocapture

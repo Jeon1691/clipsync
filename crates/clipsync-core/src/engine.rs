@@ -655,7 +655,7 @@ pub async fn oneshot_push(store: &LocalStore, item: ClipboardItem) -> Result<(),
     let room = store.current_room()?;
     let epoch_key = store.load_epoch_key(&room.room_id)?;
     let ws = join_ws(&cfg.relay_url, "/v1/ws");
-    let conn = RelayConnection::connect(&ws).await?;
+    let mut conn = RelayConnection::connect(&ws).await?;
     conn.send_control(ControlMessage::Hello {
         protocol_version: PROTOCOL_VERSION,
         device_id: identity.device_id.clone(),
@@ -667,10 +667,31 @@ pub async fn oneshot_push(store: &LocalStore, item: ClipboardItem) -> Result<(),
         pairing_session_id: None,
     })
     .await?;
+    wait_hello_ok(&mut conn).await?;
     send_item(&conn, &identity, &room, &epoch_key, 1, &item).await?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
     conn.close().await;
     Ok(())
+}
+
+async fn wait_hello_ok(conn: &mut RelayConnection) -> Result<(), CoreError> {
+    let deadline = tokio::time::sleep(Duration::from_secs(10));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => return Err(CoreError::Timeout),
+            msg = conn.incoming.recv() => {
+                match msg {
+                    Some(Incoming::Control(ControlMessage::HelloOk { .. })) => return Ok(()),
+                    Some(Incoming::Control(ControlMessage::Error { code, message })) => {
+                        return Err(CoreError::Message(format!("relay {code}: {message}")));
+                    }
+                    Some(_) => continue,
+                    None => return Err(CoreError::Message("relay closed before hello".into())),
+                }
+            }
+        }
+    }
 }
 
 pub async fn oneshot_pull(
@@ -770,10 +791,25 @@ async fn finish_pull(
             let _ = clip.write(&item).await;
         }
     }
-    if let (Some(dir), ClipboardItem::Files { files }) = (output, &item) {
+    if let Some(dir) = output {
         tokio::fs::create_dir_all(&dir).await?;
-        for f in files {
-            tokio::fs::write(dir.join(&f.name), &f.bytes).await?;
+        match &item {
+            ClipboardItem::Files { files } => {
+                for f in files {
+                    tokio::fs::write(dir.join(&f.name), &f.bytes).await?;
+                }
+            }
+            ClipboardItem::Image { mime, bytes, .. } => {
+                let name = match mime {
+                    ImageMime::Png => "clipboard.png",
+                    ImageMime::Jpeg => "clipboard.jpg",
+                    ImageMime::Webp => "clipboard.webp",
+                };
+                tokio::fs::write(dir.join(name), bytes).await?;
+            }
+            ClipboardItem::Text { text } => {
+                tokio::fs::write(dir.join("clipboard.txt"), text.as_bytes()).await?;
+            }
         }
     }
     Ok(PullResult {

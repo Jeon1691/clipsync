@@ -132,6 +132,9 @@ def main() -> int:
     if RELAY not in json.dumps(cfg):
         raise Fail(f"relay_url not set: {cfg}")
     run(a, "config", "set", "notify.enabled", "false")
+    notify = run_json(a, "config", "get", "notify.enabled")
+    if "false" not in json.dumps(notify):
+        raise Fail(f"notify.enabled not persisted: {notify}")
 
     log("== wrong code ==")
     rejected = False
@@ -224,16 +227,70 @@ def main() -> int:
             raise Fail("file pull timed out")
         log(f"file pull out={pout!r} err={perr!r}")
         found = list(outdir.rglob("report.txt")) if outdir.exists() else []
-        if found:
-            text = found[0].read_text()
-            if "file-payload-ok" not in text:
-                raise Fail(f"file contents wrong: {text!r}")
-            log(f"file saved at {found[0]}")
-        else:
-            log("WARN: file was not written to --output (text queue only / online stream)")
+        if not found:
+            raise Fail(f"file was not written to --output. out={pout!r} err={perr!r}")
+        text = found[0].read_text()
+        if "file-payload-ok" not in text:
+            raise Fail(f"file contents wrong: {text!r}")
+        log(f"file saved at {found[0]}")
     finally:
         if pull_proc.poll() is None:
             pull_proc.kill()
+
+    log("== image push while peer waits ==")
+    png = bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+        "0000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082"
+    )
+    img_proc = subprocess.Popen(
+        [CS, "--json", "pull", "--wait"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env_b,
+        text=True,
+    )
+    time.sleep(1.0)
+    try:
+        run(a, "push", "--type", "image", input_bytes=png, timeout=TIMEOUT)
+        try:
+            iout, ierr = img_proc.communicate(timeout=TIMEOUT)
+        except subprocess.TimeoutExpired:
+            img_proc.kill()
+            raise Fail("image pull timed out")
+        log(f"image pull out={iout!r} err={ierr!r}")
+        blob = (iout or "").lower()
+        if "image" not in blob:
+            raise Fail(f"image pull mismatch: out={iout!r} err={ierr!r}")
+    finally:
+        if img_proc.poll() is None:
+            img_proc.kill()
+
+    log("== logs / watch smoke ==")
+    logs_out = run(a, "logs")
+    log(f"logs bytes={len(logs_out)}")
+    env_watch = os.environ.copy()
+    env_watch["CLIPSYNC_HOME"] = str(b)
+    env_watch["CLIPSYNC_RELAY_URL"] = RELAY
+    env_watch["CLIPSYNC_NO_DAEMON"] = "1"
+    watch = subprocess.Popen(
+        [CS, "watch"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env_watch,
+        text=True,
+    )
+    try:
+        time.sleep(2.0)
+        if watch.poll() is not None:
+            wout, werr = watch.communicate()
+            raise Fail(f"watch exited early rc={watch.returncode} out={wout!r} err={werr!r}")
+        log("watch stayed up")
+    finally:
+        watch.send_signal(signal.SIGTERM)
+        try:
+            watch.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            watch.kill()
 
     log("== daemon run / status IPC ==")
     env_a = os.environ.copy()
@@ -265,8 +322,17 @@ def main() -> int:
                 time.sleep(0.3)
         if not ipc_ok:
             raise Fail(f"daemon IPC status not ready: {last}")
+        data = json.loads(last.strip().splitlines()[-1]) if last else {}
+        if data.get("connected") is not True:
+            raise Fail(f"daemon never connected to relay: {data}")
         run(a, "sync", "pause")
+        paused = run_json(a, "status", timeout=5)
+        if paused.get("paused") is not True:
+            raise Fail(f"sync pause did not stick: {paused}")
         run(a, "sync", "resume")
+        resumed = run_json(a, "status", timeout=5)
+        if resumed.get("paused") is True:
+            raise Fail(f"sync resume did not stick: {resumed}")
     finally:
         daemon.send_signal(signal.SIGTERM)
         try:

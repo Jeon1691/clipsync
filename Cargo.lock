@@ -458,7 +458,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -479,7 +479,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-clipboard"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arboard",
  "async-trait",
@@ -498,7 +498,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -530,7 +530,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-crypto"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-daemon"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "clipsync-protocol",
@@ -567,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-protocol"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64",
  "bytes",
@@ -580,7 +580,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-relay"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -617,7 +617,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-storage"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "clipsync-crypto",
@@ -635,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-transfer"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "blake3",
  "clipsync-crypto",
@@ -648,7 +648,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-transport"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "clipsync-protocol",
  "futures-util",
