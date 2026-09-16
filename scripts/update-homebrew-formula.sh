@@ -100,7 +100,11 @@ PY
 
 work="$(mktemp -d)"
 trap 'rm -rf "$tmp" "$work"' EXIT
-gh repo clone "${OWNER}/${TAP_REPO}" "$work" -- --depth 1
+if [[ -n "${GIT_SSH_COMMAND:-}" ]]; then
+  git clone --depth 1 "git@github.com:${OWNER}/${TAP_REPO}.git" "$work"
+else
+  gh repo clone "${OWNER}/${TAP_REPO}" "$work" -- --depth 1
+fi
 mkdir -p "$work/Formula"
 cp /tmp/clipsync.rb "$work/Formula/clipsync.rb"
 git -C "$work" add Formula/clipsync.rb

@@ -703,6 +703,9 @@ pub async fn oneshot_pull(
     };
     let timeout = tokio::time::sleep(deadline);
     tokio::pin!(timeout);
+    let staging = StagingArea::new(store.paths.inbox_dir.clone())?;
+    let mut incoming: HashMap<String, IncomingTransfer> = HashMap::new();
+    let mut manifests: HashMap<String, ManifestPlain> = HashMap::new();
     loop {
         tokio::select! {
             _ = &mut timeout => return Err(CoreError::Timeout),
@@ -721,6 +724,34 @@ pub async fn oneshot_pull(
                     Incoming::Control(ControlMessage::TextEnvelope { routing, nonce, ciphertext }) => {
                         let item = open_text(&epoch_key, &routing, &nonce, &ciphertext)?;
                         return finish_pull(item, copy, output).await;
+                    }
+                    Incoming::Control(ControlMessage::Manifest { routing, nonce, ciphertext, .. }) => {
+                        if let Ok(manifest) = open_manifest(&epoch_key, &routing, &nonce, &ciphertext) {
+                            let id = routing.transfer_id.clone();
+                            let t = staging.begin(&id, manifest.chunk_count);
+                            incoming.insert(id.0.clone(), t);
+                            manifests.insert(id.0, manifest);
+                        }
+                    }
+                    Incoming::Binary(buf) => {
+                        if let Ok((tid, idx, count, pt)) = decrypt_chunk(&epoch_key, &buf) {
+                            if let Some(t) = incoming.get_mut(tid.as_str()) {
+                                if t.push(idx, count, pt).is_err() {
+                                    t.fail();
+                                    continue;
+                                }
+                                if t.is_complete() {
+                                    if let Some(man) = manifests.remove(tid.as_str()) {
+                                        if let Some(xfer) = incoming.remove(tid.as_str()) {
+                                            if let Ok(payload) = xfer.assemble(&man.content_hash) {
+                                                let item = item_from_payload(&man, payload, &staging, &tid).await?;
+                                                return finish_pull(item, copy, output).await;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     _ => {}
                 }

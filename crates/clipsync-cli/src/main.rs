@@ -1,6 +1,8 @@
 mod cli;
 mod output;
 
+use std::io::{self, Write};
+
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
@@ -79,6 +81,7 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
                         println!("expires: {}", offer.expires_at);
                         println!("waiting for the other device to join…");
                     }
+                    let _ = io::stdout().flush();
                 })
                 .await?;
             emit(

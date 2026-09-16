@@ -12,9 +12,16 @@ Binary name: `clipsync`. Relay binary: `clipsync-relay`.
 brew install jeon1691/tap/clipsync
 ```
 
-The tap is https://github.com/Jeon1691/homebrew-tap. Tagging `vX.Y.Z` on
-https://github.com/Jeon1691/clipsync builds binaries and, when the
-`HOMEBREW_TAP_TOKEN` secret is set, updates `Formula/clipsync.rb`.
+The tap is https://github.com/Jeon1691/homebrew-tap.
+
+CI (`ci.yml`) runs format, clippy, unit tests, and an in-process pairing e2e
+on Ubuntu and macOS.
+
+CD (`release.yml`) on `vX.Y.Z` tags:
+
+1. Builds macOS arm64/x86_64 and Linux x86_64 (Linux arm is best-effort)
+2. Publishes GitHub Release archives + SHA-256
+3. Updates `jeon1691/tap` when `TAP_DEPLOY_KEY` is configured
 
 ## P1
 
