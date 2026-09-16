@@ -1,0 +1,17 @@
+[package]
+name = "clipsync-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "ClipSync launchd/systemd service lifecycle and IPC"
+
+[dependencies]
+chrono.workspace = true
+clipsync-protocol.workspace = true
+clipsync-storage.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true

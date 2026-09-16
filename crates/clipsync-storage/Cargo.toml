@@ -1,0 +1,21 @@
+[package]
+name = "clipsync-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "ClipSync local config, credentials, and secret storage"
+
+[dependencies]
+chrono.workspace = true
+clipsync-crypto.workspace = true
+clipsync-protocol.workspace = true
+directories.workspace = true
+hex.workspace = true
+keyring = { workspace = true, features = ["apple-native", "sync-secret-service", "crypto-rust"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tracing.workspace = true
+zeroize.workspace = true

@@ -1,0 +1,10 @@
+services:
+  relay:
+    build: .
+    ports:
+      - "7600:7600"
+    environment:
+      CLIPSYNC_RELAY_BIND: 0.0.0.0:7600
+      CLIPSYNC_RELAY_PUBLIC_URL: http://127.0.0.1:7600
+      CLIPSYNC_RELAY_TOKEN_SECRET: change-me-in-production
+    restart: unless-stopped

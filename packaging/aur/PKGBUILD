@@ -1,0 +1,19 @@
+# Maintainer: ClipSync contributors
+pkgname=clipsync-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="End-to-end encrypted multi-device clipboard sync"
+arch=('x86_64' 'aarch64')
+url="https://github.com/develicit/clipsync"
+license=('MIT' 'Apache')
+provides=('clipsync')
+conflicts=('clipsync')
+source_x86_64=("clipsync-${pkgver}-x86_64.tar.gz::https://github.com/develicit/clipsync/releases/download/v${pkgver}/clipsync-x86_64-unknown-linux-gnu.tar.gz")
+source_aarch64=("clipsync-${pkgver}-aarch64.tar.gz::https://github.com/develicit/clipsync/releases/download/v${pkgver}/clipsync-aarch64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('REPLACE_ME')
+sha256sums_aarch64=('REPLACE_ME')
+
+package() {
+  install -Dm755 clipsync "$pkgdir/usr/bin/clipsync"
+  install -Dm755 clipsync-relay "$pkgdir/usr/bin/clipsync-relay"
+}

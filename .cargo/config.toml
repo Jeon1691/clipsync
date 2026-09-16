@@ -1,0 +1,7 @@
+[alias]
+xtask = "run --package clipsync-cli --"
+relay = "run --package clipsync-relay --"
+lint = "clippy --workspace --all-targets -- -D warnings"
+
+[env]
+RUST_BACKTRACE = "1"

@@ -1,0 +1,16 @@
+/target
+**/*.rs.bk
+.idea/
+.vscode/
+.DS_Store
+*.swp
+.env
+.env.*
+!/.env.example
+/dist
+/tmp
+coverage/
+*.profraw
+.omc/
+clipsync-*.tar.gz
+clipsync-*.zip

@@ -1,0 +1,8 @@
+# Insert this hostname *before* the `*.develicit.dev` catch-all in
+# /etc/cloudflared/config.yml on the Proxmox host.
+#
+#   hostname: clipsync.develicit.dev
+#   service: http://127.0.0.1:7600
+#   originRequest:
+#     connectTimeout: 30s
+#     keepAliveTimeout: 90s

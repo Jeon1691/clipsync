@@ -1,0 +1,86 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/clipsync-protocol",
+    "crates/clipsync-crypto",
+    "crates/clipsync-storage",
+    "crates/clipsync-clipboard",
+    "crates/clipsync-transport",
+    "crates/clipsync-transfer",
+    "crates/clipsync-core",
+    "crates/clipsync-daemon",
+    "crates/clipsync-cli",
+    "crates/clipsync-relay",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+authors = ["ClipSync contributors"]
+repository = "https://github.com/Jeon1691/clipsync"
+homepage = "https://github.com/Jeon1691/clipsync"
+description = "End-to-end encrypted multi-device clipboard sync CLI"
+
+[workspace.dependencies]
+aes-gcm = "0.10"
+anyhow = "1"
+arboard = { version = "3.6", features = ["image-data", "wayland-data-control"] }
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws", "macros", "json"] }
+base64 = "0.22"
+blake3 = "1.8"
+bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+dashmap = "6"
+directories = "6"
+futures-util = "0.3"
+hex = "0.4"
+hkdf = "0.12"
+hmac = "0.12"
+hostname = "0.4"
+humantime = "2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
+infer = "0.19"
+ipnet = "2"
+keyring = { version = "3.6", default-features = false }
+parking_lot = "0.12"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+snow = "0.10"
+spake2 = "0.4"
+subtle = "2"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1.47", features = ["full"] }
+tokio-tungstenite = { version = "0.26", features = ["connect", "rustls-tls-webpki-roots"] }
+toml = "0.8"
+tower-http = { version = "0.6", features = ["trace", "limit", "timeout"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+ulid = { version = "1", features = ["serde"] }
+url = "2"
+which = "7"
+x25519-dalek = { version = "2", features = ["static_secrets", "getrandom", "zeroize"] }
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+clipsync-protocol = { path = "crates/clipsync-protocol" }
+clipsync-crypto = { path = "crates/clipsync-crypto" }
+clipsync-storage = { path = "crates/clipsync-storage" }
+clipsync-clipboard = { path = "crates/clipsync-clipboard" }
+clipsync-transport = { path = "crates/clipsync-transport" }
+clipsync-transfer = { path = "crates/clipsync-transfer" }
+clipsync-core = { path = "crates/clipsync-core" }
+clipsync-daemon = { path = "crates/clipsync-daemon" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

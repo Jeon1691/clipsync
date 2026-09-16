@@ -1,0 +1,7 @@
+target
+.git
+.omc
+tmp
+**/.env
+**/*.secret
+deploy/proxmox/.env

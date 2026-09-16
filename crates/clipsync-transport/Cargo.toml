@@ -1,0 +1,17 @@
+[package]
+name = "clipsync-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "ClipSync WebSocket client, reconnect, and heartbeat"
+
+[dependencies]
+clipsync-protocol.workspace = true
+futures-util.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+url.workspace = true
