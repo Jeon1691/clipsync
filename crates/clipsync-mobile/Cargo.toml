@@ -1,0 +1,29 @@
+[package]
+name = "clipsync-mobile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "UniFFI bindings for native iOS and Android ClipSync apps"
+
+[lib]
+name = "clipsync_mobile"
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+async-trait.workspace = true
+clipsync-clipboard.workspace = true
+clipsync-core.workspace = true
+clipsync-protocol.workspace = true
+clipsync-storage.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uniffi = { workspace = true, features = ["cli"] }
+
+[build-dependencies]
+uniffi = { workspace = true, features = ["build"] }

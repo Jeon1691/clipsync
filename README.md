@@ -44,6 +44,19 @@ Download `clipsync-x86_64-pc-windows-msvc.zip` from
 clipsync room create
 ```
 
+### iOS and Android (native)
+
+SwiftUI and Jetpack Compose apps live in `apps/ios` and `apps/android`. They
+use the same pairing protocol as the CLI via UniFFI (`crates/clipsync-mobile`).
+
+```bash
+./scripts/build-mobile.sh
+open apps/ios/ClipSync.xcodeproj   # Xcode
+# Android Studio → open apps/android
+```
+
+See [docs/mobile.md](docs/mobile.md).
+
 ### From source
 
 ```bash
@@ -199,6 +212,7 @@ See [docs/self-hosting.md](docs/self-hosting.md).
 ```
 crates/
   clipsync-cli          # `clipsync` binary
+  clipsync-mobile       # UniFFI for iOS / Android
   clipsync-relay        # `clipsync-relay` binary
   clipsync-core         # pairing + sync engine
   clipsync-crypto       # SPAKE2, Noise, AEAD

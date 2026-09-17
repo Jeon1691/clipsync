@@ -11,7 +11,7 @@ mod macos;
 
 use async_trait::async_trait;
 
-pub use detect::{collect_doctor_tools, detect_adapter, AdapterInfo, Capabilities};
+pub use detect::{collect_doctor_tools, detect_adapter, hash_item, AdapterInfo, Capabilities};
 pub use item::{ClipboardItem, FileRef, ImageMime};
 pub use mock::MockClipboard;
 pub use watch::wait_for_change;
@@ -60,6 +60,10 @@ impl SystemClipboard {
                 fallback_reason: None,
             },
         }
+    }
+
+    pub fn from_backend(inner: Box<dyn ClipboardBackend>, info: AdapterInfo) -> Self {
+        Self { inner, info }
     }
 
     pub fn info(&self) -> &AdapterInfo {

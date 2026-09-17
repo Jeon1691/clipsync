@@ -11,6 +11,7 @@ members = [
     "crates/clipsync-daemon",
     "crates/clipsync-cli",
     "crates/clipsync-relay",
+    "crates/clipsync-mobile",
 ]
 
 [workspace.package]
@@ -78,6 +79,7 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 ulid = { version = "1", features = ["serde"] }
+uniffi = "0.29"
 url = "2"
 which = "7"
 x25519-dalek = { version = "2", features = ["static_secrets", "getrandom", "zeroize"] }
@@ -91,6 +93,7 @@ clipsync-transport = { path = "crates/clipsync-transport" }
 clipsync-transfer = { path = "crates/clipsync-transfer" }
 clipsync-core = { path = "crates/clipsync-core" }
 clipsync-daemon = { path = "crates/clipsync-daemon" }
+clipsync-mobile = { path = "crates/clipsync-mobile" }
 
 [profile.release]
 lto = "thin"

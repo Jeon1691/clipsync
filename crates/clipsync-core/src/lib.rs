@@ -29,6 +29,7 @@ use tracing::info;
 
 pub use clipsync_storage::AppPaths;
 
+#[derive(Clone)]
 pub struct App {
     pub store: LocalStore,
 }
@@ -402,18 +403,40 @@ async fn check_relay(url: &str) -> serde_json::Value {
 }
 
 pub fn current_os() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "macos"
-    } else if cfg!(target_os = "linux") {
-        "linux"
-    } else if cfg!(target_os = "windows") {
-        "windows"
-    } else {
-        "unknown"
-    }
+    static OS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    OS.get_or_init(|| {
+        if let Ok(os) = std::env::var("CLIPSYNC_OS") {
+            let os = os.to_ascii_lowercase();
+            if matches!(
+                os.as_str(),
+                "ios" | "android" | "macos" | "linux" | "windows"
+            ) {
+                return os;
+            }
+        }
+        if cfg!(target_os = "macos") {
+            "macos".into()
+        } else if cfg!(target_os = "linux") {
+            "linux".into()
+        } else if cfg!(target_os = "windows") {
+            "windows".into()
+        } else if cfg!(target_os = "ios") {
+            "ios".into()
+        } else if cfg!(target_os = "android") {
+            "android".into()
+        } else {
+            "unknown".into()
+        }
+    })
+    .as_str()
 }
 
 pub fn device_name() -> String {
+    if let Ok(name) = std::env::var("CLIPSYNC_DEVICE_NAME") {
+        if !name.trim().is_empty() {
+            return name;
+        }
+    }
     hostname::get()
         .ok()
         .and_then(|h| h.into_string().ok())
