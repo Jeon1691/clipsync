@@ -302,7 +302,8 @@ async fn run_session(
                         }
                         seq += 1;
                         if let Err(e) = send_item(&conn, &identity, &room, &epoch_key, seq, &item).await {
-                            warn!(error = %e, "send failed");
+                            warn!(error = %e, "send failed; reconnecting");
+                            return Err(e);
                         }
                     }
                     Ok((sig, None)) => last_sig = sig,

@@ -2,7 +2,9 @@
 
 mod tls;
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
+
+use tokio::time::MissedTickBehavior;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
@@ -72,14 +74,30 @@ impl RelayConnection {
 
         tokio::spawn(async move {
             let mut beat = tokio::time::interval(Duration::from_secs(HEARTBEAT_SECS));
+            beat.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            let mut watchdog = tokio::time::interval(Duration::from_secs(1));
+            watchdog.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            let mut last_rx = SystemTime::now();
+            let mut last_watchdog = SystemTime::now();
             loop {
                 tokio::select! {
+                    _ = watchdog.tick() => {
+                        let now = SystemTime::now();
+                        if should_force_reconnect(last_rx, last_watchdog, now) {
+                            warn!("websocket stale or machine woke from sleep; reconnecting");
+                            break;
+                        }
+                        last_watchdog = now;
+                    }
                     _ = beat.tick() => {
                         let ping = ControlMessage::Ping { ts: chrono_now() };
                         if let Ok(s) = ping.encode() {
                             if sink.send(Message::Text(s.into())).await.is_err() {
                                 break;
                             }
+                        }
+                        if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
+                            break;
                         }
                     }
                     msg = out_rx.recv() => {
@@ -108,6 +126,7 @@ impl RelayConnection {
                     next = stream.next() => {
                         match next {
                             Some(Ok(Message::Text(t))) => {
+                                last_rx = SystemTime::now();
                                 match ControlMessage::decode(&t) {
                                     Ok(ControlMessage::Pong { .. }) => {
                                         let _ = in_tx.send(Incoming::Pong).await;
@@ -127,6 +146,7 @@ impl RelayConnection {
                                 }
                             }
                             Some(Ok(Message::Binary(b))) => {
+                                last_rx = SystemTime::now();
                                 if b.starts_with(CHUNK_MAGIC) || !b.is_empty() {
                                     if in_tx.send(Incoming::Binary(b.to_vec())).await.is_err() {
                                         break;
@@ -134,7 +154,11 @@ impl RelayConnection {
                                 }
                             }
                             Some(Ok(Message::Ping(p))) => {
+                                last_rx = SystemTime::now();
                                 let _ = sink.send(Message::Pong(p)).await;
+                            }
+                            Some(Ok(Message::Pong(_))) => {
+                                last_rx = SystemTime::now();
                             }
                             Some(Ok(Message::Close(_))) | None => break,
                             Some(Ok(_)) => {}
@@ -201,8 +225,62 @@ pub fn join_ws(base: &str, path: &str) -> String {
     }
 }
 
+/// After sleep/wake the wall clock jumps; treat that as a dead socket.
+/// Also drop sockets that have not received anything for two heartbeats.
+pub fn should_force_reconnect(
+    last_rx: SystemTime,
+    last_watchdog: SystemTime,
+    now: SystemTime,
+) -> bool {
+    const WAKE_JUMP: Duration = Duration::from_secs(2);
+    let stale = Duration::from_secs(HEARTBEAT_SECS.saturating_mul(2).saturating_add(5));
+    if now.duration_since(last_watchdog).unwrap_or_default() > WAKE_JUMP {
+        return true;
+    }
+    now.duration_since(last_rx).unwrap_or_default() > stale
+}
+
 pub fn backoff_delay(attempt: u32) -> Duration {
-    let exp = (1u64 << attempt.min(6)).min(30);
-    let jitter = rand::random::<u64>() % 400;
-    Duration::from_millis(exp * 1000 + jitter)
+    let base_ms = match attempt {
+        0 | 1 => 150,
+        2 => 400,
+        3 => 800,
+        4 => 1_500,
+        n => (1u64 << n.min(5)).min(15) * 1000,
+    };
+    let jitter = rand::random::<u64>() % 250;
+    Duration::from_millis(base_ms + jitter)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clock_jump_after_sleep_forces_reconnect() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let later = t0 + Duration::from_secs(30);
+        assert!(should_force_reconnect(t0, t0, later));
+    }
+
+    #[test]
+    fn fresh_traffic_does_not_reconnect() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let t1 = t0 + Duration::from_millis(900);
+        assert!(!should_force_reconnect(t0, t0, t1));
+    }
+
+    #[test]
+    fn stale_socket_forces_reconnect() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let last_wd = t0 + Duration::from_secs(50);
+        let now = last_wd + Duration::from_millis(500);
+        assert!(should_force_reconnect(t0, last_wd, now));
+    }
+
+    #[test]
+    fn first_backoff_is_subsecond() {
+        let d = backoff_delay(1);
+        assert!(d < Duration::from_secs(1));
+    }
 }
