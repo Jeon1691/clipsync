@@ -54,7 +54,7 @@ formula = f'''class Clipsync < Formula
   desc "End-to-end encrypted multi-device clipboard sync"
   homepage "https://github.com/{src_repo}"
   version "{version}"
-  license any_of: ["MIT", "Apache-2.0"]
+  license "MIT"
 
   livecheck do
     url :homepage

@@ -29,7 +29,7 @@ stage="clipsync-${target}"
 rm -rf "${out}/${stage}"
 mkdir -p "${out}/${stage}"
 cp "$bin" "${out}/${stage}/clipsync"
-cp README.md LICENSE-MIT LICENSE-APACHE "${out}/${stage}/"
+cp README.md LICENSE-MIT "${out}/${stage}/"
 tar -C "$out" -czf "${out}/${stage}.tar.gz" "$stage"
 (cd "$out" && shasum -a 256 "${stage}.tar.gz" | tee "${stage}.sha256")
 echo "wrote ${out}/${stage}.tar.gz"

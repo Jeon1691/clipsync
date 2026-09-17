@@ -2,7 +2,7 @@ class Clipsync < Formula
   desc "End-to-end encrypted multi-device clipboard sync"
   homepage "https://github.com/Jeon1691/clipsync"
   version "0.1.0"
-  license any_of: ["MIT", "Apache-2.0"]
+  license "MIT"
 
   livecheck do
     url :homepage

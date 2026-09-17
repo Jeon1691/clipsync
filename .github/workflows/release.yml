@@ -58,7 +58,7 @@ jobs:
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             bin="target/${target}/release/clipsync.exe"
             cp "$bin" "dist/${stage}/clipsync.exe"
-            cp README.md LICENSE-MIT LICENSE-APACHE "dist/${stage}/"
+            cp README.md LICENSE-MIT "dist/${stage}/"
             (cd dist && powershell -NoProfile -Command "Compress-Archive -Path '${stage}\\*' -DestinationPath '${stage}.zip'")
             (cd dist && sha256sum "${stage}.zip" > "${stage}.sha256" || shasum -a 256 "${stage}.zip" > "${stage}.sha256")
           else
@@ -71,7 +71,7 @@ jobs:
               strip "$bin" || true
             fi
             cp "$bin" "dist/${stage}/clipsync"
-            cp README.md LICENSE-MIT LICENSE-APACHE "dist/${stage}/"
+            cp README.md LICENSE-MIT "dist/${stage}/"
             tar -C dist -czf "dist/${stage}.tar.gz" "$stage"
             (cd dist && shasum -a 256 "${stage}.tar.gz" > "${stage}.sha256")
           fi
