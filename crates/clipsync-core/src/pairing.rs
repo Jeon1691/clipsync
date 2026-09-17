@@ -153,6 +153,11 @@ pub async fn join_room(
         })?;
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
+        if body.contains("code_invalid") || body.contains("code_expired") {
+            return Err(CoreError::Pairing(
+                "unknown or expired pairing code; on the other device run `clipsync room create` again".into(),
+            ));
+        }
         return Err(CoreError::Pairing(format!("join failed: {body}")));
     }
     let joined: JoinPairingResponse = resp.json().await?;

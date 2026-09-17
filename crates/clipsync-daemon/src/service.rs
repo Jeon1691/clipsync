@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use clipsync_storage::AppPaths;
 
@@ -47,10 +47,9 @@ pub fn stop_and_uninstall() -> Result<()> {
     {
         let path = launch_agent_path();
         if path.exists() {
-            let _ = Command::new("launchctl")
-                .args(["unload", "-w"])
-                .arg(&path)
-                .status();
+            let plist = path.display().to_string();
+            launchctl_quiet(&["bootout", &launch_label()]);
+            launchctl_quiet(&["unload", "-w", &plist]);
             let _ = std::fs::remove_file(path);
         }
         return Ok(());
@@ -131,18 +130,50 @@ fn install_launchd(exe: &PathBuf, paths: &AppPaths) -> Result<()> {
         xml_escape(&log.display().to_string()),
     );
     std::fs::write(&plist_path, plist)?;
-    let _ = Command::new("launchctl")
-        .args(["unload", "-w"])
-        .arg(&plist_path)
-        .status();
-    let status = Command::new("launchctl")
-        .args(["load", "-w"])
-        .arg(&plist_path)
-        .status()?;
-    if !status.success() {
+    let label = launch_label();
+    let domain = gui_domain();
+    let plist_file = plist_path.display().to_string();
+    launchctl_quiet(&["bootout", &label]);
+    launchctl_quiet(&["unload", "-w", &plist_file]);
+    let loaded = launchctl_quiet(&["bootstrap", &domain, &plist_file])
+        || launchctl_quiet(&["load", "-w", &plist_file]);
+    if loaded {
+        launchctl_quiet(&["kickstart", "-k", &label]);
+    } else {
         spawn_detached(exe, paths)?;
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn gui_domain() -> String {
+    format!("gui/{}", user_id())
+}
+
+#[cfg(target_os = "macos")]
+fn launch_label() -> String {
+    format!("{}/dev.clipsync.daemon", gui_domain())
+}
+
+#[cfg(target_os = "macos")]
+fn user_id() -> u32 {
+    extern "C" {
+        fn getuid() -> u32;
+    }
+    unsafe { getuid() }
+}
+
+/// Run launchctl with stdio discarded. Missing/unloaded agents are not errors.
+#[cfg(target_os = "macos")]
+fn launchctl_quiet(args: &[&str]) -> bool {
+    Command::new("launchctl")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 #[cfg(target_os = "linux")]
