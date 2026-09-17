@@ -46,14 +46,11 @@ clipsync room create
 
 ### iOS and Android (native)
 
-SwiftUI and Jetpack Compose apps live in `apps/ios` and `apps/android`. They
-use the same pairing protocol as the CLI via UniFFI (`crates/clipsync-mobile`).
+The mobile apps are separate repositories. They use the same pairing protocol
+as the CLI via UniFFI (`crates/clipsync-mobile`).
 
-```bash
-./scripts/build-mobile.sh
-open apps/ios/ClipSync.xcodeproj   # Xcode
-# Android Studio → open apps/android
-```
+- iOS: [Jeon1691/clipsync-ios](https://github.com/Jeon1691/clipsync-ios)
+- Android: [Jeon1691/clipsync-android](https://github.com/Jeon1691/clipsync-android)
 
 See [docs/mobile.md](docs/mobile.md).
 

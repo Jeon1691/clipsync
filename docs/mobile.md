@@ -1,37 +1,40 @@
 # Native iOS and Android apps
 
-ClipSync’s mobile apps are native (SwiftUI on iOS, Jetpack Compose on Android).
-They share the desktop E2EE protocol through a Rust UniFFI crate
-(`crates/clipsync-mobile`): SPAKE2 pairing, AES-256-GCM, and the same WebSocket
-relay at `https://clipsync.develicit.dev`.
+The mobile clients are **separate repositories**. They share this repo’s E2EE
+protocol through `crates/clipsync-mobile` (UniFFI).
+
+| App | Repository |
+| --- | --- |
+| iOS (SwiftUI) | [Jeon1691/clipsync-ios](https://github.com/Jeon1691/clipsync-ios) |
+| Android (Compose) | [Jeon1691/clipsync-android](https://github.com/Jeon1691/clipsync-android) |
 
 Clipboard access stays in the OS layer:
 
 - **iOS** — `UIPasteboard` (text and images) while the app is in the foreground
-- **Android** — `ClipboardManager` plus a sticky foreground service that comes
-  back after reboot (`BootReceiver`)
+- **Android** — `ClipboardManager` plus a sticky foreground service after reboot
 
-## Build the Rust library
+## Develop against this core
+
+Clone the apps next to this repo:
 
 ```bash
-# Swift + Kotlin bindings (host library)
-cargo build -p clipsync-mobile
-cargo run -p clipsync-mobile --bin uniffi-bindgen -- generate \
-  --library target/debug/libclipsync_mobile.dylib \
-  --language swift --out-dir apps/ios/ClipSync/Generated
-cargo run -p clipsync-mobile --bin uniffi-bindgen -- generate \
-  --library target/debug/libclipsync_mobile.dylib \
-  --language kotlin --out-dir apps/android/app/src/main/java
-
-# Device libraries
-./scripts/build-mobile.sh ios      # needs Xcode / iOS targets
-./scripts/build-mobile.sh android  # needs cargo-ndk and the Android NDK
+git clone https://github.com/Jeon1691/clipsync.git
+git clone https://github.com/Jeon1691/clipsync-ios.git
+git clone https://github.com/Jeon1691/clipsync-android.git
 ```
 
-## Open the apps
+From each app:
 
-- iOS: `open apps/ios/ClipSync.xcodeproj` then select your team and run on a device.
-- Android: open `apps/android` in Android Studio. Place
-  `libclipsync_mobile.so` under `app/src/main/jniLibs/arm64-v8a/`.
+```bash
+# iOS
+cd clipsync-ios && ./scripts/sync-core.sh
+open ClipSync.xcodeproj
+
+# Android (needs cargo-ndk + Android NDK)
+cd clipsync-android && ./scripts/sync-core.sh
+# then open the folder in Android Studio
+```
+
+`CLIPSYNC_CORE` can point at a non-sibling checkout of this repository.
 
 Pair with the desktop CLI as usual (`clipsync room create` / `room join`).
