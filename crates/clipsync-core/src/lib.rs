@@ -390,7 +390,7 @@ async fn check_relay(url: &str) -> serde_json::Value {
     let health = format!("{}/healthz", url.trim_end_matches('/'));
     match http_client().get(&health).send().await {
         Ok(r) => serde_json::json!({"ok": r.status().is_success(), "status": r.status().as_u16()}),
-        Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
+        Err(e) => serde_json::json!({"ok": false, "error": crate::error::format_error(&e)}),
     }
 }
 

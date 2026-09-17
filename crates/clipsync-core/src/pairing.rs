@@ -73,7 +73,12 @@ pub async fn begin_create_room(
         .json(&req)
         .send()
         .await
-        .map_err(|e| CoreError::Message(format!("relay create {url}: {e}")))?;
+        .map_err(|e| {
+            CoreError::Message(format!(
+                "relay create {url}: {}",
+                crate::error::format_error(&e)
+            ))
+        })?;
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(CoreError::Pairing(format!("create failed: {body}")));
@@ -140,7 +145,12 @@ pub async fn join_room(
         .json(&req)
         .send()
         .await
-        .map_err(|e| CoreError::Message(format!("relay join {url}: {e}")))?;
+        .map_err(|e| {
+            CoreError::Message(format!(
+                "relay join {url}: {}",
+                crate::error::format_error(&e)
+            ))
+        })?;
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(CoreError::Pairing(format!("join failed: {body}")));
@@ -399,9 +409,12 @@ async fn connect_relay_ws(ws: &str) -> Result<RelayConnection, CoreError> {
         Err(e) => {
             tracing::warn!(error = %e, %ws, "websocket connect failed; retrying");
             tokio::time::sleep(Duration::from_millis(250)).await;
-            RelayConnection::connect(ws)
-                .await
-                .map_err(|e| CoreError::Message(format!("websocket {ws}: {e}")))
+            RelayConnection::connect(ws).await.map_err(|e| {
+                CoreError::Message(format!(
+                    "websocket {ws}: {}",
+                    crate::error::format_error(&e)
+                ))
+            })
         }
     }
 }

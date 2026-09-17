@@ -47,6 +47,19 @@ impl From<AeadError> for CoreError {
     }
 }
 
+pub fn format_error(err: &dyn std::error::Error) -> String {
+    let mut parts = vec![err.to_string()];
+    let mut cur = err.source();
+    while let Some(e) = cur {
+        let s = e.to_string();
+        if !parts.iter().any(|p| p.contains(&s)) {
+            parts.push(s);
+        }
+        cur = e.source();
+    }
+    parts.join(": ")
+}
+
 impl CoreError {
     pub fn exit_code(&self) -> i32 {
         match self {
@@ -76,4 +89,17 @@ pub enum ExitCode {
     PeerOffline = 8,
     TooLarge = 9,
     Timeout = 10,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_error;
+
+    #[test]
+    fn format_error_includes_source_chain() {
+        let inner = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "tls eof");
+        let outer = std::io::Error::new(std::io::ErrorKind::Other, inner);
+        let msg = format_error(&outer);
+        assert!(msg.contains("tls eof"), "{msg}");
+    }
 }
