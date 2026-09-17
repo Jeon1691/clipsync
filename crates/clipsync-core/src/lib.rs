@@ -288,6 +288,11 @@ impl App {
             "relay_url": cfg.relay_url,
             "relay": relay,
             "daemon_socket": self.store.paths.socket_file().exists(),
+            "paths": {
+                "config_dir": self.store.paths.config_dir.display().to_string(),
+                "data_dir": self.store.paths.data_dir.display().to_string(),
+                "log_file": self.store.paths.log_file().display().to_string(),
+            },
         }))
     }
 }
@@ -375,7 +380,7 @@ async fn load_push_item(
 
 pub(crate) fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
-        .user_agent("clipsync-cli/0.1.0")
+        .user_agent(concat!("clipsync-cli/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .expect("http client")

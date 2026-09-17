@@ -4,7 +4,14 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{
+        client::IntoClientRequest,
+        http::{header::USER_AGENT, HeaderValue},
+        Message,
+    },
+};
 use tracing::{debug, warn};
 use url::Url;
 
@@ -45,7 +52,14 @@ enum Outgoing {
 impl RelayConnection {
     pub async fn connect(ws_url: &str) -> Result<Self> {
         let _ = Url::parse(ws_url)?;
-        let (stream, _) = connect_async(ws_url).await?;
+        let mut req = ws_url
+            .into_client_request()
+            .map_err(|e| TransportError::Protocol(e.to_string()))?;
+        req.headers_mut().insert(
+            USER_AGENT,
+            HeaderValue::from_static(concat!("clipsync-cli/", env!("CARGO_PKG_VERSION"))),
+        );
+        let (stream, _) = connect_async(req).await?;
         let (mut sink, mut stream) = stream.split();
         let (in_tx, incoming) = mpsc::channel(256);
         let (out_tx, mut out_rx) = mpsc::channel::<Outgoing>(256);

@@ -68,7 +68,12 @@ pub async fn begin_create_room(
         ttl_secs: Some(ttl_secs),
     };
     let url = format!("{}/v1/pairing/create", cfg.relay_url.trim_end_matches('/'));
-    let resp = http_client().post(&url).json(&req).send().await?;
+    let resp = http_client()
+        .post(&url)
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| CoreError::Message(format!("relay create {url}: {e}")))?;
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(CoreError::Pairing(format!("create failed: {body}")));
@@ -80,7 +85,7 @@ pub async fn begin_create_room(
         expires_at: created.expires_at,
     };
     let ws = join_ws(&cfg.relay_url, &created.ws_path);
-    let conn = RelayConnection::connect(&ws).await?;
+    let conn = connect_relay_ws(&ws).await?;
     conn.send_control(ControlMessage::Hello {
         protocol_version: PROTOCOL_VERSION,
         device_id: identity.device_id.clone(),
@@ -130,14 +135,19 @@ pub async fn join_room(
         protocol_version: PROTOCOL_VERSION,
     };
     let url = format!("{}/v1/pairing/join", cfg.relay_url.trim_end_matches('/'));
-    let resp = http_client().post(&url).json(&req).send().await?;
+    let resp = http_client()
+        .post(&url)
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| CoreError::Message(format!("relay join {url}: {e}")))?;
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(CoreError::Pairing(format!("join failed: {body}")));
     }
     let joined: JoinPairingResponse = resp.json().await?;
     let ws = join_ws(&cfg.relay_url, &joined.ws_path);
-    let conn = RelayConnection::connect(&ws).await?;
+    let conn = connect_relay_ws(&ws).await?;
     conn.send_control(ControlMessage::Hello {
         protocol_version: PROTOCOL_VERSION,
         device_id: identity.device_id.clone(),
@@ -379,6 +389,19 @@ async fn run_pairing(
                 conn.close().await;
                 return Ok(());
             }
+        }
+    }
+}
+
+async fn connect_relay_ws(ws: &str) -> Result<RelayConnection, CoreError> {
+    match RelayConnection::connect(ws).await {
+        Ok(conn) => Ok(conn),
+        Err(e) => {
+            tracing::warn!(error = %e, %ws, "websocket connect failed; retrying");
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            RelayConnection::connect(ws)
+                .await
+                .map_err(|e| CoreError::Message(format!("websocket {ws}: {e}")))
         }
     }
 }

@@ -42,7 +42,14 @@ impl SecretStore {
         }
         if let Ok(payload) = get_keyring(&self.account("identity")) {
             let stored: StoredIdentity = serde_json::from_str(&payload)?;
-            return DeviceIdentity::from_stored(&stored).ok_or(StorageError::NotInitialized);
+            let identity =
+                DeviceIdentity::from_stored(&stored).ok_or(StorageError::NotInitialized)?;
+            if let Err(e) = std::fs::write(&path, &payload) {
+                warn!(error = %e, "could not cache identity file from keychain");
+            } else {
+                let _ = set_private_file(&path);
+            }
+            return Ok(identity);
         }
         Err(StorageError::NotInitialized)
     }

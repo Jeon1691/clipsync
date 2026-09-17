@@ -39,6 +39,14 @@ fn init_tracing(json: bool) {
 }
 
 async fn run(cli: Cli) -> Result<(), CoreError> {
+    if let Commands::Room(RoomCmd::Create {
+        background_worker: true,
+        ..
+    }) = &cli.command
+    {
+        #[cfg(unix)]
+        pairing_bg::ignore_sighup();
+    }
     match cli.command {
         Commands::Init { relay_url } => {
             let app = App::open()?;

@@ -57,12 +57,9 @@ pub async fn spawn_background_create(
         if let Ok(relay) = std::env::var("CLIPSYNC_RELAY_URL") {
             cmd.env("CLIPSYNC_RELAY_URL", relay);
         }
-        unsafe {
+        {
             use std::os::unix::process::CommandExt;
-            cmd.pre_exec(|| {
-                libc_setsid();
-                Ok(())
-            });
+            cmd.process_group(0);
         }
         cmd.stdin(Stdio::null())
             .stdout(Stdio::from(log.try_clone()?))
@@ -73,14 +70,17 @@ pub async fn spawn_background_create(
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             if let Some(status) = child.try_wait()? {
-                let err = app
+                let from_state = app
                     .store
                     .load_pairing_wait()
                     .ok()
                     .flatten()
-                    .and_then(|w| w.error)
+                    .and_then(|w| w.error);
+                let log_tail = std::fs::read_to_string(&log_path).unwrap_or_default();
+                let detail = from_state
+                    .or_else(|| extract_error_line(&log_tail))
                     .unwrap_or_else(|| format!("background worker exited ({status})"));
-                return Err(CoreError::Message(err));
+                return Err(CoreError::Message(detail));
             }
             if let Ok(Some(wait)) = app.store.load_pairing_wait() {
                 if wait.status == "waiting" && !wait.pairing_code.is_empty() && wait.pid == pid {
@@ -129,6 +129,15 @@ fn print_offer(wait: &PairingWait, pid: u32, json: bool) {
     }
 }
 
+fn extract_error_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .rev()
+        .find(|l| l.starts_with("error:") || l.contains("websocket") || l.contains("relay "))
+        .map(|l| l.trim_start_matches("error:").trim().to_string())
+}
+
 #[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
     extern "C" {
@@ -138,11 +147,13 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 #[cfg(unix)]
-fn libc_setsid() {
+pub fn ignore_sighup() {
     extern "C" {
-        fn setsid() -> i32;
+        fn signal(sig: i32, handler: usize) -> usize;
     }
+    const SIGHUP: i32 = 1;
+    const SIG_IGN: usize = 1;
     unsafe {
-        let _ = setsid();
+        let _ = signal(SIGHUP, SIG_IGN);
     }
 }
