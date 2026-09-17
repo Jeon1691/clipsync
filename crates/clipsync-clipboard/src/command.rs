@@ -321,9 +321,27 @@ fn parse_uri_list(bytes: &[u8]) -> Result<Option<ClipboardItem>> {
 pub fn files_to_uri_list_from_paths(paths: &[std::path::PathBuf]) -> String {
     paths
         .iter()
-        .map(|p| format!("file://{}", p.display()))
+        .map(|p| path_to_file_uri(p))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn path_to_file_uri(path: &std::path::Path) -> String {
+    let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let s = abs.to_string_lossy();
+    let mut out = String::from("file://");
+    if cfg!(windows) {
+        out.push('/');
+    }
+    for b in s.replace('\\', "/").bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' | b':' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 fn files_to_uri_list(files: &[FileRef]) -> Result<String> {

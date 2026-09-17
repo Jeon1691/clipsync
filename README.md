@@ -100,8 +100,9 @@ clipsync push --file ./report.pdf --file ./diagram.png
 clipsync pull --wait --output ./inbox
 ```
 
-On Windows, automatic clipboard sync is **text and images**. Files still work
-with `clipsync push --file` / `clipsync pull --output`.
+Automatic clipboard sync covers text, images, and files on macOS, Linux, and
+Windows. `clipsync push --file` / `clipsync pull --output` still work without
+the daemon.
 
 ## Login and reboot
 

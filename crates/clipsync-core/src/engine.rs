@@ -243,6 +243,7 @@ async fn run_session(
         pairing_session_id: None,
     })
     .await?;
+    let hello = wait_hello_ok_msg(&mut conn).await?;
 
     let mut guard = LoopGuard::default();
     let notifier = Notifier::new(cfg.notify.clone());
@@ -254,6 +255,21 @@ async fn run_session(
     let mut noise: Option<NoiseHandshake> = None;
     let mut noise_done = false;
     handle.connected.store(true, Ordering::Relaxed);
+    apply_hello_ok(
+        &hello,
+        &identity,
+        &room,
+        &epoch_key,
+        clipboard,
+        &mut guard,
+        handle,
+        &notifier,
+        &mut last_sig,
+        &mut noise,
+        &mut noise_done,
+        &conn,
+    )
+    .await;
 
     loop {
         tokio::select! {
@@ -643,12 +659,22 @@ async fn apply_remote(
         _
     ) {
         guard.remember_remote(message_id, &item);
-        if clipboard.write(&item).await.is_ok() {
-            if let Ok(sig) = clipboard.signature().await {
-                *last_sig = sig;
+        match clipboard.write(&item).await {
+            Ok(()) => {
+                if let Ok(sig) = clipboard.signature().await {
+                    *last_sig = sig;
+                }
+                notifier.received(&format!("{:?}", item.kind()), "peer", &item.summary());
+                *handle.last_item.lock() = Some(item);
             }
-            notifier.received(&format!("{:?}", item.kind()), "peer", &item.summary());
-            *handle.last_item.lock() = Some(item);
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    kind = ?item.kind(),
+                    "failed to write remote clipboard item"
+                );
+                *handle.last_item.lock() = Some(item);
+            }
         }
     }
 }
@@ -679,6 +705,10 @@ pub async fn oneshot_push(store: &LocalStore, item: ClipboardItem) -> Result<(),
 }
 
 async fn wait_hello_ok(conn: &mut RelayConnection) -> Result<(), CoreError> {
+    wait_hello_ok_msg(conn).await.map(|_| ())
+}
+
+async fn wait_hello_ok_msg(conn: &mut RelayConnection) -> Result<ControlMessage, CoreError> {
     let deadline = tokio::time::sleep(Duration::from_secs(10));
     tokio::pin!(deadline);
     loop {
@@ -686,12 +716,76 @@ async fn wait_hello_ok(conn: &mut RelayConnection) -> Result<(), CoreError> {
             _ = &mut deadline => return Err(CoreError::Timeout),
             msg = conn.incoming.recv() => {
                 match msg {
-                    Some(Incoming::Control(ControlMessage::HelloOk { .. })) => return Ok(()),
+                    Some(Incoming::Control(m @ ControlMessage::HelloOk { .. })) => return Ok(m),
                     Some(Incoming::Control(ControlMessage::Error { code, message })) => {
                         return Err(CoreError::Message(format!("relay {code}: {message}")));
                     }
                     Some(_) => continue,
                     None => return Err(CoreError::Message("relay closed before hello".into())),
+                }
+            }
+        }
+    }
+}
+
+async fn apply_hello_ok(
+    hello: &ControlMessage,
+    identity: &DeviceIdentity,
+    room: &RoomRecord,
+    epoch_key: &[u8; 32],
+    clipboard: &SystemClipboard,
+    guard: &mut LoopGuard,
+    handle: &SyncHandle,
+    notifier: &Notifier,
+    last_sig: &mut String,
+    noise: &mut Option<NoiseHandshake>,
+    noise_done: &mut bool,
+    conn: &RelayConnection,
+) {
+    let ControlMessage::HelloOk {
+        peer_online,
+        queued_text,
+        peers,
+        ..
+    } = hello
+    else {
+        return;
+    };
+    handle.peer_online.store(*peer_online, Ordering::Relaxed);
+    if let Some(q) = queued_text {
+        if let Ok(item) = open_text(epoch_key, &q.routing, &q.nonce, &q.ciphertext) {
+            apply_remote(
+                clipboard,
+                guard,
+                handle,
+                notifier,
+                q.routing.message_id.as_str(),
+                item,
+                last_sig,
+            )
+            .await;
+        }
+    }
+    if *peer_online && !*noise_done {
+        if let Some(peer) = peers.iter().find(|p| p.online) {
+            if let Some(rec) = room.peers.iter().find(|p| p.device_id == peer.device_id) {
+                if let Some(pk) = parse_public(&rec.public_key_hex) {
+                    let initiator = identity.device_id.as_str() < rec.device_id.as_str();
+                    if initiator {
+                        match NoiseHandshake::initiator(&identity.static_secret(), &pk) {
+                            Ok(mut hs) => {
+                                if let Ok(m) = hs.write_message() {
+                                    let _ = conn
+                                        .send_control(ControlMessage::NoiseHandshake {
+                                            message: hex::encode(m),
+                                        })
+                                        .await;
+                                }
+                                *noise = Some(hs);
+                            }
+                            Err(e) => warn!(error = %e, "noise init"),
+                        }
+                    }
                 }
             }
         }

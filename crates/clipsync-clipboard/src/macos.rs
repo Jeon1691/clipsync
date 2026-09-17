@@ -1,13 +1,15 @@
 #![cfg(target_os = "macos")]
 
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 
 use async_trait::async_trait;
+use objc2::runtime::ProtocolObject;
+use objc2::ClassType;
 use objc2_app_kit::{
     NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeTIFF,
+    NSPasteboardURLReadingFileURLsOnlyKey,
 };
-use objc2_foundation::{NSData, NSString};
+use objc2_foundation::{NSArray, NSData, NSDictionary, NSNumber, NSString, NSURL};
 
 use crate::detect::{hash_item, Capabilities};
 use crate::item::{tiff_to_png, ClipboardItem, FileRef, ImageMime};
@@ -22,10 +24,10 @@ impl MacClipboard {
     }
 
     fn read_blocking(&self) -> Result<Option<ClipboardItem>> {
-        if let Some(files) = read_files_osascript()? {
+        let pb = NSPasteboard::generalPasteboard();
+        if let Some(files) = read_file_urls(&pb)? {
             return Ok(Some(ClipboardItem::Files { files }));
         }
-        let pb = NSPasteboard::generalPasteboard();
         let png_ty = unsafe { NSPasteboardTypePNG };
         if let Some(data) = pb.dataForType(&png_ty) {
             let bytes = data.to_vec();
@@ -72,10 +74,15 @@ impl MacClipboard {
                 }
             }
             ClipboardItem::Image { bytes, .. } => {
-                let ty = unsafe { NSPasteboardTypePNG };
+                let png_ty = unsafe { NSPasteboardTypePNG };
                 let data = NSData::with_bytes(bytes);
-                if !pb.setData_forType(Some(&data), &ty) {
-                    return Err(ClipboardError::Message("failed to set image".into()));
+                if !pb.setData_forType(Some(&data), &png_ty) {
+                    return Err(ClipboardError::Message("failed to set PNG".into()));
+                }
+                if let Ok(tiff) = png_or_raw_to_tiff(bytes) {
+                    let tiff_ty = unsafe { NSPasteboardTypeTIFF };
+                    let tiff_data = NSData::with_bytes(&tiff);
+                    let _ = pb.setData_forType(Some(&tiff_data), &tiff_ty);
                 }
             }
             ClipboardItem::Files { files } => {
@@ -91,6 +98,93 @@ impl MacClipboard {
         }
         Ok(())
     }
+}
+
+fn read_file_urls(pb: &NSPasteboard) -> Result<Option<Vec<FileRef>>> {
+    let class_array = NSArray::from_slice(&[NSURL::class()]);
+    let options = NSDictionary::from_slices(
+        &[unsafe { NSPasteboardURLReadingFileURLsOnlyKey }],
+        &[NSNumber::new_bool(true).as_ref()],
+    );
+    let objects = unsafe { pb.readObjectsForClasses_options(&class_array, Some(options.as_ref())) };
+    let Some(array) = objects else {
+        return Ok(None);
+    };
+    let mut paths = Vec::new();
+    for obj in array.iter() {
+        let Ok(url) = obj.downcast::<NSURL>() else {
+            continue;
+        };
+        let Some(path) = url.path() else {
+            continue;
+        };
+        paths.push(PathBuf::from(path.to_string()));
+    }
+    load_file_refs(&paths)
+}
+
+fn load_file_refs(paths: &[PathBuf]) -> Result<Option<Vec<FileRef>>> {
+    let mut files = Vec::new();
+    for path in paths {
+        let Ok(meta) = std::fs::symlink_metadata(path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || meta.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let bytes = std::fs::read(path)?;
+        files.push(FileRef {
+            mime: infer::get(&bytes).map(|k| k.mime_type().to_string()),
+            name: name.to_string(),
+            bytes,
+            staged_path: Some(path.clone()),
+        });
+    }
+    if files.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(files))
+    }
+}
+
+pub fn write_file_urls(paths: &[PathBuf]) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let urls: Vec<_> = paths
+        .iter()
+        .filter_map(|p| {
+            let abs = p.canonicalize().ok()?;
+            let s = abs.to_str()?;
+            let url = NSURL::fileURLWithPath(&NSString::from_str(s));
+            Some(ProtocolObject::from_retained(url))
+        })
+        .collect();
+    if urls.is_empty() {
+        return Err(ClipboardError::Message("no file URLs to write".into()));
+    }
+    let pb = NSPasteboard::generalPasteboard();
+    let objects = NSArray::from_retained_slice(&urls);
+    if !pb.writeObjects(&objects) {
+        return Err(ClipboardError::Message(
+            "NSPasteboard writeObjects failed for files".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn png_or_raw_to_tiff(bytes: &[u8]) -> Result<Vec<u8>> {
+    let img = image::load_from_memory(bytes).map_err(|e| ClipboardError::Message(e.to_string()))?;
+    let mut buf = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut buf),
+        image::ImageFormat::Tiff,
+    )
+    .map_err(|e| ClipboardError::Message(e.to_string()))?;
+    Ok(buf)
 }
 
 #[async_trait]
@@ -120,71 +214,6 @@ impl ClipboardBackend for MacClipboard {
         let pb = NSPasteboard::generalPasteboard();
         Ok(pb.changeCount().to_string())
     }
-}
-
-fn read_files_osascript() -> Result<Option<Vec<FileRef>>> {
-    let output = Command::new("osascript")
-        .args([
-            "-e",
-            r#"try
-set theFiles to {}
-set pb to (the clipboard as «class furl»)
-POSIX path of pb
-end try"#,
-        ])
-        .stdin(Stdio::null())
-        .output();
-    let Ok(output) = output else {
-        return Ok(None);
-    };
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let path = PathBuf::from(text.trim());
-    if path.as_os_str().is_empty() || !path.exists() {
-        return Ok(None);
-    }
-    let meta = std::fs::symlink_metadata(&path)?;
-    if meta.file_type().is_symlink() || meta.is_dir() {
-        return Err(ClipboardError::Message(
-            "directory and symlink clipboard items are rejected".into(),
-        ));
-    }
-    let name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| ClipboardError::Message("invalid file name".into()))?
-        .to_string();
-    let bytes = std::fs::read(&path)?;
-    Ok(Some(vec![FileRef {
-        mime: infer::get(&bytes).map(|k| k.mime_type().to_string()),
-        name,
-        bytes,
-        staged_path: Some(path),
-    }]))
-}
-
-pub fn write_file_urls(paths: &[PathBuf]) -> Result<()> {
-    if paths.is_empty() {
-        return Ok(());
-    }
-    let posix = paths
-        .iter()
-        .map(|p| format!("POSIX file \"{}\"", p.display()))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let script = format!("set the clipboard to {{{posix}}}");
-    let status = Command::new("osascript")
-        .args(["-e", &script])
-        .status()
-        .map_err(|e| ClipboardError::Unavailable(e.to_string()))?;
-    if !status.success() {
-        return Err(ClipboardError::Message(
-            "osascript file url write failed".into(),
-        ));
-    }
-    Ok(())
 }
 
 #[allow(dead_code)]
