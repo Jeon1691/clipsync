@@ -1,4 +1,4 @@
-//! User-level service lifecycle (launchd/systemd) and Unix socket IPC.
+//! User-level service lifecycle (launchd/systemd/Windows logon) and IPC.
 
 mod ipc;
 mod service;
@@ -33,10 +33,32 @@ pub fn pid_is_running(paths: &AppPaths) -> bool {
     {
         libc_kill(pid, 0) == 0
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows_pid_alive(pid as u32)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         false
+    }
+}
+
+#[cfg(windows)]
+fn windows_pid_alive(pid: u32) -> bool {
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
+        fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+    }
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            false
+        } else {
+            CloseHandle(handle);
+            true
+        }
     }
 }
 

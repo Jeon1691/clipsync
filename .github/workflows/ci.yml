@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -34,12 +34,18 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
       - name: CLI smoke
+        shell: bash
         run: |
           cargo build -p clipsync-cli -p clipsync-relay --locked
-          ./target/debug/clipsync --version
-          ./target/debug/clipsync --help | grep -q "Usage: clipsync"
-          ./target/debug/clipsync-relay --help
+          bin="./target/debug/clipsync"
+          relay="./target/debug/clipsync-relay"
+          if [[ -f "${bin}.exe" ]]; then bin="${bin}.exe"; fi
+          if [[ -f "${relay}.exe" ]]; then relay="${relay}.exe"; fi
+          "$bin" --version
+          "$bin" --help | grep -q "Usage: clipsync"
+          "$relay" --help
       - name: Scripts compile
+        if: runner.os != 'Windows'
         run: |
           python3 -m py_compile scripts/e2e-brew.py
           bash -n scripts/update-homebrew-formula.sh

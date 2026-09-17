@@ -4,7 +4,7 @@ use tracing::warn;
 use crate::paths::{set_private_file, AppPaths};
 use crate::{Result, StorageError};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const SERVICE: &str = "dev.clipsync.cli";
 
 #[derive(Clone)]
@@ -80,35 +80,35 @@ impl SecretStore {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn set_keyring(user: &str, value: &str) -> std::result::Result<(), String> {
     let entry = keyring::Entry::new(SERVICE, user).map_err(|e| e.to_string())?;
     entry.set_password(value).map_err(|e| e.to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn set_keyring(_user: &str, _value: &str) -> std::result::Result<(), String> {
     Err("os keychain not enabled on this platform".into())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn get_keyring(user: &str) -> std::result::Result<String, String> {
     let entry = keyring::Entry::new(SERVICE, user).map_err(|e| e.to_string())?;
     entry.get_password().map_err(|e| e.to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn get_keyring(_user: &str) -> std::result::Result<String, String> {
     Err("os keychain not enabled on this platform".into())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn delete_keyring(user: &str) -> std::result::Result<(), String> {
     let entry = keyring::Entry::new(SERVICE, user).map_err(|e| e.to_string())?;
     entry.delete_credential().map_err(|e| e.to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn delete_keyring(_user: &str) -> std::result::Result<(), String> {
     Ok(())
 }

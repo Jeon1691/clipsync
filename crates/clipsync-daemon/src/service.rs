@@ -16,9 +16,13 @@ pub fn is_service_installed() -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        systemd_unit_path().map(|p| p.exists()).unwrap_or(false)
+        systemd_unit_path().map(|p| p.exists()).unwrap_or(false) || xdg_autostart_path().exists()
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        windows_startup_vbs().exists()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         false
     }
@@ -36,7 +40,12 @@ pub fn install_and_start(paths: &AppPaths) -> Result<()> {
         install_systemd(&exe, paths)?;
         return Ok(());
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        install_windows(&exe, paths)?;
+        return Ok(());
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         spawn_detached(&exe, paths)
     }
@@ -67,9 +76,16 @@ pub fn stop_and_uninstall() -> Result<()> {
         let _ = Command::new("systemctl")
             .args(["--user", "daemon-reload"])
             .status();
+        let _ = std::fs::remove_file(xdg_autostart_path());
         return Ok(());
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::fs::remove_file(windows_startup_vbs());
+        let _ = std::fs::remove_file(windows_startup_cmd());
+        return Ok(());
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         Ok(())
     }
@@ -212,15 +228,28 @@ fn install_systemd(exe: &PathBuf, paths: &AppPaths) -> Result<()> {
     }
     let home = dirs_home();
     let mut env = format!(
-        "Environment=HOME={}\nEnvironment=PATH={}\n",
-        home.display(),
-        daemon_path_env(exe)
+        "{}",
+        systemd_env_line("HOME", &home.display().to_string())
+            + &systemd_env_line("PATH", &daemon_path_env(exe))
     );
     if let Ok(h) = std::env::var("CLIPSYNC_HOME") {
-        env.push_str(&format!("Environment=CLIPSYNC_HOME={h}\n"));
+        env.push_str(&systemd_env_line("CLIPSYNC_HOME", &h));
     }
     if let Ok(ca) = std::env::var("CLIPSYNC_CA_FILE") {
-        env.push_str(&format!("Environment=CLIPSYNC_CA_FILE={ca}\n"));
+        env.push_str(&systemd_env_line("CLIPSYNC_CA_FILE", &ca));
+    }
+    for key in [
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XDG_RUNTIME_DIR",
+        "XDG_SESSION_TYPE",
+        "DBUS_SESSION_BUS_ADDRESS",
+    ] {
+        if let Ok(v) = std::env::var(key) {
+            if !v.is_empty() {
+                env.push_str(&systemd_env_line(key, &v));
+            }
+        }
     }
     let unit = format!(
         "[Unit]\nDescription=ClipSync clipboard daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={} daemon run\nRestart=always\nRestartSec=3\n{env}\n[Install]\nWantedBy=default.target\n",
@@ -236,6 +265,74 @@ fn install_systemd(exe: &PathBuf, paths: &AppPaths) -> Result<()> {
     if !status.success() {
         spawn_detached(exe, paths)?;
     }
+    write_xdg_autostart(exe)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn xdg_autostart_path() -> PathBuf {
+    dirs_home().join(".config/autostart/clipsync.desktop")
+}
+
+#[cfg(target_os = "linux")]
+fn write_xdg_autostart(exe: &Path) -> Result<()> {
+    let path = xdg_autostart_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let desktop = format!(
+        "[Desktop Entry]\nType=Application\nName=ClipSync\nComment=Encrypted clipboard sync daemon\nExec=\"{}\" daemon run\nTerminal=false\nX-GNOME-Autostart-enabled=true\nHidden=false\n",
+        exe.display()
+    );
+    std::fs::write(path, desktop)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn systemd_env_line(key: &str, value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("Environment=\"{key}={escaped}\"\n")
+}
+
+#[cfg(target_os = "windows")]
+fn windows_startup_dir() -> PathBuf {
+    dirs_home().join("AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup")
+}
+
+#[cfg(target_os = "windows")]
+fn windows_startup_vbs() -> PathBuf {
+    windows_startup_dir().join("ClipSync.vbs")
+}
+
+#[cfg(target_os = "windows")]
+fn windows_startup_cmd() -> PathBuf {
+    dirs_home().join("AppData/Roaming/ClipSync/clipsync-daemon.cmd")
+}
+
+#[cfg(target_os = "windows")]
+fn install_windows(exe: &PathBuf, paths: &AppPaths) -> Result<()> {
+    let cmd_path = windows_startup_cmd();
+    if let Some(parent) = cmd_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut bat = format!("@echo off\r\n");
+    if let Ok(h) = std::env::var("CLIPSYNC_HOME") {
+        bat.push_str(&format!("set CLIPSYNC_HOME={h}\r\n"));
+    }
+    if let Ok(ca) = std::env::var("CLIPSYNC_CA_FILE") {
+        bat.push_str(&format!("set CLIPSYNC_CA_FILE={ca}\r\n"));
+    }
+    bat.push_str(&format!("\"{}\" daemon run\r\n", exe.display()));
+    std::fs::write(&cmd_path, bat)?;
+
+    let startup = windows_startup_dir();
+    std::fs::create_dir_all(&startup)?;
+    let vbs = format!(
+        "Set sh = CreateObject(\"WScript.Shell\")\r\nsh.Run \"\"\"{}\"\"\", 0, False\r\n",
+        cmd_path.display().to_string().replace('"', "\"\"")
+    );
+    std::fs::write(windows_startup_vbs(), vbs)?;
+    spawn_detached(exe, paths)?;
     Ok(())
 }
 
@@ -255,6 +352,14 @@ fn spawn_detached(exe: &PathBuf, _paths: &AppPaths) -> Result<()> {
             });
         }
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -273,9 +378,10 @@ fn libc_setsid() {
 }
 
 fn dirs_home() -> PathBuf {
-    std::env::var("HOME")
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn xml_escape(s: &str) -> String {

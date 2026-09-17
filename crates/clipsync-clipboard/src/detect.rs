@@ -64,6 +64,31 @@ pub fn detect_adapter() -> Result<(Box<dyn ClipboardBackend>, AdapterInfo)> {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    {
+        match ArboardClipboard::new() {
+            Ok(ar) => {
+                let info = AdapterInfo {
+                    name: "windows-clipboard",
+                    source: "native",
+                    capabilities: Capabilities {
+                        text: true,
+                        image: true,
+                        files: false,
+                        watch: true,
+                    },
+                    fallback_reason: None,
+                };
+                return Ok((Box::new(ar), info));
+            }
+            Err(e) => {
+                return Err(ClipboardError::Unavailable(format!(
+                    "windows clipboard: {e}"
+                )));
+            }
+        }
+    }
+
     #[cfg(target_os = "linux")]
     {
         if std::env::var_os("WAYLAND_DISPLAY").is_some() {
@@ -248,6 +273,8 @@ pub fn collect_doctor_tools() -> Vec<(String, bool)> {
         "wl-copy",
         "wl-paste",
         "notify-send",
+        "clip",
+        "powershell",
     ];
     names
         .into_iter()

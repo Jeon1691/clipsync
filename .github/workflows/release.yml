@@ -35,6 +35,9 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             optional: true
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            optional: false
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.optional }}
     steps:
@@ -50,25 +53,34 @@ jobs:
         run: |
           set -euo pipefail
           target="${{ matrix.target }}"
-          bin="target/${target}/release/clipsync"
-          chmod +x "$bin"
-          if [[ "${{ runner.os }}" == "macOS" ]]; then
-            strip -x "$bin" || true
-            codesign --sign - --force --timestamp=none "$bin" || true
-          else
-            strip "$bin" || true
-          fi
           stage="clipsync-${target}"
           mkdir -p "dist/${stage}"
-          cp "$bin" "dist/${stage}/clipsync"
-          cp README.md LICENSE-MIT LICENSE-APACHE "dist/${stage}/"
-          tar -C dist -czf "dist/${stage}.tar.gz" "$stage"
-          (cd dist && shasum -a 256 "${stage}.tar.gz" > "${stage}.sha256")
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            bin="target/${target}/release/clipsync.exe"
+            cp "$bin" "dist/${stage}/clipsync.exe"
+            cp README.md LICENSE-MIT LICENSE-APACHE "dist/${stage}/"
+            (cd dist && powershell -NoProfile -Command "Compress-Archive -Path '${stage}\\*' -DestinationPath '${stage}.zip'")
+            (cd dist && sha256sum "${stage}.zip" > "${stage}.sha256" || shasum -a 256 "${stage}.zip" > "${stage}.sha256")
+          else
+            bin="target/${target}/release/clipsync"
+            chmod +x "$bin"
+            if [[ "${{ runner.os }}" == "macOS" ]]; then
+              strip -x "$bin" || true
+              codesign --sign - --force --timestamp=none "$bin" || true
+            else
+              strip "$bin" || true
+            fi
+            cp "$bin" "dist/${stage}/clipsync"
+            cp README.md LICENSE-MIT LICENSE-APACHE "dist/${stage}/"
+            tar -C dist -czf "dist/${stage}.tar.gz" "$stage"
+            (cd dist && shasum -a 256 "${stage}.tar.gz" > "${stage}.sha256")
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: clipsync-${{ matrix.target }}
           path: |
             dist/*.tar.gz
+            dist/*.zip
             dist/*.sha256
           if-no-files-found: error
 
@@ -108,10 +120,16 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
+          shopt -s nullglob
+          assets=(artifacts/*.tar.gz artifacts/*.zip artifacts/*.sha256)
+          if [[ ${#assets[@]} -eq 0 ]]; then
+            echo "no release assets" >&2
+            exit 1
+          fi
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" artifacts/*.tar.gz artifacts/*.sha256 --clobber
+            gh release upload "$tag" "${assets[@]}" --clobber
           else
-            gh release create "$tag" artifacts/*.tar.gz artifacts/*.sha256 \
+            gh release create "$tag" "${assets[@]}" \
               --title "$tag" \
               --generate-notes \
               --verify-tag

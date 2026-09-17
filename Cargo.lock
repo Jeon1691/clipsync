@@ -464,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-cli"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "axum",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-clipboard"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "arboard",
  "async-trait",
@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-core"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "base64",
@@ -539,7 +539,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-crypto"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -562,7 +562,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-daemon"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "chrono",
  "clipsync-protocol",
@@ -577,7 +577,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-protocol"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "base64",
  "bytes",
@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-relay"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "axum",
@@ -627,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-storage"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "chrono",
  "clipsync-crypto",
@@ -645,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-transfer"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "blake3",
  "clipsync-crypto",
@@ -658,7 +658,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-transport"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "clipsync-protocol",
  "futures-util",
@@ -1586,9 +1586,11 @@ version = "3.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c"
 dependencies = [
+ "byteorder",
  "log",
  "security-framework 2.11.1",
  "security-framework 3.7.0",
+ "windows-sys 0.60.2",
  "zeroize",
 ]
 

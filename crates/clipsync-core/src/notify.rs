@@ -63,6 +63,18 @@ fn send(title: &str, body: &str) {
     #[cfg(target_os = "linux")]
     {
         let _ = Command::new("notify-send").args([title, body]).status();
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; $n = New-Object System.Windows.Forms.NotifyIcon; $n.Icon = [System.Drawing.SystemIcons]::Information; $n.Visible = $true; $n.ShowBalloonTip(3000, '{title}', '{body}', [System.Windows.Forms.ToolTipIcon]::Info)",
+            title = title.replace('\'', "''"),
+            body = body.replace('\'', "''"),
+        );
+        let _ = Command::new("powershell")
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
+            .status();
     }
 }
 

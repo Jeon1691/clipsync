@@ -1,8 +1,8 @@
 # ClipSync CLI
 
-End-to-end encrypted clipboard sync for macOS and Linux. Pair two devices with a
-one-time 6-digit code. After pairing, a background daemon copies text, images,
-and files between machines over a zero-knowledge WebSocket relay.
+End-to-end encrypted clipboard sync for macOS, Linux, and Windows. Pair two
+devices with a one-time 6-digit code. After pairing, a background daemon copies
+text, images, and files between machines over a zero-knowledge WebSocket relay.
 
 The relay never sees plaintext, filenames, or encryption keys.
 
@@ -13,13 +13,20 @@ brew install jeon1691/tap/clipsync
 ```
 
 macOS (Apple Silicon and Intel) and Linux (Homebrew/Linuxbrew) get a prebuilt
-binary. Pairing talks to `https://clipsync.develicit.dev` unless you set
-`CLIPSYNC_RELAY_URL`.
+binary. Windows builds are attached to GitHub Releases as `.zip`. Pairing talks
+to `https://clipsync.develicit.dev` unless you set `CLIPSYNC_RELAY_URL`.
+
+After pairing, the daemon starts at login on macOS (LaunchAgent), Linux
+(systemd user unit + XDG autostart), and Windows (Startup folder).
 
 ```bash
-# from source
+# from source (macOS, Linux, Windows)
 cargo install --path crates/clipsync-cli --locked
 ```
+
+Windows: download `clipsync-x86_64-pc-windows-msvc.zip` from
+[Releases](https://github.com/Jeon1691/clipsync/releases), put `clipsync.exe` on
+`PATH`, then `clipsync room create`.
 
 ## Quick start
 
