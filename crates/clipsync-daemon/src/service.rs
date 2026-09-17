@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use clipsync_storage::AppPaths;
@@ -25,7 +25,7 @@ pub fn is_service_installed() -> bool {
 }
 
 pub fn install_and_start(paths: &AppPaths) -> Result<()> {
-    let exe = current_exe()?;
+    let exe = stable_daemon_exe(&current_exe()?);
     #[cfg(target_os = "macos")]
     {
         install_launchd(&exe, paths)?;
@@ -48,8 +48,10 @@ pub fn stop_and_uninstall() -> Result<()> {
         let path = launch_agent_path();
         if path.exists() {
             let plist = path.display().to_string();
-            launchctl_quiet(&["bootout", &launch_label()]);
-            launchctl_quiet(&["unload", "-w", &plist]);
+            let label = launch_label();
+            launchctl_quiet(&["disable", &label]);
+            launchctl_quiet(&["bootout", &label]);
+            launchctl_quiet(&["unload", &plist]);
             let _ = std::fs::remove_file(path);
         }
         return Ok(());
@@ -90,12 +92,22 @@ fn install_launchd(exe: &PathBuf, paths: &AppPaths) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let log = paths.log_file();
-    let home = std::env::var("CLIPSYNC_HOME").ok();
-    let mut env_entries = String::new();
-    if let Some(h) = home {
+    let home = dirs_home();
+    let mut env_entries = format!(
+        "    <key>HOME</key>\n    <string>{}</string>\n    <key>PATH</key>\n    <string>{}</string>\n",
+        xml_escape(&home.display().to_string()),
+        xml_escape(&daemon_path_env(exe)),
+    );
+    if let Ok(h) = std::env::var("CLIPSYNC_HOME") {
         env_entries.push_str(&format!(
-            "  <key>CLIPSYNC_HOME</key>\n  <string>{}</string>\n",
+            "    <key>CLIPSYNC_HOME</key>\n    <string>{}</string>\n",
             xml_escape(&h)
+        ));
+    }
+    if let Ok(ca) = std::env::var("CLIPSYNC_CA_FILE") {
+        env_entries.push_str(&format!(
+            "    <key>CLIPSYNC_CA_FILE</key>\n    <string>{}</string>\n",
+            xml_escape(&ca)
         ));
     }
     let plist = format!(
@@ -114,7 +126,16 @@ fn install_launchd(exe: &PathBuf, paths: &AppPaths) -> Result<()> {
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>Crashed</key>
+    <true/>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
   <key>StandardOutPath</key>
   <string>{}</string>
   <key>StandardErrorPath</key>
@@ -133,8 +154,9 @@ fn install_launchd(exe: &PathBuf, paths: &AppPaths) -> Result<()> {
     let label = launch_label();
     let domain = gui_domain();
     let plist_file = plist_path.display().to_string();
+    // Do not `unload -w`: that disables the agent so it will not start at next login.
     launchctl_quiet(&["bootout", &label]);
-    launchctl_quiet(&["unload", "-w", &plist_file]);
+    launchctl_quiet(&["enable", &label]);
     let loaded = launchctl_quiet(&["bootstrap", &domain, &plist_file])
         || launchctl_quiet(&["load", "-w", &plist_file]);
     if loaded {
@@ -188,11 +210,21 @@ fn install_systemd(exe: &PathBuf, paths: &AppPaths) -> Result<()> {
     if let Some(parent) = unit_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let home = std::env::var("CLIPSYNC_HOME").unwrap_or_default();
+    let home = dirs_home();
+    let mut env = format!(
+        "Environment=HOME={}\nEnvironment=PATH={}\n",
+        home.display(),
+        daemon_path_env(exe)
+    );
+    if let Ok(h) = std::env::var("CLIPSYNC_HOME") {
+        env.push_str(&format!("Environment=CLIPSYNC_HOME={h}\n"));
+    }
+    if let Ok(ca) = std::env::var("CLIPSYNC_CA_FILE") {
+        env.push_str(&format!("Environment=CLIPSYNC_CA_FILE={ca}\n"));
+    }
     let unit = format!(
-        "[Unit]\nDescription=ClipSync clipboard daemon\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart={} daemon run\nRestart=on-failure\nRestartSec=3\nEnvironment=CLIPSYNC_HOME={}\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=ClipSync clipboard daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={} daemon run\nRestart=always\nRestartSec=3\n{env}\n[Install]\nWantedBy=default.target\n",
         exe.display(),
-        home
     );
     std::fs::write(&unit_path, unit)?;
     let _ = Command::new("systemctl")
@@ -251,4 +283,64 @@ fn xml_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Prefer the Homebrew prefix shim over a versioned Cellar path so upgrades
+/// and reboots keep working.
+fn stable_daemon_exe(current: &Path) -> PathBuf {
+    let s = current.to_string_lossy();
+    if let Some(i) = s.find("/Cellar/clipsync/") {
+        let linked = Path::new(&s[..i]).join("bin").join("clipsync");
+        if linked.exists() {
+            return linked;
+        }
+    }
+    current.to_path_buf()
+}
+
+fn daemon_path_env(exe: &Path) -> String {
+    let mut parts = Vec::new();
+    if let Some(dir) = exe.parent() {
+        parts.push(dir.display().to_string());
+    }
+    parts.extend(
+        [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+        ]
+        .iter()
+        .map(|s| (*s).to_string()),
+    );
+    parts.join(":")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn stable_exe_rewrites_cellar_when_prefix_bin_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prefix = tmp.path();
+        let cellar = prefix.join("Cellar/clipsync/0.1.8/bin");
+        fs::create_dir_all(&cellar).unwrap();
+        let versioned = cellar.join("clipsync");
+        fs::write(&versioned, b"").unwrap();
+        let linked_dir = prefix.join("bin");
+        fs::create_dir_all(&linked_dir).unwrap();
+        let linked = linked_dir.join("clipsync");
+        fs::write(&linked, b"").unwrap();
+        assert_eq!(stable_daemon_exe(&versioned), linked);
+    }
+
+    #[test]
+    fn stable_exe_keeps_non_cellar_path() {
+        let p = PathBuf::from("/usr/local/bin/clipsync");
+        assert_eq!(stable_daemon_exe(&p), p);
+    }
 }

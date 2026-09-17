@@ -464,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-cli"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "axum",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-clipboard"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "arboard",
  "async-trait",
@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-core"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "base64",
@@ -539,7 +539,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-crypto"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -562,13 +562,14 @@ dependencies = [
 
 [[package]]
 name = "clipsync-daemon"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "chrono",
  "clipsync-protocol",
  "clipsync-storage",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -576,7 +577,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-protocol"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "base64",
  "bytes",
@@ -589,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-relay"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "axum",
@@ -626,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-storage"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "chrono",
  "clipsync-crypto",
@@ -644,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-transfer"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "blake3",
  "clipsync-crypto",
@@ -657,7 +658,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync-transport"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "clipsync-protocol",
  "futures-util",

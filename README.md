@@ -43,6 +43,7 @@ clipsync room join 482913
 ```
 
 After pairing, copy on either device. The other clipboard updates automatically.
+The user daemon starts at login and reconnects to the relay after a reboot.
 
 Manual fallback:
 

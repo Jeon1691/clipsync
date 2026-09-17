@@ -20,7 +20,9 @@ use std::path::PathBuf;
 
 use clipsync_clipboard::{ClipboardItem, FileRef, ImageMime, SystemClipboard};
 use clipsync_crypto::DeviceIdentity;
-use clipsync_daemon::{connect_ipc, install_and_start, stop_and_uninstall, IpcRequest};
+use clipsync_daemon::{
+    connect_ipc, install_and_start, is_service_installed, stop_and_uninstall, IpcRequest,
+};
 use clipsync_protocol::{clamp_ttl, DeviceId, DEFAULT_TTL_SECS};
 use clipsync_storage::{LocalStore, PairingWait};
 use tracing::info;
@@ -288,6 +290,7 @@ impl App {
             "relay_url": cfg.relay_url,
             "relay": relay,
             "daemon_socket": self.store.paths.socket_file().exists(),
+            "login_service": is_service_installed(),
             "tls": {
                 "verifier": "platform",
                 "ca_file": clipsync_transport::ca_file_path(),

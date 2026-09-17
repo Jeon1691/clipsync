@@ -88,6 +88,7 @@ formula = f'''class Clipsync < Formula
     <<~EOS
       Default relay is https://clipsync.develicit.dev
       Device identity is created on install (or on first use).
+      After pairing, the daemon starts at login and reconnects after reboot.
 
         clipsync room create
     EOS
