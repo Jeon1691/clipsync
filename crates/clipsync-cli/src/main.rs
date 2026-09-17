@@ -198,8 +198,9 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
             Ok(())
         }
         Commands::Daemon(DaemonCmd::Start) => {
-            let store = LocalStore::open()?;
-            install_and_start(&store.paths)?;
+            let app = App::open()?;
+            let _ = app.identity()?;
+            install_and_start(&app.store.paths)?;
             emit(cli.json, serde_json::json!({"daemon": "started"}));
             Ok(())
         }
@@ -209,8 +210,9 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
             Ok(())
         }
         Commands::Daemon(DaemonCmd::Restart) => {
-            let store = LocalStore::open()?;
-            restart_service(&store.paths)?;
+            let app = App::open()?;
+            let _ = app.identity()?;
+            restart_service(&app.store.paths)?;
             emit(cli.json, serde_json::json!({"daemon": "restarted"}));
             Ok(())
         }

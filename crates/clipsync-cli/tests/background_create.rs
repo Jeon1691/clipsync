@@ -154,3 +154,41 @@ async fn room_create_background_returns_then_pairs() {
         panic!("creator never recorded the room after background pairing");
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn room_create_auto_inits_without_explicit_init() {
+    let (relay, _h) = start_relay().await;
+    let a = TempDir::new().unwrap();
+    let b = TempDir::new().unwrap();
+    let started = Instant::now();
+    let create = clipsync(
+        a.path(),
+        &relay,
+        &["--json", "room", "create", "--no-auto-sync"],
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "auto-init create blocked"
+    );
+    assert!(
+        create.status.success(),
+        "create without init failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&create.stdout),
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let offer = json_out(&create);
+    let code = offer["pairing_code"].as_str().expect("pairing_code");
+    let pid = offer["pid"].as_u64().expect("pid") as u32;
+    let join = clipsync(
+        b.path(),
+        &relay,
+        &["--json", "room", "join", code, "--no-auto-sync"],
+    );
+    if !join.status.success() {
+        kill_pid(pid);
+        panic!(
+            "join without init failed: {}",
+            String::from_utf8_lossy(&join.stderr)
+        );
+    }
+}

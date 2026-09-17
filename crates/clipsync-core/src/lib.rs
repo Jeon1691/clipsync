@@ -62,7 +62,7 @@ impl App {
     }
 
     pub fn identity(&self) -> Result<DeviceIdentity, CoreError> {
-        Ok(self.store.secrets.load_identity()?)
+        self.init(None)
     }
 
     pub async fn room_create(

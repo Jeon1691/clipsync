@@ -28,10 +28,11 @@ Default relay: `https://clipsync.develicit.dev`. Override with `CLIPSYNC_RELAY_U
 Terminal A:
 
 ```bash
-clipsync init
 clipsync room create                 # prints a 6-digit code; waits in the background
 clipsync room create --foreground    # wait in this terminal until the other device joins
 ```
+
+`clipsync init` runs on Homebrew install and again automatically on first use if needed.
 
 Terminal B (another machine or another `CLIPSYNC_HOME`):
 
@@ -56,7 +57,7 @@ clipsync push --file ./report.pdf --file ./diagram.png
 ## Commands
 
 ```
-clipsync init
+clipsync init [--relay-url URL]      # optional; also runs on install and first use
 clipsync room create [--ttl 10m] [--no-auto-sync] [--foreground]
 clipsync room join <CODE> [--no-auto-sync]
 clipsync room leave --yes

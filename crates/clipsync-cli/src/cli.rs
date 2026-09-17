@@ -21,7 +21,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// Create local device identity and config
+    /// Create local device identity (also runs automatically on first use)
     Init {
         #[arg(long)]
         relay_url: Option<String>,

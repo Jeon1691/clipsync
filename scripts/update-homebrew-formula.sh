@@ -79,11 +79,16 @@ formula = f'''class Clipsync < Formula
     bin.install binary
   end
 
+  def post_install
+    return if ENV["HOME"].to_s.empty?
+    quiet_system bin/"clipsync", "init"
+  end
+
   def caveats
     <<~EOS
       Default relay is https://clipsync.develicit.dev
+      Device identity is created on install (or on first use).
 
-        clipsync init
         clipsync room create
     EOS
   end

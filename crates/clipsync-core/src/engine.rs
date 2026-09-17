@@ -38,6 +38,10 @@ pub struct SyncHandle {
 
 pub async fn run_daemon(clipboard: Option<SystemClipboard>) -> Result<(), CoreError> {
     let store = LocalStore::open()?;
+    let _ = crate::App {
+        store: store.clone(),
+    }
+    .identity()?;
     write_pid(&store.paths).ok();
     let clipboard = match clipboard {
         Some(c) => c,
