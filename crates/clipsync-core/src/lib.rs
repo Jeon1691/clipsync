@@ -288,6 +288,10 @@ impl App {
             "relay_url": cfg.relay_url,
             "relay": relay,
             "daemon_socket": self.store.paths.socket_file().exists(),
+            "tls": {
+                "verifier": "platform",
+                "ca_file": clipsync_transport::ca_file_path(),
+            },
             "paths": {
                 "config_dir": self.store.paths.config_dir.display().to_string(),
                 "data_dir": self.store.paths.data_dir.display().to_string(),
@@ -379,11 +383,11 @@ async fn load_push_item(
 }
 
 pub(crate) fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    let builder = reqwest::Client::builder()
         .user_agent(concat!("clipsync-cli/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .expect("http client")
+        .timeout(std::time::Duration::from_secs(20));
+    let builder = clipsync_transport::configure_reqwest(builder).expect("tls config");
+    builder.build().expect("http client")
 }
 
 async fn check_relay(url: &str) -> serde_json::Value {

@@ -1,17 +1,22 @@
 //! WebSocket client with reconnect, heartbeat, and typed frames.
 
+mod tls;
+
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{
-    connect_async,
+    connect_async_tls_with_config,
     tungstenite::{
         client::IntoClientRequest,
         http::{header::USER_AGENT, HeaderValue},
         Message,
     },
+    Connector,
 };
+
+pub use tls::{ca_file_path, configure_reqwest, CA_FILE_ENV};
 use tracing::{debug, warn};
 use url::Url;
 
@@ -59,7 +64,8 @@ impl RelayConnection {
             USER_AGENT,
             HeaderValue::from_static(concat!("clipsync-cli/", env!("CARGO_PKG_VERSION"))),
         );
-        let (stream, _) = connect_async(req).await?;
+        let connector = Connector::Rustls(tls::client_config()?);
+        let (stream, _) = connect_async_tls_with_config(req, None, false, Some(connector)).await?;
         let (mut sink, mut stream) = stream.split();
         let (in_tx, incoming) = mpsc::channel(256);
         let (out_tx, mut out_rx) = mpsc::channel::<Outgoing>(256);

@@ -73,6 +73,20 @@ clipsync doctor
 clipsync logs [--follow]
 ```
 
+## Corporate TLS
+
+ClipSync verifies HTTPS with the OS trust store (macOS Keychain). If Safari
+opens `https://clipsync.develicit.dev`, ClipSync should too after the company
+root is trusted in Keychain.
+
+If you have the private CA as a PEM file instead:
+
+```bash
+export CLIPSYNC_CA_FILE=/path/to/company-root.pem
+clipsync doctor
+clipsync room create
+```
+
 ## Security
 
 - SPAKE2 balanced PAKE; the 6-digit code is only a one-time password
