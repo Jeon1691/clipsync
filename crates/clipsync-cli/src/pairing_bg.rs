@@ -52,18 +52,11 @@ pub async fn spawn_background_create(
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
-    }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log));
 
-    let mut child = cmd.spawn()?;
+    let mut child = clipsync_daemon::spawn_isolated(&mut cmd)?;
     let pid = child.id();
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {

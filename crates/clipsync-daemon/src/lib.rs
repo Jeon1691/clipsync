@@ -2,12 +2,14 @@
 
 mod ipc;
 mod service;
+mod winspawn;
 
 pub use ipc::{
     connect_ipc, read_request, write_response, IpcClient, IpcRequest, IpcResponse, IpcServer,
     PullPayload, StatusPayload, LISTEN_ENV,
 };
 pub use service::{install_and_start, is_service_installed, restart_service, stop_and_uninstall};
+pub use winspawn::spawn_isolated;
 
 use clipsync_storage::AppPaths;
 
