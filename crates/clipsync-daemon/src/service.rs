@@ -387,10 +387,16 @@ fn xml_escape(s: &str) -> String {
 /// and reboots keep working.
 fn stable_daemon_exe(current: &Path) -> PathBuf {
     let s = current.to_string_lossy();
-    if let Some(i) = s.find("/Cellar/clipsync/") {
-        let linked = Path::new(&s[..i]).join("bin").join("clipsync");
+    let normalized = s.replace('\\', "/");
+    if let Some(i) = normalized.find("/Cellar/clipsync/") {
+        let prefix = Path::new(&s[..i]);
+        let linked = prefix.join("bin").join("clipsync");
         if linked.exists() {
             return linked;
+        }
+        let exe = prefix.join("bin").join("clipsync.exe");
+        if exe.exists() {
+            return exe;
         }
     }
     current.to_path_buf()
