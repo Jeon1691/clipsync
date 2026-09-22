@@ -159,16 +159,26 @@ pub fn encode_png_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> 
     Ok(buf)
 }
 
+pub fn decode_image_limited(bytes: &[u8]) -> Result<image::DynamicImage> {
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(32 * 1024 * 1024);
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| ClipboardError::Message(e.to_string()))?;
+    reader.limits(limits);
+    reader
+        .decode()
+        .map_err(|e| ClipboardError::Message(e.to_string()))
+}
+
 pub fn decode_image_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
-    let img = image::load_from_memory(bytes)
-        .map_err(|e| ClipboardError::Message(e.to_string()))?
-        .to_rgba8();
+    let img = decode_image_limited(bytes)?.to_rgba8();
     let (w, h) = img.dimensions();
     Ok((w, h, img.into_raw()))
 }
 
 pub fn tiff_to_png(bytes: &[u8]) -> Result<Vec<u8>> {
-    let img = image::load_from_memory(bytes).map_err(|e| ClipboardError::Message(e.to_string()))?;
+    let img = decode_image_limited(bytes)?;
     let mut buf = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
         .map_err(|e| ClipboardError::Message(e.to_string()))?;

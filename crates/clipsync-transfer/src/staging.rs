@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use clipsync_crypto::blake3_hex;
 use clipsync_protocol::{FileManifest, TransferId};
 
-use crate::sanitize::safe_filename;
+use crate::sanitize::{safe_filename, safe_transfer_id};
+use clipsync_protocol::{CHUNK_SIZE, FILE_MAX_COUNT, TRANSFER_MAX_BYTES};
 use crate::{Result, TransferError};
 
 pub struct StagingArea {
@@ -32,6 +33,7 @@ impl StagingArea {
             chunk_count,
             started: std::time::Instant::now(),
             chunks: BTreeMap::new(),
+            bytes: 0,
             failed: false,
         }
     }
@@ -42,12 +44,17 @@ impl StagingArea {
         files: &[FileManifest],
         payload: &[u8],
     ) -> Result<Vec<PathBuf>> {
+        if files.len() > FILE_MAX_COUNT || payload.len() as u64 > TRANSFER_MAX_BYTES {
+            return Err(TransferError::Integrity);
+        }
+        let id = safe_transfer_id(transfer_id.as_str())?;
         let expected = files.iter().map(|f| f.size as usize).sum::<usize>();
         if payload.len() != expected {
             return Err(TransferError::Integrity);
         }
-        let dest_dir = self.root.join(transfer_id.as_str());
-        let tmp_dir = self.root.join(format!(".{}.partial", transfer_id.as_str()));
+        let mut seen_names = std::collections::HashSet::new();
+        let dest_dir = self.root.join(&id);
+        let tmp_dir = self.root.join(format!(".{id}.partial"));
         if tmp_dir.exists() {
             let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
         }
@@ -61,6 +68,10 @@ impl StagingArea {
         let mut written = Vec::new();
         for file in files {
             let name = safe_filename(&file.name)?;
+            if !seen_names.insert(name.clone()) {
+                let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+                return Err(TransferError::UnsafeName(name));
+            }
             let end = offset + file.size as usize;
             if end > payload.len() {
                 let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
@@ -94,6 +105,7 @@ pub struct IncomingTransfer {
     pub chunk_count: u32,
     pub started: std::time::Instant,
     chunks: BTreeMap<u32, Vec<u8>>,
+    bytes: usize,
     failed: bool,
 }
 
@@ -106,14 +118,19 @@ impl IncomingTransfer {
             self.failed = true;
             return Err(TransferError::Chunk("chunk count mismatch"));
         }
-        if index >= count {
+        if count > 1024 || index >= count {
             self.failed = true;
             return Err(TransferError::Chunk("chunk index out of range"));
+        }
+        if data.len() > CHUNK_SIZE || self.bytes + data.len() > TRANSFER_MAX_BYTES as usize {
+            self.failed = true;
+            return Err(TransferError::Chunk("transfer too large"));
         }
         if self.chunks.contains_key(&index) {
             self.failed = true;
             return Err(TransferError::Chunk("duplicate chunk"));
         }
+        self.bytes += data.len();
         self.chunks.insert(index, data);
         Ok(())
     }
@@ -189,6 +206,7 @@ mod tests {
             chunk_count: 2,
             started,
             chunks: BTreeMap::new(),
+            bytes: 0,
             failed: false,
         };
         map.insert(id.0.clone(), t);
@@ -199,5 +217,25 @@ mod tests {
         );
         assert_eq!(n, 1);
         assert!(map.is_empty());
+    }
+
+    #[tokio::test]
+    async fn transfer_id_cannot_escape_inbox() {
+        let root = std::env::temp_dir().join(format!("clipsync-stage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let staging = StagingArea::new(root.clone()).unwrap();
+        let payload = b"x";
+        let files = vec![clipsync_protocol::FileManifest {
+            name: "a.txt".into(),
+            size: 1,
+            mime: None,
+            hash: clipsync_crypto::blake3_hex(payload),
+        }];
+        let err = staging
+            .commit_files(&TransferId::from("../escape"), &files, payload)
+            .await;
+        assert!(err.is_err());
+        assert!(!root.join("..").join("escape").join("a.txt").exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

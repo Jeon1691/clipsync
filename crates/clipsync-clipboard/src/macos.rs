@@ -177,7 +177,7 @@ pub fn write_file_urls(paths: &[PathBuf]) -> Result<()> {
 }
 
 fn png_or_raw_to_tiff(bytes: &[u8]) -> Result<Vec<u8>> {
-    let img = image::load_from_memory(bytes).map_err(|e| ClipboardError::Message(e.to_string()))?;
+    let img = crate::item::decode_image_limited(bytes)?;
     let mut buf = Vec::new();
     img.write_to(
         &mut std::io::Cursor::new(&mut buf),

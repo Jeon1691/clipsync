@@ -3,7 +3,7 @@
 mod sanitize;
 mod staging;
 
-pub use sanitize::safe_filename;
+pub use sanitize::{safe_filename, safe_transfer_id};
 pub use staging::{prune_idle_transfers, IncomingTransfer, StagingArea};
 
 use clipsync_crypto::{blake3_hex, derive_content_key, derive_nonce, open, seal};
