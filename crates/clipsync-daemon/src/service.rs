@@ -447,4 +447,39 @@ mod tests {
         let p = PathBuf::from("/usr/local/bin/clipsync");
         assert_eq!(stable_daemon_exe(&p), p);
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn platform_systemd_env_quotes_session_bus() {
+        let line = systemd_env_line("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1/bus");
+        assert_eq!(
+            line,
+            "Environment=\"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1/bus\"\n"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn platform_launch_label_is_gui_domain() {
+        let label = launch_label();
+        assert!(label.starts_with("gui/"), "{label}");
+        assert!(label.ends_with("/dev.clipsync.daemon"), "{label}");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn platform_windows_startup_paths_live_in_user_profile() {
+        let vbs = windows_startup_vbs();
+        let cmd = windows_startup_cmd();
+        let rendered = format!("{}", vbs.display());
+        assert!(
+            rendered.contains("Start Menu") && rendered.ends_with("ClipSync.vbs"),
+            "{rendered}"
+        );
+        assert!(
+            format!("{}", cmd.display()).ends_with("clipsync-daemon.cmd"),
+            "{}",
+            cmd.display()
+        );
+    }
 }

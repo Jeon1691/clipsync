@@ -15,28 +15,58 @@ env:
 
 jobs:
   test:
-    name: test (${{ matrix.os }})
+    name: ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            platform: linux
+          - os: macos-latest
+            platform: macos
+          - os: windows-latest
+            platform: windows
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Linux clipboard tools
+        if: matrix.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y xclip xvfb
       - name: Format
-        if: runner.os != 'Windows'
+        if: matrix.platform != 'windows'
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked
-      - name: Test
-        run: cargo test --workspace --locked
+      - name: Workspace tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.platform }}" == "linux" ]]; then
+            xvfb-run -a cargo test --workspace --locked -- --test-threads=1
+          else
+            cargo test --workspace --locked
+          fi
+      - name: Platform contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          filter='platform_'
+          if [[ "${{ matrix.platform }}" == "linux" ]]; then
+            xvfb-run -a cargo test --workspace --locked -- "$filter" --test-threads=1
+          else
+            cargo test --workspace --locked -- "$filter"
+          fi
+      - name: Relay e2e
+        shell: bash
+        run: cargo test -p clipsync-relay --test e2e --locked -- --nocapture
       - name: CLI smoke
         shell: bash
         run: |
+          set -euo pipefail
           cargo build -p clipsync-cli -p clipsync-relay --locked
           bin="./target/debug/clipsync"
           relay="./target/debug/clipsync-relay"
@@ -46,18 +76,7 @@ jobs:
           "$bin" --help | grep -q "Usage: clipsync"
           "$relay" --help
       - name: Scripts compile
-        if: runner.os != 'Windows'
+        if: matrix.platform != 'windows'
         run: |
           python3 -m py_compile scripts/e2e-brew.py
           bash -n scripts/update-homebrew-formula.sh
-
-  e2e-local-relay:
-    name: e2e (in-process relay)
-    runs-on: ubuntu-latest
-    needs: test
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Pairing, text, file, and image e2e
-        run: cargo test -p clipsync-relay --test e2e --locked -- --nocapture
