@@ -289,9 +289,12 @@ fn parse_uri_list(bytes: &[u8]) -> Result<Option<ClipboardItem>> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let path = file_uri_to_path(line)
-            .ok_or_else(|| ClipboardError::Message(format!("invalid file uri: {line}")))?;
-        let meta = std::fs::symlink_metadata(&path)?;
+        let Some(path) = file_uri_to_path(line) else {
+            return Ok(None);
+        };
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
         if meta.file_type().is_symlink() || meta.is_dir() {
             return Err(ClipboardError::Message(
                 "directory and symlink clipboard items are rejected".into(),
