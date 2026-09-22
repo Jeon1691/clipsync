@@ -2,10 +2,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use clipsync_crypto::blake3_hex;
-use clipsync_protocol::{FileManifest, TransferId};
+use clipsync_protocol::{FileManifest, TransferId, CHUNK_SIZE, FILE_MAX_COUNT, TRANSFER_MAX_BYTES};
 
 use crate::sanitize::{safe_filename, safe_transfer_id};
-use clipsync_protocol::{CHUNK_SIZE, FILE_MAX_COUNT, TRANSFER_MAX_BYTES};
 use crate::{Result, TransferError};
 
 pub struct StagingArea {

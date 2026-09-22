@@ -1,0 +1,9 @@
+#!/bin/sh
+# Reject commits that would fail CI's rustfmt check.
+set -e
+cd "$(git rev-parse --show-toplevel)"
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "pre-commit: cargo is not installed" >&2
+  exit 1
+fi
+cargo fmt --all -- --check
