@@ -174,3 +174,39 @@ pub fn tiff_to_png(bytes: &[u8]) -> Result<Vec<u8>> {
         .map_err(|e| ClipboardError::Message(e.to_string()))?;
     Ok(buf)
 }
+
+#[cfg(test)]
+mod format_tests {
+    use super::ImageMime;
+
+    #[test]
+    fn detects_supported_image_formats() {
+        assert_eq!(
+            ImageMime::detect(b"\x89PNG\r\n\x1a\nrest"),
+            Some(ImageMime::Png)
+        );
+        assert_eq!(
+            ImageMime::detect(&[0xFF, 0xD8, 0xFF, 0xE0]),
+            Some(ImageMime::Jpeg)
+        );
+        let mut webp = b"RIFF".to_vec();
+        webp.extend_from_slice(&12u32.to_le_bytes());
+        webp.extend_from_slice(b"WEBP");
+        assert_eq!(ImageMime::detect(&webp), Some(ImageMime::Webp));
+        assert_eq!(ImageMime::from_mime("image/jpg"), Some(ImageMime::Jpeg));
+    }
+
+    #[test]
+    fn rejects_non_image_payloads() {
+        for bytes in [
+            b"GIF89a".as_slice(),
+            b"BM",
+            b"II*\x00",
+            b"%PDF",
+            b"PK\x03\x04",
+            b"<svg ",
+        ] {
+            assert_eq!(ImageMime::detect(bytes), None, "{bytes:?}");
+        }
+    }
+}

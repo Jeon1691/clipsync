@@ -176,6 +176,270 @@ async fn image_push_pull_writes_output() {
     assert_eq!(saved, TINY_PNG);
 }
 
+fn encode_image(format: image::ImageFormat) -> Vec<u8> {
+    let img = image::RgbImage::from_pixel(2, 2, image::Rgb([12, 80, 160]));
+    let mut buf = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut buf), format)
+        .unwrap();
+    buf
+}
+
+fn tiny_webp() -> Vec<u8> {
+    let mut bytes = b"RIFF".to_vec();
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(b"WEBPVP8L");
+    bytes.extend_from_slice(&4u32.to_le_bytes());
+    bytes.extend_from_slice(&[0x2F, 0, 0, 0]);
+    bytes
+}
+
+async fn transfer_item(a: &TempDir, b: &TempDir, item: ClipboardItem, out: &std::path::Path) {
+    let store_b = store_in(b);
+    let out_owned = out.to_path_buf();
+    let pull = tokio::spawn(async move {
+        clipsync_core::engine_oneshot_pull(&store_b, false, true, Some(out_owned)).await
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    clipsync_core::engine_oneshot_push(&store_in(a), item)
+        .await
+        .expect("push");
+    pull.await.unwrap().expect("pull");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn format_matrix_images_roundtrip() {
+    let (relay, _h) = start_relay().await;
+    let (a_dir, b_dir) = pair_homes(&relay).await;
+    let cases = [
+        (
+            "png",
+            ImageMime::Png,
+            encode_image(image::ImageFormat::Png),
+            "clipboard.png",
+        ),
+        (
+            "jpeg",
+            ImageMime::Jpeg,
+            encode_image(image::ImageFormat::Jpeg),
+            "clipboard.jpg",
+        ),
+        (
+            "tiff-as-file-not-here",
+            ImageMime::Webp,
+            tiny_webp(),
+            "clipboard.webp",
+        ),
+    ];
+    for (label, mime, bytes, filename) in cases {
+        assert_eq!(ImageMime::detect(&bytes), Some(mime), "{label}");
+        let out = b_dir.path().join(format!("img-{label}"));
+        transfer_item(
+            &a_dir,
+            &b_dir,
+            ClipboardItem::Image {
+                mime,
+                bytes: bytes.clone(),
+                width: Some(2),
+                height: Some(2),
+            },
+            &out,
+        )
+        .await;
+        let saved = std::fs::read(out.join(filename)).unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(saved, bytes, "{label} bytes changed in transit");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn format_matrix_files_roundtrip() {
+    let (relay, _h) = start_relay().await;
+    let (a_dir, b_dir) = pair_homes(&relay).await;
+    let samples: Vec<(&str, &str, Vec<u8>)> = vec![
+        ("notes.txt", "text/plain", b"plain text\n".to_vec()),
+        ("sheet.csv", "text/csv", b"a,b\n1,2\n".to_vec()),
+        ("data.json", "application/json", br#"{"ok":true}"#.to_vec()),
+        ("page.html", "text/html", b"<p>hi</p>".to_vec()),
+        (
+            "icon.svg",
+            "image/svg+xml",
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec(),
+        ),
+        ("feed.xml", "application/xml", b"<root/>".to_vec()),
+        ("readme.md", "text/markdown", b"# title\n".to_vec()),
+        ("style.css", "text/css", b"body{}".to_vec()),
+        ("app.js", "text/javascript", b"console.log(1)\n".to_vec()),
+        ("main.rs", "text/x-rust", b"fn main() {}\n".to_vec()),
+        ("Main.kt", "text/x-kotlin", b"fun main() {}\n".to_vec()),
+        ("App.swift", "text/x-swift", b"print(1)\n".to_vec()),
+        ("app.py", "text/x-python", b"print(1)\n".to_vec()),
+        ("run.sh", "text/x-shellscript", b"#!/bin/sh\n".to_vec()),
+        ("setup.ps1", "text/plain", b"Write-Host hi\n".to_vec()),
+        (
+            "doc.pdf",
+            "application/pdf",
+            b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec(),
+        ),
+        ("scan.ps", "application/postscript", b"%!PS\n".to_vec()),
+        ("note.rtf", "application/rtf", br"{\rtf1 hi}".to_vec()),
+        (
+            "book.epub",
+            "application/epub+zip",
+            b"PK\x03\x04epub".to_vec(),
+        ),
+        (
+            "sheet.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            b"PK\x03\x04xlsx".to_vec(),
+        ),
+        (
+            "deck.pptx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            b"PK\x03\x04pptx".to_vec(),
+        ),
+        (
+            "memo.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            b"PK\x03\x04docx".to_vec(),
+        ),
+        (
+            "text.odt",
+            "application/vnd.oasis.opendocument.text",
+            b"PK\x03\x04odt".to_vec(),
+        ),
+        (
+            "archive.zip",
+            "application/zip",
+            b"PK\x03\x04\x14\x00".to_vec(),
+        ),
+        (
+            "archive.tar.gz",
+            "application/gzip",
+            b"\x1f\x8b\x08\x00payload".to_vec(),
+        ),
+        (
+            "archive.7z",
+            "application/x-7z-compressed",
+            b"7z\xBC\xAF\x27\x1C".to_vec(),
+        ),
+        ("disk.iso", "application/x-iso9660-image", b"CD001".to_vec()),
+        ("photo.gif", "image/gif", b"GIF89a\x01\x00\x01\x00".to_vec()),
+        ("photo.bmp", "image/bmp", b"BM\x00\x00\x00\x00".to_vec()),
+        ("photo.tif", "image/tiff", b"II*\x00".to_vec()),
+        (
+            "photo.heic",
+            "image/heic",
+            b"\x00\x00\x00\x18ftypheic".to_vec(),
+        ),
+        (
+            "photo.avif",
+            "image/avif",
+            b"\x00\x00\x00\x18ftypavif".to_vec(),
+        ),
+        ("clip.ico", "image/x-icon", b"\x00\x00\x01\x00".to_vec()),
+        ("clip.webp", "image/webp", tiny_webp()),
+        ("song.mp3", "audio/mpeg", b"ID3\x04\x00\x00".to_vec()),
+        (
+            "song.wav",
+            "audio/wav",
+            b"RIFF\x00\x00\x00\x00WAVE".to_vec(),
+        ),
+        ("song.flac", "audio/flac", b"fLaC".to_vec()),
+        ("song.ogg", "audio/ogg", b"OggS".to_vec()),
+        (
+            "clip.mp4",
+            "video/mp4",
+            b"\x00\x00\x00\x18ftypisom".to_vec(),
+        ),
+        ("clip.webm", "video/webm", b"\x1A\x45\xDF\xA3".to_vec()),
+        (
+            "clip.mkv",
+            "video/x-matroska",
+            b"\x1A\x45\xDF\xA3mkv".to_vec(),
+        ),
+        (
+            "clip.avi",
+            "video/x-msvideo",
+            b"RIFF\x00\x00\x00\x00AVI ".to_vec(),
+        ),
+        (
+            "mod.wasm",
+            "application/wasm",
+            b"\0asm\x01\x00\x00\x00".to_vec(),
+        ),
+        (
+            "db.sqlite",
+            "application/vnd.sqlite3",
+            b"SQLite format 3\x00".to_vec(),
+        ),
+        ("font.ttf", "font/ttf", b"\x00\x01\x00\x00".to_vec()),
+        ("font.woff2", "font/woff2", b"wOFF2".to_vec()),
+        (
+            "app.exe",
+            "application/vnd.microsoft.portable-executable",
+            b"MZ".to_vec(),
+        ),
+        ("app.elf", "application/x-elf", b"\x7fELF".to_vec()),
+        (
+            "cert.pem",
+            "application/x-pem-file",
+            b"-----BEGIN CERTIFICATE-----\n".to_vec(),
+        ),
+        ("keys.p12", "application/x-pkcs12", b"\x30\x80".to_vec()),
+        (
+            "model.npy",
+            "application/octet-stream",
+            b"\x93NUMPY\x01\x00".to_vec(),
+        ),
+        (
+            "table.parquet",
+            "application/vnd.apache.parquet",
+            b"PAR1".to_vec(),
+        ),
+        ("rows.avro", "application/avro", b"Obj\x01".to_vec()),
+        (
+            "config.toml",
+            "application/toml",
+            b"name = \"clipsync\"\n".to_vec(),
+        ),
+        (
+            "config.yaml",
+            "application/yaml",
+            b"name: clipsync\n".to_vec(),
+        ),
+        (
+            "my report.pdf",
+            "application/pdf",
+            b"%PDF-1.7 spaced\n".to_vec(),
+        ),
+        (
+            "사진.png",
+            "image/png",
+            encode_image(image::ImageFormat::Png),
+        ),
+        (
+            "blob.bin",
+            "application/octet-stream",
+            vec![0xA5; 300 * 1024],
+        ),
+    ];
+
+    let files = samples
+        .iter()
+        .map(|(name, mime, bytes)| FileRef {
+            name: (*name).to_string(),
+            bytes: bytes.clone(),
+            mime: Some((*mime).to_string()),
+            staged_path: None,
+        })
+        .collect();
+    let out = b_dir.path().join("files");
+    transfer_item(&a_dir, &b_dir, ClipboardItem::Files { files }, &out).await;
+    for (name, _, bytes) in &samples {
+        let saved = std::fs::read(out.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(&saved, bytes, "{name} bytes changed in transit");
+    }
+}
+
 #[tokio::test]
 async fn wrong_pairing_code_rejected() {
     let (relay, _h) = start_relay().await;

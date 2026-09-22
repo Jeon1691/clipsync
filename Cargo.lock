@@ -1193,6 +1193,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac",
+ "image",
  "ipnet",
  "parking_lot",
  "rand 0.8.8",

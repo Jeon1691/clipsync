@@ -67,7 +67,10 @@ jobs:
           fi
       - name: Relay e2e
         shell: bash
-        run: cargo test -p clipsync-relay --test e2e --locked -- --nocapture
+        run: cargo test -p clipsync-relay --test e2e --locked -- --skip format_matrix --nocapture
+      - name: Image and file formats
+        shell: bash
+        run: cargo test -p clipsync-relay --test e2e --locked format_matrix -- --test-threads=1 --nocapture
       - name: Desktop app
         shell: bash
         run: cargo build -p clipsync-desktop --locked
