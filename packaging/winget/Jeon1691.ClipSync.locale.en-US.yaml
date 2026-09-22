@@ -1,0 +1,12 @@
+PackageIdentifier: Jeon1691.ClipSync
+PackageVersion: 0.1.12
+PackageLocale: en-US
+Publisher: Jeon1691
+PublisherUrl: https://github.com/Jeon1691/clipsync
+PackageName: ClipSync
+PackageUrl: https://github.com/Jeon1691/clipsync
+License: MIT
+LicenseUrl: https://github.com/Jeon1691/clipsync/blob/master/LICENSE-MIT
+ShortDescription: End-to-end encrypted clipboard sync
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

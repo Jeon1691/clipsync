@@ -88,3 +88,10 @@ jobs:
         run: |
           python3 -m py_compile scripts/e2e-brew.py
           bash -n scripts/update-homebrew-formula.sh
+      - name: PowerShell install script parses
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $errors = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile("scripts/install-windows.ps1", [ref]$null, [ref]$errors)
+          if ($errors) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }

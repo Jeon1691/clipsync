@@ -51,12 +51,23 @@ background service (`clipsync daemon`).
 
 ### Windows
 
-Download `clipsync-x86_64-pc-windows-msvc.zip` from
-[Releases](https://github.com/Jeon1691/clipsync/releases), put `clipsync.exe` on
-`PATH`, then:
+PowerShell downloads the latest release into `%LOCALAPPDATA%\ClipSync` and adds it to your user PATH:
 
 ```powershell
+irm https://raw.githubusercontent.com/Jeon1691/clipsync/master/scripts/install-windows.ps1 | iex
 clipsync room create
+```
+
+winget installs that same zip. From a clone:
+
+```powershell
+./scripts/install-windows.ps1 -Winget
+```
+
+Or point winget at the manifests in the repo (they match the latest GitHub release):
+
+```powershell
+winget install --manifest .\packaging\winget --accept-package-agreements --accept-source-agreements
 ```
 
 ### iOS and Android (native)
