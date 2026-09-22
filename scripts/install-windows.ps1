@@ -54,7 +54,7 @@ PackageIdentifier: Jeon1691.ClipSync
 PackageVersion: $ver
 DefaultLocale: en-US
 ManifestType: version
-ManifestVersion: 1.6.0
+ManifestVersion: 1.12.0
 "@ | Set-Content -Path (Join-Path $work "Jeon1691.ClipSync.yaml") -Encoding utf8
     @"
 PackageIdentifier: Jeon1691.ClipSync
@@ -65,7 +65,7 @@ PackageName: ClipSync
 License: MIT
 ShortDescription: End-to-end encrypted clipboard sync
 ManifestType: defaultLocale
-ManifestVersion: 1.6.0
+ManifestVersion: 1.12.0
 "@ | Set-Content -Path (Join-Path $work "Jeon1691.ClipSync.locale.en-US.yaml") -Encoding utf8
     @"
 PackageIdentifier: Jeon1691.ClipSync
@@ -80,7 +80,7 @@ Installers:
   InstallerUrl: $($asset.browser_download_url)
   InstallerSha256: $sha
 ManifestType: installer
-ManifestVersion: 1.6.0
+ManifestVersion: 1.12.0
 "@ | Set-Content -Path (Join-Path $work "Jeon1691.ClipSync.installer.yaml") -Encoding utf8
     winget install --manifest $work --accept-package-agreements --accept-source-agreements
     Write-Host "Installed with winget. Open a new terminal and run: clipsync --version"
