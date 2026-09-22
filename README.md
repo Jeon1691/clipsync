@@ -1,5 +1,8 @@
 # ClipSync CLI
 
+[![CI](https://github.com/Jeon1691/clipsync/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/Jeon1691/clipsync/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Jeon1691/clipsync?label=release&color=2ea44f)](https://github.com/Jeon1691/clipsync/releases/latest)
+
 End-to-end encrypted clipboard sync for **macOS**, **Linux**, and **Windows**.
 Pair two devices with a one-time 6-digit code. After pairing, a background
 daemon copies text, images, and files between machines over a zero-knowledge
