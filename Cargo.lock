@@ -1144,7 +1144,6 @@ dependencies = [
  "clipsync-storage",
  "eframe",
  "tokio",
- "tracing",
 ]
 
 [[package]]
