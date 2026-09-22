@@ -30,6 +30,7 @@ impl StagingArea {
         IncomingTransfer {
             transfer_id: transfer_id.clone(),
             chunk_count,
+            started: std::time::Instant::now(),
             chunks: BTreeMap::new(),
             failed: false,
         }
@@ -91,6 +92,7 @@ impl StagingArea {
 pub struct IncomingTransfer {
     pub transfer_id: TransferId,
     pub chunk_count: u32,
+    pub started: std::time::Instant,
     chunks: BTreeMap<u32, Vec<u8>>,
     failed: bool,
 }
@@ -142,5 +144,60 @@ impl IncomingTransfer {
     pub fn fail(&mut self) {
         self.failed = true;
         self.chunks.clear();
+    }
+
+    pub fn is_idle(&self, now: std::time::Instant, ttl: std::time::Duration) -> bool {
+        now.saturating_duration_since(self.started) > ttl
+    }
+}
+
+/// Drop unfinished transfers that have been sitting longer than `ttl`.
+pub fn prune_idle_transfers(
+    incoming: &mut std::collections::HashMap<String, IncomingTransfer>,
+    now: std::time::Instant,
+    ttl: std::time::Duration,
+) -> usize {
+    let before = incoming.len();
+    incoming.retain(|_, t| !t.is_idle(now, ttl) && !t.failed);
+    while incoming.len() > 32 {
+        let oldest = incoming
+            .iter()
+            .min_by_key(|(_, t)| t.started)
+            .map(|(id, _)| id.clone());
+        match oldest {
+            Some(id) => {
+                incoming.remove(&id);
+            }
+            None => break,
+        }
+    }
+    before.saturating_sub(incoming.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn stability_idle_transfers_are_pruned() {
+        let mut map = std::collections::HashMap::new();
+        let id = TransferId("old".into());
+        let started = Instant::now();
+        let t = IncomingTransfer {
+            transfer_id: id.clone(),
+            chunk_count: 2,
+            started,
+            chunks: BTreeMap::new(),
+            failed: false,
+        };
+        map.insert(id.0.clone(), t);
+        let n = prune_idle_transfers(
+            &mut map,
+            started + Duration::from_secs(120),
+            Duration::from_secs(60),
+        );
+        assert_eq!(n, 1);
+        assert!(map.is_empty());
     }
 }

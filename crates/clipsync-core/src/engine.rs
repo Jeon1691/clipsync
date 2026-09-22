@@ -22,7 +22,9 @@ use clipsync_protocol::{
     MessageId, Recipient, RoutingHeader, TransferId, PROTOCOL_VERSION,
 };
 use clipsync_storage::{LocalStore, RoomRecord};
-use clipsync_transfer::{decrypt_chunk, split_and_encrypt, IncomingTransfer, StagingArea};
+use clipsync_transfer::{
+    decrypt_chunk, prune_idle_transfers, split_and_encrypt, IncomingTransfer, StagingArea,
+};
 use clipsync_transport::{backoff_delay, http_to_ws, join_ws, Incoming, RelayConnection};
 
 use crate::loop_guard::LoopGuard;
@@ -92,6 +94,15 @@ pub async fn run_daemon(clipboard: Option<SystemClipboard>) -> Result<(), CoreEr
     let _ = engine.await;
     clipsync_daemon::remove_pid(&store.paths);
     Ok(())
+}
+
+fn drop_idle_transfers(
+    incoming: &mut std::collections::HashMap<String, IncomingTransfer>,
+    manifests: &mut std::collections::HashMap<String, clipsync_protocol::ManifestPlain>,
+) {
+    let ttl = std::time::Duration::from_secs(clipsync_protocol::TRANSFER_IDLE_SECS);
+    let _ = prune_idle_transfers(incoming, std::time::Instant::now(), ttl);
+    manifests.retain(|id, _| incoming.contains_key(id));
 }
 
 fn req_is_shutdown(_resp: &IpcResponse) -> bool {
@@ -204,12 +215,13 @@ async fn sync_loop(
         if *shutdown.borrow() {
             break;
         }
+        let started = std::time::Instant::now();
         match run_session(&store, &clipboard, &handle, &mut shutdown).await {
             Ok(()) => attempt = 0,
             Err(e) => {
                 warn!(error = %e, "sync session ended");
                 handle.connected.store(false, Ordering::Relaxed);
-                attempt += 1;
+                attempt = clipsync_transport::next_attempt(attempt, started.elapsed());
                 let delay = backoff_delay(attempt);
                 tokio::select! {
                     _ = tokio::time::sleep(delay) => {}
@@ -394,6 +406,7 @@ async fn run_session(
                         }
                     }
                     Incoming::Control(ControlMessage::Manifest { routing, nonce, ciphertext, .. }) => {
+                        drop_idle_transfers(&mut incoming, &mut manifests);
                         match open_manifest(&epoch_key, &routing, &nonce, &ciphertext) {
                             Ok(manifest) => {
                                 let id = routing.transfer_id.clone();
@@ -411,6 +424,7 @@ async fn run_session(
                         warn!(code, message, "relay error");
                     }
                     Incoming::Binary(buf) => {
+                        drop_idle_transfers(&mut incoming, &mut manifests);
                         match decrypt_chunk(&epoch_key, &buf) {
                             Ok((tid, idx, count, pt)) => {
                                 if let Some(t) = incoming.get_mut(tid.as_str()) {

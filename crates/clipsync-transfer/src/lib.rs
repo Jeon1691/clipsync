@@ -4,7 +4,7 @@ mod sanitize;
 mod staging;
 
 pub use sanitize::safe_filename;
-pub use staging::{IncomingTransfer, StagingArea};
+pub use staging::{prune_idle_transfers, IncomingTransfer, StagingArea};
 
 use clipsync_crypto::{blake3_hex, derive_content_key, derive_nonce, open, seal};
 use clipsync_protocol::{

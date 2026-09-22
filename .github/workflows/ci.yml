@@ -50,6 +50,9 @@ jobs:
           else
             cargo test --workspace --locked
           fi
+      - name: Long-run stability
+        shell: bash
+        run: cargo test --workspace --locked -- stability_
       - name: Platform contract
         shell: bash
         run: |

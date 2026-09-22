@@ -44,9 +44,12 @@ impl LoopGuard {
     }
 
     fn gc(&mut self) {
+        self.gc_at(Instant::now());
+    }
+
+    fn gc_at(&mut self, now: Instant) {
         let hash_ttl = Duration::from_secs(LOOP_CACHE_TTL_SECS);
         let id_ttl = Duration::from_secs(REPLAY_CACHE_TTL_SECS);
-        let now = Instant::now();
         while self
             .hashes
             .front()
@@ -93,6 +96,17 @@ pub fn content_hash(item: &ClipboardItem) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stability_echo_cache_expires() {
+        let mut g = LoopGuard::default();
+        let item = ClipboardItem::Text { text: "x".into() };
+        g.remember_remote("m", &item);
+        let later = Instant::now() + Duration::from_secs(REPLAY_CACHE_TTL_SECS + 2);
+        g.gc_at(later);
+        assert!(!g.is_echo(&item));
+        assert!(!g.seen_message("m"));
+    }
 
     #[test]
     fn echo_detected() {

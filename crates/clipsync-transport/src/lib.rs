@@ -232,12 +232,23 @@ pub fn should_force_reconnect(
     last_watchdog: SystemTime,
     now: SystemTime,
 ) -> bool {
-    const WAKE_JUMP: Duration = Duration::from_secs(2);
+    // A 2s gap also happens when the runtime is busy. Real sleep jumps are much larger.
+    const WAKE_JUMP: Duration = Duration::from_secs(8);
     let stale = Duration::from_secs(HEARTBEAT_SECS.saturating_mul(2).saturating_add(5));
     if now.duration_since(last_watchdog).unwrap_or_default() > WAKE_JUMP {
         return true;
     }
     now.duration_since(last_rx).unwrap_or_default() > stale
+}
+
+/// A session that stayed up resets the failure streak so one blip does not
+/// climb to the 15s cap.
+pub fn next_attempt(attempt: u32, session_uptime: Duration) -> u32 {
+    if session_uptime >= Duration::from_secs(30) {
+        1
+    } else {
+        attempt.saturating_add(1).min(8)
+    }
 }
 
 pub fn backoff_delay(attempt: u32) -> Duration {
@@ -282,5 +293,29 @@ mod tests {
     fn first_backoff_is_subsecond() {
         let d = backoff_delay(1);
         assert!(d < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn stability_short_stall_is_not_sleep() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let now = t0 + Duration::from_secs(3);
+        assert!(!should_force_reconnect(t0, t0, now));
+    }
+
+    #[test]
+    fn stability_long_session_resets_backoff() {
+        assert_eq!(next_attempt(6, Duration::from_secs(120)), 1);
+        assert_eq!(next_attempt(2, Duration::from_millis(200)), 3);
+    }
+
+    #[test]
+    fn stability_backoff_stays_bounded() {
+        let mut attempt = 0u32;
+        let mut max = Duration::ZERO;
+        for _ in 0..500 {
+            attempt = next_attempt(attempt, Duration::from_millis(10));
+            max = max.max(backoff_delay(attempt));
+        }
+        assert!(max <= Duration::from_secs(16), "{max:?}");
     }
 }

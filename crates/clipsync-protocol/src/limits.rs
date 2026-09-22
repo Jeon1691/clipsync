@@ -21,6 +21,7 @@ pub const AEAD_TAG_LEN: usize = 16;
 pub const DEBOUNCE_MS: u64 = 200;
 pub const WATCH_POLL_MS: u64 = 200;
 pub const HEARTBEAT_SECS: u64 = 20;
+pub const TRANSFER_IDLE_SECS: u64 = 60;
 pub const REPLAY_CACHE_TTL_SECS: u64 = 120;
 pub const LOOP_CACHE_TTL_SECS: u64 = 15;
 pub const CLOCK_SKEW_SECS: i64 = 5;
