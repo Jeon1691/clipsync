@@ -37,6 +37,18 @@ brew update && brew upgrade jeon1691/tap/clipsync
 Prebuilt bottles: macOS Apple Silicon and Intel, Linux x86_64 (and arm64 when
 the optional Linux arm job succeeds).
 
+### Desktop app
+
+One native window for macOS, Windows, and Linux. It uses the same identity and
+login daemon as the CLI.
+
+```bash
+cargo run -p clipsync-desktop
+```
+
+Create or join a room in the window. After pairing, clipboard sync stays in the
+background service (`clipsync daemon`).
+
 ### Windows
 
 Download `clipsync-x86_64-pc-windows-msvc.zip` from
