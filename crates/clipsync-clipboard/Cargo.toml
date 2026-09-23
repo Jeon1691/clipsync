@@ -10,6 +10,7 @@ description = "ClipSync OS clipboard adapters"
 arboard.workspace = true
 async-trait.workspace = true
 clipsync-protocol.workspace = true
+directories.workspace = true
 image.workspace = true
 infer.workspace = true
 parking_lot.workspace = true

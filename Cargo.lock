@@ -1053,6 +1053,7 @@ dependencies = [
  "arboard",
  "async-trait",
  "clipsync-protocol",
+ "directories",
  "image",
  "infer",
  "objc2 0.6.4",

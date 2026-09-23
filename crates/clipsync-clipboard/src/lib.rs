@@ -4,6 +4,7 @@ mod command;
 mod detect;
 mod item;
 mod mock;
+mod stage;
 mod watch;
 
 #[cfg(target_os = "macos")]
