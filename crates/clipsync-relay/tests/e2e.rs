@@ -4,7 +4,7 @@ use std::time::Duration;
 use clipsync_clipboard::{ClipboardItem, FileRef, ImageMime, MockClipboard, SystemClipboard};
 use clipsync_core::{begin_create_room, join_room, App};
 use clipsync_crypto::blake3_hex;
-use clipsync_protocol::{FRAME_HARD_CAP, IMAGE_MAX_BYTES, TEXT_MAX_BYTES};
+use clipsync_protocol::{FILE_MAX_COUNT, FRAME_HARD_CAP, IMAGE_MAX_BYTES, TEXT_MAX_BYTES};
 use clipsync_relay::{router, RelayConfig};
 use clipsync_storage::AppPaths;
 use clipsync_transfer::safe_filename;
@@ -423,17 +423,19 @@ async fn format_matrix_files_roundtrip() {
         ),
     ];
 
-    let files = samples
-        .iter()
-        .map(|(name, mime, bytes)| FileRef {
-            name: (*name).to_string(),
-            bytes: bytes.clone(),
-            mime: Some((*mime).to_string()),
-            staged_path: None,
-        })
-        .collect();
     let out = b_dir.path().join("files");
-    transfer_item(&a_dir, &b_dir, ClipboardItem::Files { files }, &out).await;
+    for chunk in samples.chunks(FILE_MAX_COUNT) {
+        let files = chunk
+            .iter()
+            .map(|(name, mime, bytes)| FileRef {
+                name: (*name).to_string(),
+                bytes: bytes.clone(),
+                mime: Some((*mime).to_string()),
+                staged_path: None,
+            })
+            .collect();
+        transfer_item(&a_dir, &b_dir, ClipboardItem::Files { files }, &out).await;
+    }
     for (name, _, bytes) in &samples {
         let saved = std::fs::read(out.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(&saved, bytes, "{name} bytes changed in transit");
@@ -462,6 +464,7 @@ fn limits_and_sanitize() {
     assert_eq!(TEXT_MAX_BYTES, 256 * 1024);
     assert_eq!(IMAGE_MAX_BYTES, 16 * 1024 * 1024);
     assert_eq!(FRAME_HARD_CAP, 384 * 1024);
+    assert_eq!(FILE_MAX_COUNT, 16);
     assert!(safe_filename("../etc/passwd").is_err());
     assert_eq!(safe_filename("diagram.png").unwrap(), "diagram.png");
     let _ = blake3_hex(b"abc");
