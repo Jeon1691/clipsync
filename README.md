@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/Jeon1691/clipsync/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/Jeon1691/clipsync/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Jeon1691/clipsync?label=release&color=2ea44f)](https://github.com/Jeon1691/clipsync/releases/latest)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/{owner}/{repo}/badge)](https://scorecard.dev/viewer/?uri=github.com/{owner}/{repo})
 
 End-to-end encrypted clipboard sync for **macOS**, **Linux**, and **Windows**.
 Pair two devices with a one-time 6-digit code. After pairing, a background
