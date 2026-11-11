@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use rustls::pki_types::CertificateDer;
+use rustls::pki_types::{pem::PemObject, CertificateDer};
 use rustls::ClientConfig;
 use rustls_platform_verifier::BuilderVerifierExt;
 use tracing::info;
@@ -58,8 +58,7 @@ fn load_extra_cas() -> Result<Vec<CertificateDer<'static>>, TransportError> {
     };
     let data = std::fs::read(&path)
         .map_err(|e| TransportError::Protocol(format!("{CA_FILE_ENV} ({path}): {e}")))?;
-    let mut cursor = std::io::Cursor::new(data);
-    let certs = rustls_pemfile::certs(&mut cursor)
+    let certs = CertificateDer::pem_slice_iter(&data)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| TransportError::Protocol(format!("{CA_FILE_ENV} parse: {e}")))?;
     if certs.is_empty() {

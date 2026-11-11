@@ -1,0 +1,55 @@
+name: security
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  schedule:
+    - cron: '15 18 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.23.0 --locked
+      - name: Audit workspace dependencies
+        run: cargo audit --deny unsound --deny yanked
+      - name: Audit fuzz dependencies
+        run: cargo audit --file fuzz/Cargo.lock --deny unsound --deny yanked
+
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Fuzz protocol decoders
+        run: |
+          mkdir -p fuzz/corpus/protocol
+          cargo +nightly fuzz run protocol fuzz/corpus/protocol fuzz/seeds/protocol -- -max_total_time=60 -max_len=1048576
