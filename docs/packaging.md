@@ -14,12 +14,12 @@ brew install jeon1691/tap/clipsync
 
 The tap is https://github.com/Jeon1691/homebrew-tap.
 
-CI (`ci.yml`) runs format, clippy, unit tests, and an in-process pairing e2e
-on Ubuntu and macOS.
+CI (`ci.yml`) runs format, Clippy, workspace tests, platform checks, and relay
+end-to-end tests on Linux, macOS, and Windows, plus a minimum-Rust build.
 
 CD (`release.yml`) on `vX.Y.Z` tags:
 
-1. Builds macOS arm64/x86_64 and Linux x86_64 (Linux arm is best-effort)
+1. Builds macOS arm64/x86_64, Linux x86_64, and Windows x86_64 (Linux arm is best-effort)
 2. Signs build provenance for the archives using GitHub artifact attestations,
    verifies the signatures, and publishes the archives, SHA-256 files, and
    `.sigstore.json` attestation bundles
@@ -28,6 +28,13 @@ CD (`release.yml`) on `vX.Y.Z` tags:
 Manual runs build and verify artifacts without publishing by default. Select a
 `v*` tag and enable the `publish` input to publish a manual run. A branch run
 never publishes a release or updates the Homebrew tap.
+
+Before creating a release tag, write `docs/releases/vX.Y.Z.md` with a readable
+summary of significant changes, security fixes, and upgrade impact. Review the
+tag's actual contents and successful CI/security results. The publishing job
+requires that file and uses it as the release body; a compare link or generated
+commit list alone is insufficient. Rerunning a release uploads assets while
+preserving any later edits to its published body.
 
 macOS release jobs use `macos-15`; GitHub retired all `macos-14` runners on
 2026-11-02.
