@@ -86,7 +86,7 @@ toml = "0.8"
 tower-http = { version = "0.6", features = ["trace", "limit", "timeout"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
-ulid = { version = "1", features = ["serde"] }
+ulid = { version = "3", features = ["serde"] }
 uniffi = "0.32.2"
 url = "2"
 which = "7"
