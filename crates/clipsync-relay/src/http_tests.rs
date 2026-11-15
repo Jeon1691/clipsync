@@ -115,9 +115,19 @@ async fn server_reports_bind_failure_and_serves_health_and_metrics_on_a_local_li
         webhook_url: None,
         webhook_secret: None,
     };
-    assert!(serve(config(address)).await.is_err());
+    let transport = || RelayTransportConfig {
+        allow_http: true,
+        ..Default::default()
+    };
+    let error = serve_with_transport(config(address), transport())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::AddrInUse
+    );
     drop(occupied);
-    let task = tokio::spawn(serve(config(address)));
+    let task = tokio::spawn(serve_with_transport(config(address), transport()));
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(2))

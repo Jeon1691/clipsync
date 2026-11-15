@@ -11,6 +11,7 @@ on:
       - rust-toolchain.toml
       - '.cargo/**'
       - '**/build.rs'
+      - 'crates/**'
       - Dockerfile
       - Dockerfile.reproducible
       - 'vendor/**'
@@ -24,6 +25,7 @@ on:
       - rust-toolchain.toml
       - '.cargo/**'
       - '**/build.rs'
+      - 'crates/**'
       - Dockerfile
       - Dockerfile.reproducible
       - 'vendor/**'

@@ -1760,6 +1760,176 @@
         }
       ],
       "notes": "The old source times out waiting for Close. The fixed handler captures the sender before removing routing state and validates member authorization before registration. Actual websocket regression checks Close, post-close send rejection, preserved owner Ping, revoked state/epoch and rejected reconnect. RED/GREEN was observed on macOS; each platform registration still requires its CI execution."
+    },
+    {
+      "id": "F89",
+      "kind": "Runtime",
+      "fixes": [
+        "39e32b21437e02223b9c93256d072d30b8690652"
+      ],
+      "description": "Relay credential loading blocked indefinitely opening a FIFO before rejecting non-regular files",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/secure_listener.rs",
+          "package": "clipsync-relay",
+          "target": "test:secure_listener",
+          "test": "token_secret_fifo_without_a_writer_is_rejected_before_listening",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/secure_listener.rs",
+          "package": "clipsync-relay",
+          "target": "test:secure_listener",
+          "test": "tls_key_fifo_without_a_writer_is_rejected_before_listening",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/secure_listener.rs",
+          "package": "clipsync-relay",
+          "target": "test:secure_listener",
+          "test": "tls_certificate_fifo_without_a_writer_is_rejected_before_listening",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        }
+      ],
+      "notes": "One file-opening defect across three configuration paths, not three defects. With production source 822af5d1 and the new bounded tests, all three writer-less 0600 FIFO cases hit the five-second child-process rejection deadline. Unix nonblocking open followed by descriptor metadata validation passes them while preserving certificate/key symlinks. Local RED/GREEN was recorded on macOS; Linux requires its owning CI execution and Windows does not use these Unix FIFO fixtures."
+    },
+    {
+      "id": "F90",
+      "kind": "Build/CI",
+      "fixes": [
+        "2ebdde2102b5028e6689df0335ca966074b6a98b"
+      ],
+      "description": "Release publication rejected valid Windows GNU binary-mode checksum records by comparing their formatting with Linux text-mode output",
+      "checks": [
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_release_checksums.py",
+          "test": "test_release_checksums.ReleaseChecksumTests.test_windows_gnu_binary_marker_is_accepted",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        },
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_release_publication.py",
+          "test": "test_release_publication.ReleasePublicationTests.test_new_release_is_drafted_uploaded_downloaded_verified_then_published",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        }
+      ],
+      "notes": "The 8ee9fbf publication shell replayed with the Windows hash-space-asterisk-basename fixture fails before release mutation; the fixed publisher accepts that exact record format. The helper also verifies the actual archive digest and exact basename, rather than accepting arbitrary checksum-file outputs. Windows names the artifact format; these Python/publication fixtures execute in the Unix CI jobs, not on a claimed Windows host."
+    },
+    {
+      "id": "F91",
+      "kind": "Build/CI",
+      "fixes": [
+        "2ebdde2102b5028e6689df0335ca966074b6a98b"
+      ],
+      "description": "A container run waiting for a release could publish its old source revision after the release tag had been retargeted",
+      "checks": [
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_release_source.py",
+          "test": "test_release_source.ReleaseSourceTests.test_tag_retargeted_after_initial_check_is_rejected_before_promotion",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        },
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_release_source.py",
+          "test": "test_release_source.ReleaseSourceTests.test_current_default_branch_must_contain_the_tagged_commit",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        }
+      ],
+      "notes": "Actual local Git repositories retain an old workflow SHA on the default branch while the remote tag is moved to another commit. The prior ancestry-only guard still accepts it; the fixed fresh-fetch tag comparison rejects it. The same source check runs before candidate package writes and again after provenance verification before final version promotion. Deleted tags and changed default branches are related source-binding variants, not extra defects. The fixture writes only disposable local repositories and calls no remote hosting service."
+    },
+    {
+      "id": "F92",
+      "kind": "Build/CI",
+      "fixes": [
+        "c5ad280e8cacff1dc3d598b8f25ac1dbff2648d3"
+      ],
+      "description": "A failed reconstruction rerun overwrote the report source identity while leaving an earlier run's success markers in the same report directory",
+      "checks": [
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_build_reconstruction.py",
+          "test": "test_build_reconstruction.BuildReconstructionTests.test_failed_rerun_preserves_old_source_bound_report_and_has_no_success_markers",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        },
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_build_reconstruction.py",
+          "test": "test_build_reconstruction.BuildReconstructionTests.test_second_build_and_comparison_failures_do_not_publish_success",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        }
+      ],
+      "notes": "Replaying the wrapper before c847d2d in its synthetic Docker fixture with a pre-existing success report and failing first build changes source-commit.txt but retains old comparison.txt/reproduced.sha256. The corrected wrapper creates a source-bound report child for every invocation and emits success markers only after both builds and comparisons succeed. Integrated as c5ad280. This is report-lifecycle regression evidence, not an actual independent-build result."
+    },
+    {
+      "id": "F93",
+      "kind": "Build/CI",
+      "fixes": [
+        "c5ad280e8cacff1dc3d598b8f25ac1dbff2648d3"
+      ],
+      "description": "The reconstruction recipe left its Docker architecture selected by the host and did not bind a recorded target platform to both builds and runs",
+      "checks": [
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_build_reconstruction.py",
+          "test": "test_build_reconstruction.BuildReconstructionTests.test_each_success_has_its_own_source_recipe_platform_and_report",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        },
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_build_reconstruction.py",
+          "test": "test_build_reconstruction.BuildReconstructionTests.test_explicit_arm64_is_used_for_both_environment_builds_and_runs",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        }
+      ],
+      "notes": "The pre-c847d2d wrapper passes no Docker --platform argument and records no platform, so its multiarch base recipe does not identify one stable cross-host reconstruction target. The Docker fixture now verifies linux/amd64 by default and an explicit linux/arm64 choice for both independent builds and runs, with platform.txt retained. This environment-identity failure is distinct from F92 report reuse. These argument/recording fixtures do not prove actual cross-architecture output identity. Integrated as c5ad280."
+    },
+    {
+      "id": "F94",
+      "kind": "Build/CI",
+      "fixes": [
+        "2e42f06061a636a5f58b3aaf96a40d48fd75e00c"
+      ],
+      "description": "The mobile integration fixture treated the room-file write as completion before background pairing had persisted its sync configuration",
+      "checks": [],
+      "notes": "This intermittent test-readiness race was observed during the workspace suite; the fixture now waits for the persisted sync-enabled boundary before checking daemon behavior. It is a fixture correction, not a newly claimed mobile product defect. The targeted current test passes, but the old fixture can also pass intermittently and no deterministic focused regression has been established. Nearby passing coverage receives no credit."
     }
   ]
 }
