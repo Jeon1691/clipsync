@@ -93,7 +93,18 @@ impl RelayTransportConfig {
 }
 
 pub(crate) fn read_config_file(path: &Path, private: bool) -> anyhow::Result<Vec<u8>> {
-    let file = std::fs::File::open(path)
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // A blocking FIFO open waits for a writer before we can inspect its
+        // descriptor. Nonblocking mode lets the regular-file check reject it;
+        // it has no effect on regular files and still follows managed symlinks.
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
         .context("cannot open configured file; check the relay user's access")?;
     let metadata = file
         .metadata()

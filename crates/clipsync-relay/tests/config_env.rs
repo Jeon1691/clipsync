@@ -172,3 +172,24 @@ fn token_secret_file_preserves_binary_key_and_rejects_ambiguous_or_bad_files() {
         assert!(String::from_utf8_lossy(&output.stderr).contains("private credential permissions"));
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn token_secret_symlink_preserves_private_regular_file_bytes() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("token.secret");
+    let link = directory.path().join("token-link.secret");
+    std::fs::write(&path, [0u8; 32]).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    symlink("token.secret", &link).unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "relay_config_from_env_child", "--nocapture"])
+        .env(CASE_ENV, "file")
+        .env("CLIPSYNC_RELAY_BIND", "127.0.0.1:0")
+        .env("CLIPSYNC_RELAY_TOKEN_SECRET_FILE", link)
+        .env_remove(SECRET_ENV)
+        .output()
+        .unwrap();
+    assert_child_success(output);
+}

@@ -160,6 +160,94 @@ async fn rejection(mut command: Command, expected: &str) {
     assert!(!error.contains("synthetic-private-relay-test-key-32bytes"));
 }
 
+#[cfg(unix)]
+fn make_fifo(path: &Path) {
+    let status = std::process::Command::new("mkfifo")
+        .args(["-m", "600"])
+        .arg(path)
+        .status()
+        .expect("create isolated FIFO fixture");
+    assert!(status.success());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn token_secret_fifo_without_a_writer_is_rejected_before_listening() {
+    let identity = Identity::new();
+    let path = identity.directory.path().join("token.fifo");
+    make_fifo(&path);
+    let mut command = identity.command(unused_port());
+    command
+        .env_remove("CLIPSYNC_RELAY_TOKEN_SECRET")
+        .env("CLIPSYNC_RELAY_TOKEN_SECRET_FILE", path)
+        .arg("--allow-http");
+    rejection(command, "regular file").await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn tls_key_fifo_without_a_writer_is_rejected_before_listening() {
+    let identity = Identity::new();
+    let path = identity.directory.path().join("key.pem");
+    std::fs::remove_file(&path).unwrap();
+    make_fifo(&path);
+    rejection(identity.tls_command(unused_port()), "regular file").await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn tls_certificate_fifo_without_a_writer_is_rejected_before_listening() {
+    let identity = Identity::new();
+    let path = identity.directory.path().join("cert.pem");
+    std::fs::remove_file(&path).unwrap();
+    make_fifo(&path);
+    rejection(identity.tls_command(unused_port()), "regular file").await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn verified_https_keeps_certificate_and_private_key_symlink_support() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let identity = Identity::new();
+    let directory = identity.directory.path();
+    for name in ["cert", "key"] {
+        std::fs::rename(
+            directory.join(format!("{name}.pem")),
+            directory.join(format!("{name}.target")),
+        )
+        .unwrap();
+        symlink(
+            format!("{name}.target"),
+            directory.join(format!("{name}.pem")),
+        )
+        .unwrap();
+    }
+    std::fs::set_permissions(
+        directory.join("key.target"),
+        std::fs::Permissions::from_mode(0o640),
+    )
+    .unwrap();
+    let port = unused_port();
+    let mut child = identity.tls_command(port).spawn().unwrap();
+    wait_for_server(&mut child, port).await;
+    let tls = identity.client_config(false);
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .use_preconfigured_tls(tls.as_ref().clone())
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    assert!(client
+        .get(format!("https://localhost:{port}/healthz"))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .is_success());
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
+}
+
 #[tokio::test]
 async fn default_and_incomplete_tls_configuration_fail_closed() {
     let identity = Identity::new();
