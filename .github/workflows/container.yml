@@ -7,6 +7,16 @@ on:
     tags: ['v*.*.*']
   release:
     types: [published]
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - '**/Cargo.toml'
+      - Cargo.lock
+      - 'crates/**'
+      - 'vendor/**'
+      - scripts/smoke-relay-container.sh
+      - .github/workflows/container.yml
   workflow_dispatch:
 
 permissions:
@@ -74,7 +84,7 @@ jobs:
 
   publish:
     needs: build
-    if: github.event_name != 'workflow_dispatch' && github.repository == 'Jeon1691/clipsync'
+    if: (github.event_name == 'push' || github.event_name == 'release') && github.repository == 'Jeon1691/clipsync'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
