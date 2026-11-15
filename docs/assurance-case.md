@@ -3,8 +3,9 @@
 Assessment date: 2026-11-15. Scope: this Rust workspace, its support scripts and
 distribution workflows, based on v0.1.16 plus the changes linked from this
 document. This is a maintainable claim/evidence argument, not a certification,
-proof or independent audit. AI-assisted source review and automated tests do not
-establish the human security review required by the Gold badge.
+proof or independent audit. AI-assisted source review and automated tests alone do not establish human
+review. The maintainer review recorded below supplies the separate human
+assessment; it is not an independent audit.
 
 ## Requirements, assumptions and threats
 
@@ -99,6 +100,20 @@ assessed in [the complete criterion register](best-practices-levels.md).
 Before a human reviewer signs off this case, inspect the named authorization,
 key lifecycle, input validation, file/native, webhook and release boundaries;
 review failing/error paths and the documented assumptions. Record reviewer,
-date, exact revision, findings, fixes/tests and accepted residual risks. Keep
-`security_review` unmet until that actual human review occurs; understanding
-secure-design principles alone is not a record of this review.
+date, exact revision, findings, fixes/tests and accepted residual risks. Understanding secure-design principles alone is not a review record. The
+maintainer confirmation below records the actual review of this candidate.
+
+## Human review record
+
+On **2026-11-15**, maintainer **Jeon1691** personally confirmed reviewing the
+code and assurance case in [PR #16](https://github.com/Jeon1691/clipsync/pull/16),
+source commit `d0501a74e4d1d02160ac113bf1f542731163221a`. The confirmation covered
+authentication, key management, file paths, webhook destinations and release
+trust boundaries, including the documented remaining risks. Findings and
+regressions are recorded above and in the PR. The review uses the stated
+security requirements and endpoint/deployment assumptions.
+
+This is an internal human security/design review. It does not create another
+maintainer, independent audit or second-person change-review history, and it
+does not attest that test-coverage or reproducibility targets are met. Revisit
+the case after material protocol, authorization or boundary changes.
