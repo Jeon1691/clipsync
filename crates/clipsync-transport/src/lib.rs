@@ -490,6 +490,9 @@ mod tests {
     #[test]
     fn backward_clock_and_exact_deadlines_do_not_disconnect_healthy_sessions() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+        // Windows SystemTime stores 100ns ticks, so a 1ns addition rounds away.
+        // Keep the exact boundary and exercise a representable instant after it.
+        let after_boundary = Duration::from_micros(1);
         assert!(!should_force_reconnect(
             now,
             now,
@@ -503,7 +506,7 @@ mod tests {
         assert!(should_force_reconnect(
             now,
             now,
-            now + Duration::from_secs(8) + Duration::from_nanos(1)
+            now + Duration::from_secs(8) + after_boundary
         ));
         let stale = Duration::from_secs(HEARTBEAT_SECS * 2 + 5);
         let watchdog = now + stale;
@@ -511,7 +514,7 @@ mod tests {
         assert!(should_force_reconnect(
             now,
             watchdog,
-            watchdog + Duration::from_nanos(1)
+            watchdog + after_boundary
         ));
         assert_eq!(next_attempt(u32::MAX, Duration::from_secs(29)), 8);
         assert_eq!(next_attempt(u32::MAX, Duration::from_secs(30)), 1);

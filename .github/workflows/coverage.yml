@@ -89,10 +89,14 @@ jobs:
             echo 'Full source report: download the coverage artifact and open html/index.html.'
             echo 'Inline test-only modules/helpers are excluded from product metrics; all production workspace sources remain included.'
             echo 'Historical-defect regression coverage is checked separately by the 50% ledger gate in ci.yml.'
-            echo 'Silver gate: at least 80% product lines and executable regions. Gold targets: 90% statements and 80% branches. Product sources remain included; report the measured results.'
+            echo 'Linux gate: at least 80% product lines and executable regions. macOS Gold gate: at least 90% lines/regions and 80% branches. Product sources remain included.'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Require Silver product coverage
+        if: matrix.platform == 'linux'
         run: python3 scripts/check-coverage.py coverage/summary.json
+      - name: Require Gold product coverage
+        if: matrix.platform == 'macos'
+        run: python3 scripts/check-coverage.py coverage/summary.json --minimum-percent 90 --minimum-branch-percent 80
       - name: Upload LCOV, HTML, and line/branch summaries
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

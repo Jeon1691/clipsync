@@ -5,7 +5,7 @@
 use std::sync::{Arc, OnceLock};
 
 use rustls::pki_types::{pem::PemObject, CertificateDer};
-use rustls::ClientConfig;
+use rustls::{ClientConfig, RootCertStore};
 use rustls_platform_verifier::BuilderVerifierExt;
 use tracing::info;
 
@@ -88,6 +88,17 @@ fn load_extra_cas() -> Result<Vec<CertificateDer<'static>>, TransportError> {
             "{CA_FILE_ENV} ({path}) contained no certificates"
         )));
     }
+    // PEM decoding checks base64, not certificate DER. Some platform
+    // verifiers silently discard invalid roots, so validate every entry here.
+    let mut validation = RootCertStore::empty();
+    for (index, certificate) in certs.iter().enumerate() {
+        validation.add(certificate.clone()).map_err(|error| {
+            TransportError::Protocol(format!(
+                "{CA_FILE_ENV} ({path}) certificate {} invalid DER: {error}",
+                index + 1
+            ))
+        })?;
+    }
     Ok(certs)
 }
 
@@ -148,10 +159,32 @@ mod tests {
         )
         .unwrap();
         child("der", Some(&invalid_der), &valid);
+        for (case, contents) in [
+            (
+                "mixed-der-first",
+                format!(
+                    "{}{}",
+                    std::fs::read_to_string(&invalid_der).unwrap(),
+                    certificate.pem()
+                ),
+            ),
+            (
+                "mixed-der-last",
+                format!(
+                    "{}{}",
+                    certificate.pem(),
+                    std::fs::read_to_string(&invalid_der).unwrap()
+                ),
+            ),
+        ] {
+            let mixed = directory.path().join(format!("{case}.pem"));
+            std::fs::write(&mixed, contents).unwrap();
+            child(case, Some(&mixed), &valid);
+        }
         let bundle = directory.path().join("bundle.pem");
         std::fs::write(&bundle, certificate.pem().repeat(2)).unwrap();
         child("bundle", Some(&bundle), &valid);
-        child("recover", Some(&empty), &valid);
+        child("recover", Some(&invalid_der), &valid);
     }
 
     #[test]
@@ -174,16 +207,6 @@ mod tests {
                 assert_eq!(load_extra_cas().unwrap().len(), 2);
                 assert!(client_config().is_ok());
             }
-            "der" => {
-                assert_eq!(load_extra_cas().unwrap().len(), 1);
-                let error = match client_config() {
-                    Err(error) => error,
-                    Ok(_) => panic!("invalid DER must not become trusted"),
-                };
-                assert!(
-                    matches!(error, TransportError::Protocol(ref text) if text.contains("tls extra roots"))
-                );
-            }
             "recover" => {
                 assert!(client_config().is_err());
                 let path = ca_file_path().unwrap();
@@ -195,15 +218,25 @@ mod tests {
                     "successful configuration is immutable for this process"
                 );
             }
-            "io" | "empty" | "pem" => {
+            "io" | "empty" | "pem" | "der" | "mixed-der-first" | "mixed-der-last" => {
                 let expected = match case.as_str() {
                     "empty" => "contained no certificates",
                     "pem" => "parse:",
+                    "der" | "mixed-der-first" => "certificate 1 invalid DER:",
+                    "mixed-der-last" => "certificate 2 invalid DER:",
                     _ => CA_FILE_ENV,
                 };
+                let error = match load_extra_cas() {
+                    Err(TransportError::Protocol(error)) => error,
+                    other => panic!("invalid CA configuration was accepted: {other:?}"),
+                };
                 assert!(
-                    matches!(load_extra_cas(), Err(TransportError::Protocol(text)) if text.contains(expected))
+                    error.contains(expected) && error.contains(CA_FILE_ENV),
+                    "{error}"
                 );
+                if matches!(case.as_str(), "der" | "mixed-der-first" | "mixed-der-last") {
+                    assert!(error.contains(&ca_file_path().unwrap()), "{error}");
+                }
                 assert!(client_config().is_err());
                 assert!(configure_reqwest(reqwest::Client::builder().no_proxy()).is_err());
                 let runtime = tokio::runtime::Builder::new_current_thread()
