@@ -102,3 +102,51 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
         .unwrap()
         .contains("pairing attempt limit"));
 }
+
+#[tokio::test]
+async fn server_reports_bind_failure_and_serves_health_and_metrics_on_a_local_listener() {
+    let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = occupied.local_addr().unwrap();
+    let config = |bind| RelayConfig {
+        bind,
+        public_url: format!("http://{bind}"),
+        token_secret: vec![32; 32],
+        webhook_url: None,
+        webhook_secret: None,
+    };
+    assert!(serve(config(address)).await.is_err());
+    drop(occupied);
+    let task = tokio::spawn(serve(config(address)));
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let health = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(response) = client.get(format!("http://{address}/healthz")).send().await {
+                break response;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        health.json::<serde_json::Value>().await.unwrap()["service"],
+        "clipsync-relay"
+    );
+    let metrics = client
+        .get(format!("http://{address}/metrics"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(metrics
+        .lines()
+        .any(|line| line == "clipsync_ws_connections 0"));
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+}

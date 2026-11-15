@@ -591,6 +591,48 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("unknown or expired pairing code"));
+        let second_home = tempfile::tempdir().unwrap();
+        seed_home(second_home.path());
+        let second_identity = DeviceIdentity::from_bytes("mobile-joining-device".into(), [12; 32]);
+        let second_paths = AppPaths::from_root(second_home.path().into());
+        std::fs::write(
+            second_paths.identity_file(),
+            serde_json::to_vec(&second_identity.to_stored()).unwrap(),
+        )
+        .unwrap();
+        let joiner = ClipSyncClient::new(
+            second_home.path().display().to_string(),
+            format!("http://{address}"),
+            String::new(),
+            String::new(),
+        )
+        .unwrap();
+        let joined = joiner.join_room(offer.pairing_code).unwrap();
+        assert_eq!(joined, offer.room_id);
+        assert_eq!(
+            joiner.status().unwrap().room_id.as_deref(),
+            Some(joined.as_str())
+        );
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while client.app.store.current_room().unwrap().room_id.as_str() != joined {
+            assert!(
+                std::time::Instant::now() < until,
+                "creator did not commit completed pairing"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            client
+                .app
+                .store
+                .load_epoch_key(&joined.clone().into())
+                .unwrap(),
+            joiner.app.store.load_epoch_key(&joined.into()).unwrap()
+        );
+        std::env::set_var(
+            "CLIPSYNC_HOME",
+            client.app.store.paths.data_dir.parent().unwrap(),
+        );
         server.abort();
 
         // A malformed configuration makes daemon initialization fail before

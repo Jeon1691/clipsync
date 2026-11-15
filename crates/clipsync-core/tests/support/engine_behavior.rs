@@ -804,8 +804,18 @@ fn daemon_answers_commands_and_removes_pid_and_socket_after_interrupt() {
         let task = tokio::spawn(run_daemon(Some(
             SystemClipboard::mock(MockClipboard::new()),
         )));
-        wait_until(|| async { paths.socket_file().exists() }).await;
-        let mut connection = clipsync_daemon::connect_ipc(&paths).await.unwrap();
+        // Socket creation precedes listen on Unix. Readiness means a client can
+        // connect, including when the rest of the workspace is testing in parallel.
+        let mut connection = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(connection) = clipsync_daemon::connect_ipc(&paths).await {
+                    break connection;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("daemon did not begin accepting IPC connections");
         let status = connection
             .request(&IpcRequest::Status)
             .await
@@ -891,6 +901,763 @@ fn manifest(kind: ItemKind, payload: &[u8]) -> ManifestPlain {
         image: None,
         text_chars: None,
     }
+}
+
+fn encrypted_text(routing: RoutingHeader, text: &str) -> ControlMessage {
+    let key = derive_content_key(&EPOCH, routing.transfer_id.as_str()).unwrap();
+    let nonce = derive_nonce(&key, 0).unwrap();
+    let ciphertext = seal(
+        &key,
+        &nonce,
+        format!("{}:text", routing.message_id).as_bytes(),
+        text.as_bytes(),
+    )
+    .unwrap();
+    ControlMessage::TextEnvelope {
+        routing,
+        nonce: hex::encode(nonce),
+        ciphertext: hex::encode(ciphertext),
+    }
+}
+
+fn encrypted_manifest(routing: RoutingHeader, manifest: &ManifestPlain) -> ControlMessage {
+    let key = derive_content_key(&EPOCH, routing.transfer_id.as_str()).unwrap();
+    let nonce = derive_nonce(&key, u32::MAX).unwrap();
+    let ciphertext = seal(
+        &key,
+        &nonce,
+        format!("{}:manifest", routing.transfer_id).as_bytes(),
+        &serde_json::to_vec(manifest).unwrap(),
+    )
+    .unwrap();
+    ControlMessage::Manifest {
+        routing,
+        nonce: hex::encode(nonce),
+        ciphertext: hex::encode(ciphertext),
+        chunk_count: manifest.chunk_count,
+        total_bytes: manifest.total_bytes,
+    }
+}
+
+fn hello(room_id: &RoomId) -> ControlMessage {
+    ControlMessage::HelloOk {
+        room_id: room_id.clone(),
+        peer_online: false,
+        peers: Vec::new(),
+        queued_text: None,
+        device_token: None,
+    }
+}
+
+fn scripted_peer(url: &str, room_id: RoomId) -> Peer {
+    let local = Peer::new(url, "script-device-a", 51);
+    let remote = Peer::new(url, "script-device-z", 52);
+    local.save_room(room_id, "script-token".into(), &remote, DeviceRole::Owner);
+    local
+}
+
+#[tokio::test]
+async fn live_session_recovers_from_repeated_hello_duplicate_text_and_corrupt_transfers() {
+    use crate::test_relay::{receive, send, Server};
+    use axum::extract::ws::Message;
+    let room_id = RoomId::new();
+    let room = room_id.clone();
+    let mut server = Server::websocket(move |mut socket| async move {
+        assert!(matches!(
+            receive(&mut socket).await,
+            ControlMessage::Hello { .. }
+        ));
+        send(&mut socket, hello(&room)).await;
+        let queued_routing = text_routing();
+        let ControlMessage::TextEnvelope {
+            routing,
+            nonce,
+            ciphertext,
+        } = encrypted_text(queued_routing, "queued update")
+        else {
+            unreachable!()
+        };
+        send(
+            &mut socket,
+            ControlMessage::HelloOk {
+                room_id: room.clone(),
+                peer_online: true,
+                peers: vec![clipsync_protocol::PeerInfo {
+                    device_id: "script-device-z".into(),
+                    device_name: "peer".into(),
+                    os: "fixture".into(),
+                    role: DeviceRole::Member,
+                    online: true,
+                }],
+                queued_text: Some(clipsync_protocol::QueuedEnvelope {
+                    routing,
+                    nonce,
+                    ciphertext,
+                }),
+                device_token: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            receive(&mut socket).await,
+            ControlMessage::NoiseHandshake { .. }
+        ));
+        send(
+            &mut socket,
+            ControlMessage::NoiseHandshake {
+                message: "bad handshake".into(),
+            },
+        )
+        .await;
+        let text = encrypted_text(text_routing(), "deduplicated text");
+        send(&mut socket, text.clone()).await;
+        assert!(matches!(
+            receive(&mut socket).await,
+            ControlMessage::Ack {
+                status: AckStatus::Delivered,
+                ..
+            }
+        ));
+        send(&mut socket, text).await;
+        send(
+            &mut socket,
+            ControlMessage::Manifest {
+                routing: text_routing(),
+                nonce: "not hex".into(),
+                ciphertext: "invalid".into(),
+                chunk_count: 1,
+                total_bytes: 1,
+            },
+        )
+        .await;
+        socket
+            .send(Message::Binary(vec![0, 1, 2].into()))
+            .await
+            .unwrap();
+        let orphan = split_and_encrypt(&EPOCH, &TransferId::new(), b"orphan").unwrap();
+        socket
+            .send(Message::Binary(orphan.frames[0].clone().into()))
+            .await
+            .unwrap();
+        for failure in ["count", "hash", "mime"] {
+            let routing = text_routing();
+            let mut manifest = manifest(ItemKind::Image, b"invalid image");
+            if failure == "count" {
+                manifest.chunk_count = 2;
+            }
+            if failure == "hash" {
+                manifest.content_hash = "wrong hash".into();
+            }
+            let chunks = split_and_encrypt(&EPOCH, &routing.transfer_id, b"invalid image").unwrap();
+            send(&mut socket, encrypted_manifest(routing, &manifest)).await;
+            socket
+                .send(Message::Binary(chunks.frames[0].clone().into()))
+                .await
+                .unwrap();
+        }
+        send(
+            &mut socket,
+            ControlMessage::Error {
+                code: "temporary".into(),
+                message: "retry allowed".into(),
+            },
+        )
+        .await;
+        send(&mut socket, ControlMessage::Pong { ts: 7 }).await;
+        socket.send(Message::Pong(vec![].into())).await.unwrap();
+        send(
+            &mut socket,
+            encrypted_text(text_routing(), "recovered after invalid transfers"),
+        )
+        .await;
+        assert!(matches!(
+            receive(&mut socket).await,
+            ControlMessage::Ack {
+                status: AckStatus::Delivered,
+                ..
+            }
+        ));
+        socket.send(Message::Close(None)).await.unwrap();
+    })
+    .await;
+    let peer = scripted_peer(&server.url, room_id);
+    let clipboard = MockClipboard::new();
+    let handle = sync_handle();
+    let (_, mut shutdown) = watch::channel(false);
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        run_session(
+            &peer.app.store,
+            &SystemClipboard::mock(clipboard.clone()),
+            &handle,
+            &mut shutdown,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    server.finish().await;
+    assert!(error.to_string().contains("relay disconnected"));
+    assert!(
+        matches!(clipboard.get(), Some(ClipboardItem::Text { text }) if text == "recovered after invalid transfers")
+    );
+    assert_eq!(
+        clipboard.signature().await.unwrap(),
+        "3",
+        "duplicate or rejected input wrote the clipboard"
+    );
+    assert_eq!(
+        std::fs::read_dir(&peer.app.store.paths.inbox_dir)
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn pull_reports_empty_closed_and_live_text_states_and_recovers_from_corrupt_binary() {
+    use crate::test_relay::{receive, send, Server};
+    use axum::extract::ws::Message;
+    for case in ["empty", "closed", "text", "binary"] {
+        let room_id = RoomId::new();
+        let room = room_id.clone();
+        let mut server = Server::websocket(move |mut socket| async move {
+            assert!(matches!(
+                receive(&mut socket).await,
+                ControlMessage::Hello { .. }
+            ));
+            if case == "closed" {
+                return;
+            }
+            send(&mut socket, hello(&room)).await;
+            if case == "empty" {
+                return;
+            }
+            if case == "text" {
+                send(&mut socket, encrypted_text(text_routing(), "live pull")).await;
+                return;
+            }
+            send(
+                &mut socket,
+                ControlMessage::Manifest {
+                    routing: text_routing(),
+                    nonce: "!".into(),
+                    ciphertext: "!".into(),
+                    chunk_count: 1,
+                    total_bytes: 0,
+                },
+            )
+            .await;
+            socket.send(Message::Binary(vec![0].into())).await.unwrap();
+            let orphan = split_and_encrypt(&EPOCH, &TransferId::new(), b"orphan").unwrap();
+            socket
+                .send(Message::Binary(orphan.frames[0].clone().into()))
+                .await
+                .unwrap();
+            for failure in ["count", "hash", "valid"] {
+                let routing = text_routing();
+                let mut manifest = manifest(ItemKind::Text, b"binary pull");
+                if failure == "count" {
+                    manifest.chunk_count = 2;
+                }
+                if failure == "hash" {
+                    manifest.content_hash = "bad hash".into();
+                }
+                let chunks =
+                    split_and_encrypt(&EPOCH, &routing.transfer_id, b"binary pull").unwrap();
+                send(&mut socket, encrypted_manifest(routing, &manifest)).await;
+                socket
+                    .send(Message::Binary(chunks.frames[0].clone().into()))
+                    .await
+                    .unwrap();
+            }
+        })
+        .await;
+        let peer = scripted_peer(&server.url, room_id);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            oneshot_pull(&peer.app.store, false, case != "empty", None),
+        )
+        .await
+        .unwrap();
+        server.finish().await;
+        match case {
+            "empty" => assert!(result.unwrap_err().to_string().contains("no queued item")),
+            "closed" => assert!(matches!(result, Err(CoreError::Timeout))),
+            "text" => assert_eq!(result.unwrap().text.as_deref(), Some("live pull")),
+            "binary" => assert_eq!(result.unwrap().text.as_deref(), Some("binary pull")),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn hello_wait_rejects_relay_errors_and_disconnects_and_skips_unrelated_frames() {
+    use crate::test_relay::{send, Server};
+    for case in ["error", "closed", "success"] {
+        let room = RoomId::new();
+        let mut server = Server::websocket(move |mut socket| async move {
+            send(&mut socket, ControlMessage::Pong { ts: 1 }).await;
+            if case == "error" {
+                send(
+                    &mut socket,
+                    ControlMessage::Error {
+                        code: "revoked".into(),
+                        message: "device removed".into(),
+                    },
+                )
+                .await;
+            } else if case == "success" {
+                send(&mut socket, hello(&room)).await;
+            }
+        })
+        .await;
+        let mut connection = RelayConnection::connect(&join_ws(&server.url, "/v1/ws"))
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), wait_hello_ok(&mut connection))
+            .await
+            .unwrap();
+        server.finish().await;
+        match case {
+            "error" => assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("relay revoked: device removed")),
+            "closed" => assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("relay closed before hello")),
+            _ => result.unwrap(),
+        }
+    }
+    assert_eq!(_unused_ws("https://relay.example"), "wss://relay.example");
+}
+
+#[tokio::test]
+async fn hello_presence_only_starts_noise_for_a_known_online_peer_with_a_valid_public_key() {
+    use crate::test_relay::{receive, Server};
+    let mut server = Server::websocket(|mut socket| async move {
+        // The eligible case below sends exactly one handshake. Other presence
+        // records must not try to authenticate an absent or unknown device.
+        assert!(matches!(
+            receive(&mut socket).await,
+            ControlMessage::NoiseHandshake { .. }
+        ));
+    })
+    .await;
+    let room_id = RoomId::new();
+    let peer = scripted_peer(&server.url, room_id.clone());
+    let connection = RelayConnection::connect(&join_ws(&server.url, "/v1/ws"))
+        .await
+        .unwrap();
+    let room = peer.app.store.current_room().unwrap();
+    let clipboard = SystemClipboard::mock(MockClipboard::new());
+    let mut guard = LoopGuard::default();
+    let handle = sync_handle();
+    let notifier = Notifier::new(clipsync_storage::NotifyConfig {
+        enabled: false,
+        preview: false,
+    });
+    let mut signature = "unchanged".into();
+    for case in [
+        "unrelated",
+        "no-online",
+        "unknown",
+        "bad-key",
+        "responder",
+        "already-done",
+        "eligible",
+    ] {
+        let mut room = room.clone();
+        let mut info = clipsync_protocol::PeerInfo {
+            device_id: "script-device-z".into(),
+            device_name: "peer".into(),
+            os: "fixture".into(),
+            role: DeviceRole::Member,
+            online: case != "no-online",
+        };
+        if case == "unknown" {
+            info.device_id = "unrecognized".into();
+        }
+        if case == "bad-key" {
+            room.peers[0].public_key_hex = "not a key".into();
+        }
+        if case == "responder" {
+            room.peers[0].device_id = "000-first-device".into();
+            info.device_id = room.peers[0].device_id.clone();
+        }
+        let message = if case == "unrelated" {
+            ControlMessage::PeerLeft {
+                device_id: info.device_id,
+            }
+        } else {
+            ControlMessage::HelloOk {
+                room_id: room_id.clone(),
+                peer_online: true,
+                peers: vec![info],
+                queued_text: None,
+                device_token: None,
+            }
+        };
+        let mut noise = None;
+        let mut done = case == "already-done";
+        apply_hello_ok(
+            &message,
+            &peer.identity,
+            &room,
+            &EPOCH,
+            &clipboard,
+            &mut guard,
+            &handle,
+            &notifier,
+            &mut signature,
+            &mut noise,
+            &mut done,
+            &connection,
+        )
+        .await;
+        assert_eq!(noise.is_some(), case == "eligible", "{case}");
+        assert_eq!(done, case == "already-done");
+    }
+    server.finish().await;
+    assert_eq!(signature, "unchanged");
+}
+
+#[tokio::test]
+async fn ipc_keeps_in_memory_pause_and_last_binary_item_available_when_state_is_corrupt() {
+    let peer = Peer::new("http://127.0.0.1:1", "ipc-recovery", 53);
+    std::fs::write(peer.app.store.paths.state_file(), b"not JSON").unwrap();
+    let handle = sync_handle();
+    for (request, paused) in [(IpcRequest::Pause, true), (IpcRequest::Resume, false)] {
+        assert!(handle_ipc(&peer.app.store, &handle, request).await.ok);
+        assert_eq!(handle.paused.load(Ordering::Relaxed), paused);
+        assert_eq!(
+            std::fs::read(peer.app.store.paths.state_file()).unwrap(),
+            b"not JSON"
+        );
+    }
+    let empty = handle_ipc(&peer.app.store, &handle, IpcRequest::Pull).await;
+    assert!(empty.ok && empty.pull.is_none());
+    *handle.last_item.lock() = Some(ClipboardItem::Image {
+        mime: ImageMime::Png,
+        bytes: PNG.into(),
+        width: None,
+        height: None,
+    });
+    let image = handle_ipc(&peer.app.store, &handle, IpcRequest::Pull)
+        .await
+        .pull
+        .unwrap();
+    assert_eq!(image.kind, "image");
+    assert!(image.text.is_none());
+    assert!(
+        handle_ipc(&peer.app.store, &handle, IpcRequest::Shutdown)
+            .await
+            .ok
+    );
+    let status = handle_ipc(&peer.app.store, &handle, IpcRequest::Status)
+        .await
+        .status
+        .unwrap();
+    assert!(status.room_id.is_none());
+    assert_eq!(status.device_id, Some(peer.identity.device_id.clone()));
+    assert_eq!(status.last_item_kind, Some(ItemKind::Image));
+}
+
+#[tokio::test]
+async fn create_failure_retains_the_offer_and_error_for_background_status() {
+    use crate::test_relay::{receive, send, Server};
+    use axum::{routing::post, Json, Router};
+    let room = RoomId::new();
+    let id = room.clone();
+    let mut server = Server::websocket_routes(
+        Router::new().route(
+            "/v1/pairing/create",
+            post(move || {
+                let room_id = id.clone();
+                async move {
+                    Json(CreatePairingResponse {
+                        room_id,
+                        pairing_code: "482913".into(),
+                        pairing_token: "fixture".into(),
+                        expires_at: Utc::now() + ChronoDuration::seconds(60),
+                        ws_path: "/v1/ws".into(),
+                    })
+                }
+            }),
+        ),
+        |mut socket| async move {
+            assert!(matches!(
+                receive(&mut socket).await,
+                ControlMessage::Hello {
+                    role: ClientRole::PairingA,
+                    ..
+                }
+            ));
+            send(
+                &mut socket,
+                ControlMessage::Error {
+                    code: "expired".into(),
+                    message: "create deadline passed".into(),
+                },
+            )
+            .await;
+        },
+    )
+    .await;
+    let peer = Peer::new(&server.url, "create-failure", 54);
+    let printed = Arc::new(Mutex::new(None));
+    let offer = printed.clone();
+    let error = peer
+        .app
+        .room_create(Some(Duration::from_secs(999)), true, false, move |value| {
+            *offer.lock() = Some(value.pairing_code.clone());
+        })
+        .await
+        .err()
+        .unwrap();
+    server.finish().await;
+    assert!(error
+        .to_string()
+        .contains("expired: create deadline passed"));
+    assert_eq!(printed.lock().as_deref(), Some("482913"));
+    let saved = peer.app.store.load_pairing_wait().unwrap().unwrap();
+    assert_eq!(saved.status, "failed");
+    assert_eq!(saved.room_id, room.to_string());
+    assert_eq!(saved.error.as_deref(), Some(error.to_string().as_str()));
+    assert_eq!(
+        peer.app.status().await.unwrap()["pairing"]["status"],
+        "failed"
+    );
+    assert!(peer.app.store.load_state().unwrap().rooms.is_empty());
+}
+
+#[test]
+fn app_pairing_enables_sync_and_supports_one_shot_pull_without_installing_a_service() {
+    const NAME: &str = "engine::behavior_tests::app_pairing_enables_sync_and_supports_one_shot_pull_without_installing_a_service";
+    if !in_worker(NAME) {
+        worker(NAME, b"", &[]);
+        return;
+    }
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let pair = Pair::new().await;
+        let (sent, received) = tokio::sync::oneshot::channel();
+        let offer_channel = Arc::new(Mutex::new(Some(sent)));
+        let app = pair.a.app.clone();
+        let creator = tokio::spawn(async move {
+            app.room_create(Some(Duration::from_secs(60)), false, true, move |offer| {
+                let _ = offer_channel
+                    .lock()
+                    .take()
+                    .unwrap()
+                    .send(offer.pairing_code.clone());
+            })
+            .await
+        });
+        let code = tokio::time::timeout(Duration::from_secs(5), received)
+            .await
+            .unwrap()
+            .unwrap();
+        let joined =
+            tokio::time::timeout(Duration::from_secs(10), pair.b.app.room_join(&code, false))
+                .await
+                .unwrap()
+                .unwrap();
+        let created = tokio::time::timeout(Duration::from_secs(10), creator)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(created.room_id, joined.room_id);
+        let state = pair.a.app.store.load_pairing_wait().unwrap().unwrap();
+        assert_eq!(state.status, "paired");
+        for peer in [&pair.a, &pair.b] {
+            let cfg = peer.app.store.load_config().unwrap();
+            assert!(cfg.sync.enabled && cfg.sync.auto_start);
+            assert_eq!(cfg.sync.direction, SyncDirection::Both);
+        }
+        wait_until(|| client_connection_count(&pair.url, 0)).await;
+        oneshot_push(
+            &pair.a.app.store,
+            ClipboardItem::Text {
+                text: "facade fallback pull".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let pulled = pair.b.app.pull(false, false, None).await.unwrap();
+        assert_eq!(pulled.text.as_deref(), Some("facade fallback pull"));
+    });
+}
+
+#[tokio::test]
+async fn every_engine_entrypoint_preserves_invalid_local_state_and_reports_preflight_failures() {
+    for case in ["config", "identity", "room", "epoch", "connection"] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed = listener.local_addr().unwrap();
+        drop(listener);
+        let peer = scripted_peer(&format!("http://{closed}"), RoomId::new());
+        let room = peer.app.store.current_room().unwrap();
+        let path = match case {
+            "config" => peer.app.store.paths.config_file(),
+            "identity" => peer.app.store.paths.identity_file(),
+            "room" => peer.app.store.paths.state_file(),
+            _ => peer
+                .app
+                .store
+                .paths
+                .data_dir
+                .join(format!("epoch-{}.secret", room.room_id)),
+        };
+        if case != "connection" {
+            std::fs::write(&path, b"truncated local data").unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        let clipboard = SystemClipboard::mock(MockClipboard::new());
+        let handle = sync_handle();
+        let (_, mut shutdown) = watch::channel(false);
+        let session = run_session(&peer.app.store, &clipboard, &handle, &mut shutdown).await;
+        let push = oneshot_push(
+            &peer.app.store,
+            ClipboardItem::Text {
+                text: "must not send".into(),
+            },
+        )
+        .await;
+        let pull = oneshot_pull(&peer.app.store, false, false, None).await;
+        assert!(session.is_err() && push.is_err() && pull.is_err(), "{case}");
+        assert!(!handle.connected.load(Ordering::Relaxed));
+        assert!(handle.last_item.lock().is_none());
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            before,
+            "{case} failure rewrote user data"
+        );
+    }
+}
+
+#[tokio::test]
+async fn file_push_detects_image_mime_and_rejects_non_utf8_names_before_network_access() {
+    let directory = TempDir::new().unwrap();
+    let image = directory.path().join("photo.png");
+    std::fs::write(&image, PNG).unwrap();
+    let item = crate::load_push_item(None, std::slice::from_ref(&image), false)
+        .await
+        .unwrap();
+    let ClipboardItem::Files { files } = item else {
+        panic!("file push changed item kind")
+    };
+    assert_eq!(files[0].mime.as_deref(), Some("image/png"));
+    assert_eq!(files[0].staged_path.as_ref(), Some(&image));
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let path = directory
+            .path()
+            .join(std::ffi::OsString::from_vec(vec![0xff]));
+        std::fs::write(&path, b"preserve file").unwrap();
+        assert!(
+            crate::load_push_item(None, std::slice::from_ref(&path), false)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("invalid file name")
+        );
+        assert_eq!(std::fs::read(path).unwrap(), b"preserve file");
+    }
+}
+
+#[test]
+fn command_facade_reports_corrupt_config_and_state_without_replacing_them() {
+    const NAME: &str = "engine::behavior_tests::command_facade_reports_corrupt_config_and_state_without_replacing_them";
+    if !in_worker(NAME) {
+        worker(NAME, b"", &[]);
+        return;
+    }
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let peer = Peer::new("http://127.0.0.1:1", "facade-preflight", 55);
+        let config = peer.app.store.paths.config_file();
+        std::fs::write(&config, b"invalid = [").unwrap();
+        assert!(peer.app.config_get(None).is_err());
+        assert!(peer.app.config_set("sync.enabled", "true").is_err());
+        assert!(peer.app.status().await.is_err());
+        assert!(peer
+            .app
+            .room_create(None, true, false, |_| {})
+            .await
+            .is_err());
+        assert!(peer.app.room_join("123456", true).await.is_err());
+        assert_eq!(std::fs::read(&config).unwrap(), b"invalid = [");
+        peer.app.store.save_config(&AppConfig::default()).unwrap();
+        let state = peer.app.store.paths.state_file();
+        std::fs::write(&state, b"invalid state").unwrap();
+        assert!(peer.app.room_list().is_err());
+        assert!(peer.app.devices().is_err());
+        assert!(peer.app.status().await.is_err());
+        assert!(peer.app.pause().await.is_err());
+        assert!(peer.app.resume().await.is_err());
+        assert_eq!(std::fs::read(state).unwrap(), b"invalid state");
+    });
+}
+
+#[tokio::test]
+async fn terminal_push_uses_explicit_clipboard_input_and_reports_empty_unavailable_or_missing_input(
+) {
+    let mock = MockClipboard::new();
+    mock.set(ClipboardItem::Text {
+        text: "private mock clipboard".into(),
+    });
+    let item = crate::load_push_input(
+        None,
+        true,
+        &mut std::io::Cursor::new(b"not stdin"),
+        true,
+        || Ok(SystemClipboard::mock(mock.clone())),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(item, ClipboardItem::Text { text } if text == "private mock clipboard"));
+    let empty = MockClipboard::new();
+    assert!(
+        crate::load_push_input(Some("text"), false, &mut std::io::empty(), true, || Ok(
+            SystemClipboard::mock(empty)
+        ))
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("clipboard is empty")
+    );
+    assert!(
+        crate::load_push_input(None, true, &mut std::io::empty(), true, || Err(
+            clipsync_clipboard::ClipboardError::Unavailable("fixture adapter".into())
+        ))
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("fixture adapter")
+    );
+    let missing = crate::load_push_input(None, false, &mut std::io::empty(), true, || {
+        panic!("implicit terminal input must not open the clipboard")
+    })
+    .await
+    .unwrap_err();
+    assert!(missing.to_string().contains("nothing to push"));
+    struct BrokenInput;
+    impl std::io::Read for BrokenInput {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("stdin read failed"))
+        }
+    }
+    assert!(
+        crate::load_push_input(None, false, &mut BrokenInput, false, || panic!(
+            "piped input must not open the clipboard"
+        ))
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("stdin read failed")
+    );
 }
 
 #[tokio::test]

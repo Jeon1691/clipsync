@@ -303,3 +303,49 @@ fn initialized_identity_and_paired_devices_are_visible_in_both_output_modes() {
         assert!(String::from_utf8_lossy(&rooms.stdout).contains(room.room_id.as_str()));
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn daemon_commands_write_only_isolated_service_files_and_preserve_json_contracts() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = clipsync_storage::AppPaths::from_root(root.path().to_path_buf());
+    paths.ensure().unwrap();
+    let identity = clipsync_crypto::DeviceIdentity::generate();
+    std::fs::write(
+        paths.identity_file(),
+        serde_json::to_vec(&identity.to_stored()).unwrap(),
+    )
+    .unwrap();
+    for action in ["start", "restart", "stop"] {
+        let output = cli(root.path(), true, &["daemon", action]);
+        assert!(
+            output.status.success(),
+            "{action}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected = match action {
+            "start" => "started",
+            "restart" => "restarted",
+            _ => "stopped",
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["daemon"],
+            expected
+        );
+        #[cfg(target_os = "macos")]
+        let service = root
+            .path()
+            .join("Library/LaunchAgents/dev.clipsync.daemon.plist");
+        #[cfg(target_os = "linux")]
+        let service = root.path().join(".config/systemd/user/clipsync.service");
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        assert_eq!(service.exists(), action != "stop");
+    }
+    let invalid_ttl = cli(
+        root.path(),
+        false,
+        &["room", "create", "--foreground", "--ttl", "not-a-duration"],
+    );
+    assert_eq!(invalid_ttl.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&invalid_ttl.stderr).contains("error:"));
+}

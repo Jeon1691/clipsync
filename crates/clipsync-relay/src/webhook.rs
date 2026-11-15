@@ -24,6 +24,15 @@ pub async fn post_event(url: &str, secret: &str, event: serde_json::Value) -> an
         parsed.host_str().context("webhook host missing")?,
         &addresses,
     )?;
+    deliver_event(&client, parsed, secret, event).await
+}
+
+async fn deliver_event(
+    client: &reqwest::Client,
+    url: Url,
+    secret: &str,
+    event: serde_json::Value,
+) -> anyhow::Result<()> {
     let body = serde_json::to_vec(&event)?;
     let ts = chrono::Utc::now().timestamp().to_string();
     let event_id = ulid::Ulid::new().to_string();
@@ -36,7 +45,7 @@ pub async fn post_event(url: &str, secret: &str, event: serde_json::Value) -> an
     mac.update(&body);
     let sig = hex::encode(mac.finalize().into_bytes());
     let _ = client
-        .post(parsed)
+        .post(url)
         .header("X-ClipSync-Timestamp", &ts)
         .header("X-ClipSync-Event-Id", &event_id)
         .header("X-ClipSync-Signature", format!("sha256={sig}"))
@@ -198,6 +207,123 @@ mod tests {
     async fn rejects_a_hostname_resolving_to_loopback() {
         let url = Url::parse("https://localhost/hook").unwrap();
         assert!(resolve_addresses(&url).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn public_literals_resolve_to_their_exact_port_without_dns() {
+        assert_eq!(
+            resolve_addresses(&Url::parse("https://8.8.8.8/hook").unwrap())
+                .await
+                .unwrap(),
+            ["8.8.8.8:443".parse::<SocketAddr>().unwrap()]
+        );
+        assert_eq!(
+            resolve_addresses(&Url::parse("http://[2606:4700:4700::1111]:8080/hook").unwrap())
+                .await
+                .unwrap(),
+            ["[2606:4700:4700::1111]:8080".parse::<SocketAddr>().unwrap()]
+        );
+        for url in [
+            "not a URL",
+            "http://localhost/hook",
+            "http://127.0.0.1/hook",
+            "file:///private/hook",
+        ] {
+            assert!(
+                post_event(url, "fixture", serde_json::json!({"type": "blocked"}))
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delivery_authenticates_the_exact_utf8_body_timestamp_and_event_id() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let event = serde_json::json!({"type":"clip.received", "status":"ok", "device_id":"장치", "encrypted_size":42});
+        let expected = serde_json::to_vec(&event).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let header_end = loop {
+                if let Some(offset) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    break offset + 4;
+                }
+                let mut buffer = [0; 1024];
+                let count = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(count, 0);
+                request.extend_from_slice(&buffer[..count]);
+                assert!(request.len() < 32768);
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+            let header = |name: &str| {
+                headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix(name))
+                    .unwrap()
+                    .trim()
+                    .to_string()
+            };
+            let length: usize = header("content-length:").parse().unwrap();
+            while request.len() < header_end + length {
+                let mut buffer = [0; 1024];
+                let count = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(count, 0);
+                request.extend_from_slice(&buffer[..count]);
+            }
+            let body = &request[header_end..];
+            assert_eq!(body, expected);
+            assert_eq!(header("content-type:"), "application/json");
+            let timestamp = header("x-clipsync-timestamp:");
+            let seconds: i64 = timestamp.parse().unwrap();
+            assert!((chrono::Utc::now().timestamp() - seconds).abs() < 10);
+            let event_id = header("x-clipsync-event-id:");
+            assert!(ulid::Ulid::from_string(&event_id).is_ok());
+            let mut mac = HmacSha256::new_from_slice(b"synthetic webhook secret").unwrap();
+            mac.update(timestamp.as_bytes());
+            mac.update(b".");
+            mac.update(event_id.to_ascii_uppercase().as_bytes());
+            mac.update(b".");
+            mac.update(body);
+            let signature = header("x-clipsync-signature:");
+            assert_eq!(
+                signature,
+                format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
+            );
+            socket
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let client = webhook_client("webhook.invalid", &[address]).unwrap();
+        deliver_event(
+            &client,
+            Url::parse(&format!("http://webhook.invalid:{}/hook", address.port())).unwrap(),
+            "synthetic webhook secret",
+            event,
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed = listener.local_addr().unwrap();
+        drop(listener);
+        let client = webhook_client("webhook.invalid", &[closed]).unwrap();
+        assert!(deliver_event(
+            &client,
+            Url::parse(&format!("http://webhook.invalid:{}/hook", closed.port())).unwrap(),
+            "fixture",
+            serde_json::json!({})
+        )
+        .await
+        .is_err());
     }
 
     #[test]

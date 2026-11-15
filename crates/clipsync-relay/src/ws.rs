@@ -75,15 +75,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
     let mut burst = 0u32;
 
     while let Some(Ok(msg)) = stream.next().await {
-        if last_msg.elapsed() < Duration::from_millis(20) {
-            burst += 1;
-            if burst > 80 {
-                send_err(&tx, "rate_limited", "too many messages").await;
-                break;
-            }
-        } else {
-            burst = 0;
-            last_msg = Instant::now();
+        if message_rate_exceeded(&mut last_msg, &mut burst, Instant::now()) {
+            send_err(&tx, "rate_limited", "too many messages").await;
+            break;
         }
         match msg {
             Message::Text(t) => {
@@ -129,6 +123,17 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
     }
     let _ = tx.send(WsOut::Close).await;
     let _ = writer.await;
+}
+
+fn message_rate_exceeded(last: &mut Instant, burst: &mut u32, now: Instant) -> bool {
+    if now.duration_since(*last) < Duration::from_millis(20) {
+        *burst += 1;
+        *burst > 80
+    } else {
+        *burst = 0;
+        *last = now;
+        false
+    }
 }
 
 async fn handle_control(
@@ -177,6 +182,13 @@ async fn handle_control(
                     .or(claims.sid.clone()),
                 device_role: claims.role,
             };
+            if claims.typ != "pair" {
+                let room = state.room(&conn.room_id).ok_or("unknown room")?;
+                let device = room.devices.get(&conn.device_id).ok_or("unknown device")?;
+                if device.revoked {
+                    return Err("device revoked".into());
+                }
+            }
             state.register_conn(&conn.device_id, tx.clone());
 
             if claims.typ == "pair" {
@@ -224,17 +236,6 @@ async fn handle_control(
                 };
                 send_msg(tx, &hello_ok).await;
             } else {
-                if let Some(room) = state.room(&conn.room_id) {
-                    if let Some(dev) = room.devices.get(&conn.device_id) {
-                        if dev.revoked {
-                            return Err("device revoked".into());
-                        }
-                    } else {
-                        return Err("unknown device".into());
-                    }
-                } else {
-                    return Err("unknown room".into());
-                }
                 let peers: Vec<PeerInfo> = state
                     .peer_ids(&conn.room_id, &conn.device_id)
                     .into_iter()
@@ -405,11 +406,17 @@ async fn handle_control(
             if c.device_role != DeviceRole::Owner {
                 return Err("manage permission required".into());
             }
+            // Revoke removes the routing entry. Keep the sender long enough
+            // to close the authenticated socket after invalidating its device.
+            let revoked_connection = state
+                .connections
+                .get(device_id.as_str())
+                .map(|connection| connection.value().clone());
             if !state.revoke(&c.room_id, device_id.as_str()) {
                 return Err("device not found".into());
             }
             fanout_except(state, &c.room_id, &c.device_id, &msg).await;
-            if let Some(p) = state.connections.get(device_id.as_str()) {
+            if let Some(p) = revoked_connection {
                 let _ = p.send(WsOut::Close).await;
             }
             state.webhook_spawn(serde_json::json!({

@@ -609,4 +609,273 @@ mod tests {
         let nonce_b = device_bind_nonce(&keys_b.pairing_wrap_key, PairingRole::B).unwrap();
         assert_bind_exchange(&session, &keys_a, &keys_b, nonce_a, nonce_b);
     }
+
+    #[tokio::test]
+    async fn http_pairing_failures_preserve_relay_details_and_expired_code_guidance() {
+        use axum::{http::StatusCode, routing::post, Router};
+        let directory = tempfile::TempDir::new().unwrap();
+        let store =
+            LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+        let identity = DeviceIdentity::from_bytes("http-failure".into(), [31; 32]);
+        for body in [
+            "code_invalid",
+            "code_expired",
+            "busy: joiner already connected",
+        ] {
+            let server = crate::test_relay::Server::http(
+                Router::new()
+                    .route(
+                        "/v1/pairing/create",
+                        post(|| async { (StatusCode::SERVICE_UNAVAILABLE, "maintenance") }),
+                    )
+                    .route(
+                        "/v1/pairing/join",
+                        post(move || async move { (StatusCode::CONFLICT, body) }),
+                    ),
+            )
+            .await;
+            let cfg = AppConfig {
+                relay_url: format!("{}/", server.url),
+                ..Default::default()
+            };
+            let create = begin_create_room(&identity, &cfg, 60).await.err().unwrap();
+            assert!(create.to_string().contains("create failed: maintenance"));
+            let join = join_room(&store, &identity, &cfg, "123456")
+                .await
+                .unwrap_err();
+            if body.starts_with("code_") {
+                assert!(join.to_string().contains("unknown or expired pairing code"));
+            } else {
+                assert!(join.to_string().contains(body));
+            }
+            assert!(store.load_state().unwrap().rooms.is_empty());
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed = listener.local_addr().unwrap();
+        drop(listener);
+        let cfg = AppConfig {
+            relay_url: format!("http://{closed}"),
+            ..Default::default()
+        };
+        assert!(begin_create_room(&identity, &cfg, 60)
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("relay create"));
+        assert!(join_room(&store, &identity, &cfg, "123456")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("relay join"));
+        assert!(connect_relay_ws(&format!("ws://{closed}/v1/ws"))
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("websocket"));
+    }
+
+    #[tokio::test]
+    async fn malformed_http_pairing_responses_fail_before_persisting_a_room() {
+        use axum::{routing::post, Router};
+        let server = crate::test_relay::Server::http(
+            Router::new()
+                .route("/v1/pairing/create", post(|| async { "not JSON" }))
+                .route("/v1/pairing/join", post(|| async { "{}" })),
+        )
+        .await;
+        let directory = tempfile::TempDir::new().unwrap();
+        let store =
+            LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+        let cfg = AppConfig {
+            relay_url: server.url.clone(),
+            ..Default::default()
+        };
+        let identity = DeviceIdentity::from_bytes("malformed-response".into(), [32; 32]);
+        assert!(matches!(
+            create_room(&store, &identity, &cfg, 60).await,
+            Err(CoreError::Http(_))
+        ));
+        assert!(matches!(
+            join_room(&store, &identity, &cfg, "123456").await,
+            Err(CoreError::Http(_))
+        ));
+        assert!(store.load_state().unwrap().rooms.is_empty());
+    }
+
+    #[tokio::test]
+    async fn interrupted_or_rejected_pairing_never_creates_local_room_state() {
+        use crate::test_relay::{send, Server};
+        for rejected in [false, true] {
+            let mut server = Server::websocket(move |mut socket| async move {
+                if rejected {
+                    send(
+                        &mut socket,
+                        ControlMessage::Error {
+                            code: "expired".into(),
+                            message: "pairing session expired".into(),
+                        },
+                    )
+                    .await;
+                }
+                socket
+                    .send(axum::extract::ws::Message::Close(None))
+                    .await
+                    .unwrap();
+            })
+            .await;
+            let directory = tempfile::TempDir::new().unwrap();
+            let store =
+                LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+            let identity = DeviceIdentity::from_bytes("interrupted".into(), [33; 32]);
+            let connection = RelayConnection::connect(&join_ws(&server.url, "/v1/ws"))
+                .await
+                .unwrap();
+            let error = run_pairing(
+                &store,
+                &identity,
+                connection,
+                PairingRole::A,
+                "123456",
+                PairingSessionId::new(),
+                identity.device_id.clone(),
+                DeviceId::new(),
+                clipsync_protocol::RoomId::new(),
+                DeviceRole::Owner,
+            )
+            .await
+            .unwrap_err();
+            server.finish().await;
+            assert!(error.to_string().contains(if rejected {
+                "expired: pairing session expired"
+            } else {
+                "relay closed during pairing"
+            }));
+            assert!(store.load_state().unwrap().rooms.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn hostile_pairing_frames_cannot_publish_peer_identity_or_room_credentials() {
+        use crate::test_relay::{receive, send, Server};
+        for attack in [
+            "base64",
+            "spake",
+            "confirm",
+            "nonce_hex",
+            "nonce_size",
+            "ciphertext",
+        ] {
+            let directory = tempfile::TempDir::new().unwrap();
+            let store =
+                LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+            let identity = DeviceIdentity::from_bytes("hostile-peer-local".into(), [34; 32]);
+            let peer = DeviceId::from("hostile-peer-remote");
+            let sid = PairingSessionId::new();
+            let session = sid.clone();
+            let local = identity.device_id.clone();
+            let peer_id = peer.clone();
+            let mut server = Server::websocket(move |mut socket| async move {
+                send(
+                    &mut socket,
+                    ControlMessage::PeerJoined {
+                        device: clipsync_protocol::PeerInfo {
+                            device_id: peer_id.clone(),
+                            device_name: "untrusted".into(),
+                            os: "fixture".into(),
+                            role: DeviceRole::Member,
+                            online: true,
+                        },
+                    },
+                )
+                .await;
+                let ControlMessage::Spake2Msg { message, .. } = receive(&mut socket).await else {
+                    panic!("client did not initiate SPAKE2")
+                };
+                if attack == "base64" || attack == "spake" {
+                    send(
+                        &mut socket,
+                        ControlMessage::Spake2Msg {
+                            pairing_session_id: session,
+                            message: if attack == "base64" { "!".into() } else { b64_encode(&[0]) },
+                        },
+                    )
+                    .await;
+                    if attack == "spake" {
+                        assert!(matches!(receive(&mut socket).await, ControlMessage::Error { code, .. } if code == "pairing_failed"));
+                    }
+                    return;
+                }
+                let state = start_pairing_b("123456", session.clone(), local, peer_id).unwrap();
+                let outbound = state.outbound.clone();
+                let keys = finish_pairing(state, &b64_decode(&message).unwrap()).unwrap();
+                send(
+                    &mut socket,
+                    ControlMessage::Spake2Msg {
+                        pairing_session_id: session.clone(),
+                        message: b64_encode(&outbound),
+                    },
+                )
+                .await;
+                let ControlMessage::KeyConfirm { mac, .. } = receive(&mut socket).await else {
+                    panic!("client did not confirm key")
+                };
+                verify_confirm_mac(&keys, PairingRole::A, &b64_decode(&mac).unwrap()).unwrap();
+                if attack == "confirm" {
+                    send(
+                        &mut socket,
+                        ControlMessage::KeyConfirm {
+                            pairing_session_id: session,
+                            mac: b64_encode(&[0; 32]),
+                        },
+                    )
+                    .await;
+                    assert!(matches!(receive(&mut socket).await, ControlMessage::Error { code, .. } if code == "confirm_failed"));
+                    return;
+                }
+                send(
+                    &mut socket,
+                    ControlMessage::DeviceBind {
+                        pairing_session_id: session,
+                        nonce: match attack {
+                            "nonce_hex" => "!".into(),
+                            "nonce_size" => "00".into(),
+                            _ => hex::encode([0; 12]),
+                        },
+                        ciphertext: "!".into(),
+                    },
+                )
+                .await;
+            })
+            .await;
+            let connection = RelayConnection::connect(&join_ws(&server.url, "/v1/ws"))
+                .await
+                .unwrap();
+            let error = tokio::time::timeout(
+                Duration::from_secs(5),
+                run_pairing(
+                    &store,
+                    &identity,
+                    connection,
+                    PairingRole::A,
+                    "123456",
+                    sid,
+                    identity.device_id.clone(),
+                    peer,
+                    clipsync_protocol::RoomId::new(),
+                    DeviceRole::Owner,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            server.finish().await;
+            assert!(matches!(error, CoreError::Pairing(_)), "{attack}: {error}");
+            if attack == "nonce_size" {
+                assert!(error.to_string().contains("bad bind nonce"));
+            }
+            assert!(store.load_state().unwrap().rooms.is_empty(), "{attack}");
+        }
+    }
 }

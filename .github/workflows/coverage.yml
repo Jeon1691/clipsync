@@ -22,6 +22,8 @@ env:
   RUST_BACKTRACE: 1
   # Repository rust-toolchain.toml selects stable unless explicitly overridden.
   RUSTUP_TOOLCHAIN: nightly-2026-11-11
+  # Hosted runners provide disposable clipboard sessions for the host contract.
+  CLIPSYNC_TEST_HOST_CLIPBOARD: '1'
 
 jobs:
   coverage:

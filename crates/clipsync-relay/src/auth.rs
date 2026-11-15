@@ -62,3 +62,61 @@ pub fn verify_token(secret: &[u8], token: &str) -> Result<TokenClaims, &'static 
     }
     Ok(claims)
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use base64::Engine;
+
+    #[test]
+    fn malformed_or_expired_tokens_fail_at_the_correct_validation_boundary() {
+        let secret = [17; 32];
+        for (token, expected) in [
+            ("missing-dot", "malformed token"),
+            ("!.AA", "bad payload b64"),
+            ("e30.!", "bad tag b64"),
+            ("e30.AA", "bad signature"),
+        ] {
+            assert_eq!(verify_token(&secret, token).unwrap_err(), expected);
+        }
+        let mut mac = HmacSha256::new_from_slice(&secret).unwrap();
+        mac.update(b"not json");
+        let codec = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let signed_invalid_json = format!(
+            "{}.{}",
+            codec.encode(b"not json"),
+            codec.encode(mac.finalize().into_bytes())
+        );
+        assert_eq!(
+            verify_token(&secret, &signed_invalid_json).unwrap_err(),
+            "bad json"
+        );
+        let room = RoomId::new();
+        let device = DeviceId::new();
+        let expired = issue_token(
+            &secret,
+            "device",
+            &room,
+            &device,
+            DeviceRole::Owner,
+            None,
+            -60,
+        );
+        assert_eq!(verify_token(&secret, &expired).unwrap_err(), "expired");
+        let valid = issue_token(
+            &secret,
+            "pair",
+            &room,
+            &device,
+            DeviceRole::Member,
+            Some("session"),
+            60,
+        );
+        let claims = verify_token(&secret, &valid).unwrap();
+        assert_eq!(claims.rid, room);
+        assert_eq!(claims.did, device);
+        assert_eq!(claims.role, DeviceRole::Member);
+        assert_eq!(claims.sid.as_deref(), Some("session"));
+    }
+}

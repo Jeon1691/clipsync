@@ -45,6 +45,11 @@ async fn platform_adapter_matches_host() {
 
 #[tokio::test]
 async fn platform_text_roundtrip() {
+    // General clipboard writes are reserved for disposable CI desktop sessions.
+    // Local verification exercises named pasteboards and isolated backend fixtures.
+    if std::env::var("CLIPSYNC_TEST_HOST_CLIPBOARD").as_deref() != Ok("1") {
+        return;
+    }
     let clip = SystemClipboard::open().expect("clipboard adapter");
     if clip.info().name == "headless" {
         assert!(

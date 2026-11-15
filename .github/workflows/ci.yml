@@ -17,6 +17,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Hosted runners provide disposable clipboard sessions for the host contract.
+  CLIPSYNC_TEST_HOST_CLIPBOARD: '1'
 
 jobs:
   msrv:
