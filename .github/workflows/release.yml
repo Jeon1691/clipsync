@@ -224,7 +224,7 @@ jobs:
             fi
           }
           verify_assets() {
-            local directory="$1" archive prefix checksum
+            local directory="$1" archive prefix
             local archives=("$directory"/*.tar.gz "$directory"/*.zip)
             local files=("$directory"/*)
             for archive in \
@@ -248,11 +248,7 @@ jobs:
               prefix="${archive%.tar.gz}"
               prefix="${prefix%.zip}"
               test -s "$prefix.sha256"
-              checksum="$(cd "$directory" && sha256sum -- "${archive##*/}")"
-              if [[ "$(cat "$prefix.sha256")" != "$checksum" ]]; then
-                echo "checksum must match the exact release archive: $archive" >&2
-                return 1
-              fi
+              python3 scripts/verify-release-checksum.py "$archive" "$prefix.sha256"
               python3 scripts/export-provenance.py "$archive" \
                 --bundle "$prefix.sigstore.json" \
                 --output "$prefix.intoto.jsonl" \

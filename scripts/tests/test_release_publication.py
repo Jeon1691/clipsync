@@ -39,8 +39,9 @@ class ReleasePublicationTests(unittest.TestCase):
                 name = prefix + (".zip" if "windows" in target else ".tar.gz")
                 content = b"synthetic archive"
                 (root / "artifacts" / name).write_bytes(content)
+                marker = "*" if "windows" in target else " "
                 (root / "artifacts" / f"{prefix}.sha256").write_text(
-                    f"{hashlib.sha256(content).hexdigest()}  {name}\n")
+                    f"{hashlib.sha256(content).hexdigest()} {marker}{name}\n")
                 for suffix in ["sigstore.json", "intoto.jsonl"]:
                     (root / "artifacts" / f"{prefix}.{suffix}").write_text("synthetic evidence\n")
             if missing:
@@ -48,6 +49,8 @@ class ReleasePublicationTests(unittest.TestCase):
             if wrong_checksum_name:
                 checksum = root / "artifacts/clipsync-aarch64-apple-darwin.sha256"
                 checksum.write_text(checksum.read_text().replace("aarch64-apple-darwin", "x86_64-apple-darwin"))
+            shutil.copyfile(Path(__file__).resolve().parents[1] / "verify-release-checksum.py",
+                            root / "scripts/verify-release-checksum.py")
             # The exporter has separate cryptographic-policy tests. Here its
             # successful check isolates publication ordering and refusal paths.
             (root / "scripts/export-provenance.py").write_text(

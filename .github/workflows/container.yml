@@ -17,6 +17,8 @@ on:
       - 'vendor/**'
       - scripts/smoke-relay-container.sh
       - .github/workflows/container.yml
+      - scripts/verify-release-source.sh
+      - scripts/tests/test_release_source.py
   workflow_dispatch:
 
 permissions:
@@ -106,10 +108,6 @@ jobs:
           # A release created by release.yml's GITHUB_TOKEN does not generate a
           # release event for another workflow. On tag pushes, wait for that
           # workflow to publish the actual release before writing any packages.
-          default_branch="$(gh api "repos/${GITHUB_REPOSITORY}" --jq .default_branch)"
-          git check-ref-format "refs/heads/${default_branch}"
-          git fetch --no-tags origin "refs/heads/${default_branch}"
-          git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD
           for attempt in {1..30}; do
             if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" \
               --jq 'select(.draft == false) | .tag_name' > release-tag.txt 2>/dev/null &&
@@ -135,6 +133,10 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Revalidate the published tag and default-branch ancestry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/verify-release-source.sh
       - name: Upload the tested architecture images and candidate OCI index
         id: image
         run: |
@@ -183,6 +185,10 @@ jobs:
             --source-ref "$GITHUB_REF" \
             --source-digest "$GITHUB_SHA" \
             --deny-self-hosted-runners
+      - name: Revalidate source immediately before version promotion
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/verify-release-source.sh
       - name: Publish the verified index as the immutable version
         env:
           DIGEST: ${{ steps.image.outputs.digest }}
