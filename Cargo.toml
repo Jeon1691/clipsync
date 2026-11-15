@@ -58,7 +58,7 @@ infer = "0.19"
 ipnet = "2"
 keyring = { version = "3.6", default-features = false }
 parking_lot = "0.12"
-rand = "0.8"
+rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "http2",
