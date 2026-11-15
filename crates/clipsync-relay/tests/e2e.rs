@@ -19,6 +19,15 @@ const TINY_PNG: &[u8] = &[
     0x42, 0x60, 0x82,
 ];
 
+// These fixtures use loopback HTTP, so they need neither proxies nor TLS roots.
+fn loopback_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .tls_built_in_root_certs(false)
+        .build()
+        .expect("loopback HTTP test client")
+}
+
 async fn start_relay() -> (String, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -39,8 +48,9 @@ async fn start_relay() -> (String, tokio::task::JoinHandle<()>) {
         .unwrap();
     });
     let url = format!("http://{addr}");
+    let client = loopback_http_client();
     for _ in 0..50 {
-        if reqwest::get(format!("{url}/healthz")).await.is_ok() {
+        if client.get(format!("{url}/healthz")).send().await.is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -60,6 +70,7 @@ fn store_in(dir: &TempDir) -> clipsync_storage::LocalStore {
         .store
 }
 
+// Two peers share this runtime; keep workers free for I/O during OS keychain calls.
 async fn pair_homes(relay: &str) -> (TempDir, TempDir) {
     std::env::set_var("CLIPSYNC_NO_DAEMON", "1");
     let a_dir = TempDir::new().unwrap();
@@ -77,24 +88,150 @@ async fn pair_homes(relay: &str) -> (TempDir, TempDir) {
 
     let store_a = store_in(&a_dir);
     let wait_a = tokio::spawn(async move { pending.wait(&store_a, &id_a).await });
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    join_room(&app_b.store, &id_b, &cfg_b, &code).await.unwrap();
-    wait_a.await.unwrap().unwrap();
+    wait_for_connection_count(relay, 1).await;
+    let creator = async {
+        wait_a
+            .await
+            .map_err(|_| "creator pairing task failed".to_string())?
+            .map_err(|error| format!("creator pairing failed: {error}"))
+    };
+    let joiner = async {
+        join_room(&app_b.store, &id_b, &cfg_b, &code)
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("joiner pairing failed: {error}"))
+    };
+    tokio::try_join!(creator, joiner).expect("both peers complete pairing");
     assert!(store_in(&a_dir).current_room().is_ok());
     assert!(store_in(&b_dir).current_room().is_ok());
     (a_dir, b_dir)
 }
 
+// Observe the real peers' outbound pairing control frames without decrypting them.
+async fn start_pairing_observer(
+    relay: &str,
+) -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
+    use axum::extract::ws::{Message, WebSocketUpgrade};
+    use axum::routing::{any, get};
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (bind_tx, bind_rx) = tokio::sync::mpsc::unbounded_channel();
+    let websocket_url = format!("{}/v1/ws", relay.replacen("http://", "ws://", 1));
+    let http_url = relay.to_string();
+    let http_client = loopback_http_client();
+    let proxy = axum::Router::new()
+        .route(
+            "/v1/ws",
+            get(move |upgrade: WebSocketUpgrade| {
+                let upstream = websocket_url.clone();
+                let binds = bind_tx.clone();
+                async move {
+                    upgrade.on_upgrade(move |client| async move {
+                        let (upstream, _) =
+                            tokio_tungstenite::connect_async(upstream).await.unwrap();
+                        let (mut client_tx, mut client_rx) = client.split();
+                        let (mut upstream_tx, mut upstream_rx) = upstream.split();
+                        let outbound = async {
+                            while let Some(Ok(message)) = client_rx.next().await {
+                                match message {
+                                    Message::Text(text) => {
+                                        if let Ok(clipsync_protocol::ControlMessage::DeviceBind {
+                                            nonce,
+                                            ..
+                                        }) = clipsync_protocol::ControlMessage::decode(&text)
+                                        {
+                                            binds.send(nonce).unwrap();
+                                        }
+                                        if upstream_tx
+                                            .send(UpstreamMessage::Text(text.to_string().into()))
+                                            .await
+                                            .is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    Message::Close(_) => break,
+                                    _ => {}
+                                }
+                            }
+                        };
+                        let inbound = async {
+                            while let Some(Ok(message)) = upstream_rx.next().await {
+                                match message {
+                                    UpstreamMessage::Text(text) => {
+                                        if client_tx
+                                            .send(Message::Text(text.to_string().into()))
+                                            .await
+                                            .is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    UpstreamMessage::Close(_) => break,
+                                    _ => {}
+                                }
+                            }
+                        };
+                        tokio::select! {
+                            _ = outbound => {}
+                            _ = inbound => {}
+                        }
+                    })
+                }
+            }),
+        )
+        .fallback(any(move |request: axum::extract::Request| {
+            let upstream = format!("{http_url}{}", request.uri());
+            let client = http_client.clone();
+            async move {
+                let method = request.method().clone();
+                let body = axum::body::to_bytes(request.into_body(), FRAME_HARD_CAP)
+                    .await
+                    .unwrap();
+                let response = client
+                    .request(method, upstream)
+                    .header("content-type", "application/json")
+                    .body(body)
+                    .send()
+                    .await
+                    .unwrap();
+                (response.status(), response.bytes().await.unwrap())
+            }
+        }));
+    tokio::spawn(async move { axum::serve(listener, proxy).await.unwrap() });
+    (format!("http://{addr}"), bind_rx)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pairing_device_bind_nonces_are_unique() {
+    let (relay, _relay_task) = start_relay().await;
+    let (observed_relay, mut binds) = start_pairing_observer(&relay).await;
+    // Allow for synchronous OS keychain setup and persistence in this full fixture.
+    let _homes = tokio::time::timeout(Duration::from_secs(30), pair_homes(&observed_relay))
+        .await
+        .expect("pairing through the observer timed out");
+    let first = binds.try_recv().expect("first peer sent DeviceBind");
+    let second = binds.try_recv().expect("second peer sent DeviceBind");
+    assert_ne!(first, second, "pairing peers reused a DeviceBind nonce");
+}
+
 #[tokio::test]
 async fn healthz_ok() {
     let (relay, _h) = start_relay().await;
-    let resp = reqwest::get(format!("{relay}/healthz")).await.unwrap();
+    let resp = loopback_http_client()
+        .get(format!("{relay}/healthz"))
+        .send()
+        .await
+        .unwrap();
     assert!(resp.status().is_success());
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["ok"], true);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pairing_and_text_push_pull() {
     let (relay, _h) = start_relay().await;
     let (a_dir, b_dir) = pair_homes(&relay).await;
@@ -114,7 +251,7 @@ async fn pairing_and_text_push_pull() {
     assert_eq!(pulled.text.as_deref(), Some("hello from a"));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn file_push_pull_writes_output() {
     let (relay, _h) = start_relay().await;
     let (a_dir, b_dir) = pair_homes(&relay).await;
@@ -146,7 +283,7 @@ async fn file_push_pull_writes_output() {
     assert_eq!(saved, "file-payload-ok\n");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn image_push_pull_writes_output() {
     let (relay, _h) = start_relay().await;
     let (a_dir, b_dir) = pair_homes(&relay).await;
@@ -195,7 +332,7 @@ fn tiny_webp() -> Vec<u8> {
 
 /// Wait for this test's relay to observe connection setup or teardown.
 async fn wait_for_connection_count(relay: &str, expected: usize) {
-    let client = reqwest::Client::new();
+    let client = loopback_http_client();
     let target = format!("clipsync_ws_connections {expected}");
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -234,7 +371,7 @@ async fn transfer_item(a: &TempDir, b: &TempDir, item: ClipboardItem, out: &std:
     pull.await.unwrap().expect("pull");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn format_matrix_images_roundtrip() {
     let (relay, _h) = start_relay().await;
     let (a_dir, b_dir) = pair_homes(&relay).await;
@@ -278,7 +415,7 @@ async fn format_matrix_images_roundtrip() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn format_matrix_files_roundtrip() {
     let (relay, _h) = start_relay().await;
     let (a_dir, b_dir) = pair_homes(&relay).await;
