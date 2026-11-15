@@ -7,6 +7,95 @@ use clipsync_protocol::{
     TransferId,
 };
 
+#[tokio::test]
+async fn regression_f98_stale_room_socket_close_does_not_announce_live_replacement_left() {
+    use tokio_tungstenite::tungstenite::Message as ClientMessage;
+    type Client = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    async fn control(socket: &mut Client) -> ControlMessage {
+        loop {
+            match socket.next().await.unwrap().unwrap() {
+                ClientMessage::Text(text) => return ControlMessage::decode(&text).unwrap(),
+                ClientMessage::Ping(bytes) => {
+                    socket.send(ClientMessage::Pong(bytes)).await.unwrap()
+                }
+                other => panic!("expected established-room control frame, got {other:?}"),
+            }
+        }
+    }
+    async fn connect(
+        address: std::net::SocketAddr,
+        device: &DeviceId,
+        room: &RoomId,
+        token: &str,
+    ) -> Client {
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/v1/ws"))
+            .await
+            .unwrap();
+        socket
+            .send(ClientMessage::Text(
+                hello(device, room, token).encode().unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            control(&mut socket).await,
+            ControlMessage::HelloOk { .. }
+        ));
+        socket
+    }
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let state = state();
+        let (rid, owner, member, owner_token, member_token) = room(&state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_state = state.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, axum::Router::new()
+                .route("/v1/ws", axum::routing::get(ws_handler))
+                .with_state(server_state)).await.unwrap();
+        });
+        let mut peer = connect(address, &member, &rid, &member_token).await;
+        let mut old = connect(address, &owner, &rid, &owner_token).await;
+        assert!(matches!(control(&mut peer).await, ControlMessage::PeerJoined { device } if device.device_id == owner));
+        let old_sender = state.connections.get(owner.as_str()).unwrap().value().clone();
+        let mut current = connect(address, &owner, &rid, &owner_token).await;
+        assert!(matches!(control(&mut peer).await, ControlMessage::PeerJoined { device } if device.device_id == owner));
+        let current_sender = state.connections.get(owner.as_str()).unwrap().value().clone();
+        assert!(!old_sender.same_channel(&current_sender));
+
+        old.close(None).await.unwrap();
+        // The old writer's receiver closes only after its socket cleanup has
+        // queued any leave notification and sent its Close. No blind delay.
+        old_sender.closed().await;
+        assert!(state.connections.get(owner.as_str()).unwrap().same_channel(&current_sender));
+        peer.send(ClientMessage::Text(ControlMessage::Ping { ts: 9801 }.encode().unwrap().into())).await.unwrap();
+        assert!(matches!(control(&mut peer).await, ControlMessage::Pong { ts: 9801 }),
+            "a stale socket must not announce a still-live device as offline");
+
+        peer.send(ClientMessage::Text(ControlMessage::Ack {
+            message_id: MessageId::from("replacement-live"),
+            transfer_id: None,
+            status: AckStatus::Delivered,
+            detail: None,
+        }.encode().unwrap().into())).await.unwrap();
+        assert!(matches!(control(&mut current).await, ControlMessage::Ack { message_id, .. } if message_id.as_str() == "replacement-live"));
+
+        current.close(None).await.unwrap();
+        current_sender.closed().await;
+        assert!(matches!(control(&mut peer).await, ControlMessage::PeerLeft { device_id } if device_id == owner));
+        assert!(!state.is_online(owner.as_str()));
+        peer.send(ClientMessage::Text(ControlMessage::Ping { ts: 9802 }.encode().unwrap().into())).await.unwrap();
+        assert!(matches!(control(&mut peer).await, ControlMessage::Pong { ts: 9802 }),
+            "retiring the current socket must announce exactly one leave");
+        peer.close(None).await.unwrap();
+        server.abort();
+    }).await.expect("established-room replacement fixture exceeded its deadline");
+}
+
 struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
 impl std::io::Write for LogWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {

@@ -201,7 +201,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
                 }
             }
         }
-        notify_peers_left(&state, &c).await;
+        // A replacement may already own this device's routing entry. Its
+        // peers must stay online when the superseded socket finishes closing.
+        if !state.is_online(&c.device_id) {
+            notify_peers_left(&state, &c).await;
+        }
     }
     let _ = tx.send(WsOut::Close).await;
     let _ = writer.await;
