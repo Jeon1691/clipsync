@@ -29,11 +29,16 @@ fi
 chmod +x "$bin"
 case "$target" in
   *apple-darwin*)
-    if [[ "$preserve_debug" != "1" ]]; then strip -x "$bin"; fi
+    # A host strip tool may not understand a cross-compiled target binary.
+    if [[ "$preserve_debug" != "1" ]]; then
+      strip -x "$bin" || printf '%s\n' 'warning: host strip skipped for this target' >&2
+    fi
     codesign --sign - --force --timestamp=none "$bin" || true
     ;;
   *)
-    if [[ "$preserve_debug" != "1" ]]; then strip "$bin"; fi
+    if [[ "$preserve_debug" != "1" ]]; then
+      strip "$bin" || printf '%s\n' 'warning: host strip skipped for this target' >&2
+    fi
     ;;
 esac
 stage="clipsync-${target}"
