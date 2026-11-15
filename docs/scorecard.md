@@ -11,7 +11,7 @@ it is not a simple average of the checks.
 | --- | --- | --- |
 | Signed-Releases | 0 | Publish and verify signed attestation bundles with future release archives. |
 | Branch-Protection | 4 | Administrator bypass has been removed; require CI and security results. Independent review remains a prerequisite for approval requirements. |
-| Vulnerabilities | 4 | Track the six upstream maintenance advisories in [security-alerts.md](security-alerts.md). Native audits currently report no patched-version vulnerabilities. |
+| Vulnerabilities | 4 | The v0.2.0 migration removes all six maintenance-advisory packages; both audits are clean. See [security-alerts.md](security-alerts.md) for the explicit source-patch maintenance policy. |
 | Code-Review | 0 | Merge real changes after independent human review and approval; recent commit history currently contains no qualifying approvals. |
 | Maintained | 0 | The repository is younger than 90 days. Recheck after 2026-12-15 while continuing normal development and issue triage. |
 | CII-Best-Practices | 0 | Complete the remaining verified answers in [project 16709](https://www.bestpractices.dev/en/projects/16709) using the [evidence worksheet](best-practices-assessment.md). |
@@ -89,11 +89,14 @@ do not create empty commits, reviews, or releases just to alter the score.
 
 ## Maintenance and assessment
 
-The remaining RustSec findings describe unmaintained upstream GUI/font/D-Bus
-or code-generation dependencies. Removing accessibility, suppressing advisories,
-or reducing audit coverage would hide the exposure rather than fix it. Prefer
-tested upstream migrations that keep supported platforms and the declared
-minimum Rust version consistent.
+The v0.2.0 [dependency migration](dependency-migration.md) removes the six former
+RustSec maintenance-advisory packages while retaining accessibility, title text,
+clipboard formats, both renderers, and mobile bindings. Both audited lockfiles
+are clean without ignores. Seven explicit source compatibility forks now require
+ClipSync maintenance; their source hashes, complete diffs, licenses, review
+cadence, and retirement conditions are documented. This is an actual component
+migration with Rust 1.95 as the tested minimum. A clean local audit does not
+claim that the published Scorecard report has already changed.
 
 The Best Practices badge is a separate project self-assessment. The maintainer
 completed GitHub account linking, and [project 16709](https://www.bestpractices.dev/en/projects/16709)

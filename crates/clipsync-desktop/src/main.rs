@@ -124,7 +124,8 @@ impl DesktopApp {
 }
 
 impl DesktopApp {
-    fn update_ui(&mut self, ctx: &egui::Context) {
+    fn update_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         self.drain();
         ctx.request_repaint_after(Duration::from_secs(1));
         if ctx.input(|i| i.time).fract() < 0.05 {
@@ -137,7 +138,7 @@ impl DesktopApp {
         visuals.extreme_bg_color = PANEL;
         ctx.set_visuals(visuals);
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.add_space(12.0);
             ui.label(
                 egui::RichText::new("CLIPSYNC")
@@ -215,8 +216,21 @@ impl DesktopApp {
 }
 
 impl eframe::App for DesktopApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.update_ui(ctx);
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.update_ui(ui);
+    }
+}
+
+fn native_options() -> eframe::NativeOptions {
+    eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("ClipSync")
+            .with_decorations(true)
+            .with_inner_size([440.0, 560.0])
+            .with_min_inner_size([380.0, 480.0]),
+        // Preserve the existing default renderer across eframe's default change.
+        renderer: eframe::Renderer::Glow,
+        ..Default::default()
     }
 }
 
@@ -228,13 +242,7 @@ fn main() -> eframe::Result {
             std::process::exit(1);
         }
     };
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("ClipSync")
-            .with_inner_size([440.0, 560.0])
-            .with_min_inner_size([380.0, 480.0]),
-        ..Default::default()
-    };
+    let options = native_options();
     eframe::run_native("ClipSync", options, Box::new(|_cc| Ok(Box::new(app))))
 }
 
@@ -278,9 +286,22 @@ mod tests {
         (root, app)
     }
 
+    #[test]
+    fn native_window_keeps_title_decorations_and_glow_renderer() {
+        let options = native_options();
+        assert_eq!(options.viewport.title.as_deref(), Some("ClipSync"));
+        assert_eq!(options.viewport.decorations, Some(true));
+        assert_eq!(options.viewport.inner_size, Some(egui::vec2(440.0, 560.0)));
+        assert_eq!(
+            options.viewport.min_inner_size,
+            Some(egui::vec2(380.0, 480.0))
+        );
+        assert_eq!(options.renderer, eframe::Renderer::Glow);
+    }
+
     fn frame(app: &mut DesktopApp) -> String {
         let ctx = egui::Context::default();
-        let output = ctx.run(
+        let mut output = ctx.run_ui(
             egui::RawInput {
                 time: Some(0.5),
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -289,8 +310,10 @@ mod tests {
                 )),
                 ..Default::default()
             },
-            |ctx| app.update_ui(ctx),
+            |ui| app.update_ui(ui),
         );
+        // This text-only harness has no renderer to upload the font atlas to.
+        output.textures_delta.clear();
         output
             .shapes
             .iter()

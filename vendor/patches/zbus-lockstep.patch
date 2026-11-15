@@ -1,0 +1,340 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -11,7 +11,7 @@
+ 
+ [package]
+ edition = "2024"
+-rust-version = "1.87.0"
++rust-version = "1.89"
+ name = "zbus-lockstep"
+ version = "0.7.0"
+ authors = [
+@@ -84,10 +84,10 @@
+ optional = true
+ 
+ [dependencies.zbus_xml]
+-version = "5.2.0"
++version = "6"
+ 
+-[dependencies.zvariant]
+-version = "5.13.0"
++[dependencies.zbus]
++version = "6.3"
+ default-features = false
+ 
+ [dev-dependencies.tempfile]
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -12,7 +12,7 @@
+     Fmt(std::fmt::Error),
+     Io(std::io::Error),
+     Xml(zbus_xml::Error),
+-    Zvariant(zvariant::Error),
++    Zvariant(zbus::Error),
+ }
+ 
+ impl std::error::Error for LockstepError {
+@@ -61,18 +61,12 @@
+     }
+ }
+ 
+-impl From<zvariant::Error> for LockstepError {
+-    fn from(e: zvariant::Error) -> Self {
++impl From<zbus::Error> for LockstepError {
++    fn from(e: zbus::Error) -> Self {
+         LockstepError::Zvariant(e)
+     }
+ }
+ 
+-impl From<zvariant::signature::Error> for LockstepError {
+-    fn from(e: zvariant::signature::Error) -> Self {
+-        // Under-the-hood `zvariant` converts this to `zvariant::Error::SignatureParse(e)`
+-        LockstepError::Zvariant(zvariant::Error::from(e))
+-    }
+-}
+ 
+ impl From<std::env::VarError> for LockstepError {
+     fn from(e: std::env::VarError) -> Self {
+@@ -98,3 +92,9 @@
+ // `catch_unwind` boundary.
+ impl std::panic::UnwindSafe for LockstepError {}
+ impl std::panic::RefUnwindSafe for LockstepError {}
++
++impl From<zbus::wire::signature::Error> for LockstepError {
++    fn from(error: zbus::wire::signature::Error) -> Self {
++        Self::Zvariant(error.into())
++    }
++}
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -33,7 +33,7 @@
+ #[doc(hidden)]
+ pub use zbus_xml;
+ use zbus_xml::ArgDirection::{In, Out};
+-use zvariant::Signature;
++use zbus::Signature;
+ 
+ type Result<T> = std::result::Result<T, LockstepError>;
+ 
+@@ -55,7 +55,7 @@
+ /// # use std::fs::File;
+ /// # use std::io::{Seek, SeekFrom, Write};
+ /// # use tempfile::tempfile;
+-/// use zvariant::{Signature, Type, OwnedObjectPath};
++/// use zbus::{Signature, Type, OwnedObjectPath};
+ /// use zbus_lockstep::get_signal_body_type;
+ ///
+ /// let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+@@ -73,7 +73,7 @@
+ /// xml_file.seek(SeekFrom::Start(0)).unwrap();
+ ///
+ /// #[derive(Debug, PartialEq, Type)]
+-/// #[zvariant(signature = "o")]
++/// #[zbus(signature = "o")]
+ /// struct DeviceEvent {
+ ///    device: OwnedObjectPath,
+ /// }
+@@ -99,9 +99,8 @@
+         .find(|iface| iface.name() == interface_name)
+         .ok_or(InterfaceNotFound(interface_name.to_owned()))?;
+ 
+-    let signals = interface.signals();
++    let mut signals = interface.signals();
+     let signal = signals
+-        .iter()
+         .find(|signal| signal.name() == member_name)
+         .ok_or(MemberNotFound(member_name.to_owned()))?;
+ 
+@@ -113,12 +112,11 @@
+                 .find(|signal_arg| signal_arg.name() == Some(needle_arg_name))
+                 .ok_or(ArgumentNotFound(needle_arg_name.to_owned()))?
+                 .ty()
+-                .inner()
+                 .clone()
+         } else {
+             let mut combined_sig = String::new();
+             for signal_arg in signal.args() {
+-                write!(combined_sig, "{}", signal_arg.ty().inner())?;
++                write!(combined_sig, "{}", signal_arg.ty())?;
+             }
+             Signature::from_str(&combined_sig)?
+         }
+@@ -135,7 +133,7 @@
+ /// use std::fs::File;
+ /// use std::io::{Seek, SeekFrom, Write};
+ /// use tempfile::tempfile;
+-/// use zvariant::Type;
++/// use zbus::Type;
+ /// use zbus_lockstep::get_property_type;
+ ///
+ /// #[derive(Debug, PartialEq, Type)]
+@@ -172,9 +170,8 @@
+         .find(|iface| iface.name() == interface_name)
+         .ok_or(InterfaceNotFound(interface_name.to_string()))?;
+ 
+-    let properties = interface.properties();
++    let mut properties = interface.properties();
+     let property = properties
+-        .iter()
+         .find(|property| property.name() == property_name)
+         .ok_or(PropertyNotFound(property_name.to_owned()))?;
+ 
+@@ -194,7 +191,7 @@
+ /// use std::fs::File;
+ /// use std::io::{Seek, SeekFrom, Write};
+ /// use tempfile::tempfile;
+-/// use zvariant::Type;
++/// use zbus::Type;
+ /// use zbus_lockstep::get_method_return_type;
+ ///
+ /// #[derive(Debug, PartialEq, Type)]
+@@ -245,9 +242,8 @@
+         .find(|iface| iface.name() == interface_name)
+         .ok_or(InterfaceNotFound(interface_name.to_string()))?;
+ 
+-    let methods = interface.methods();
++    let mut methods = interface.methods();
+     let method = methods
+-        .iter()
+         .find(|method| method.name() == member_name)
+         .ok_or(MemberNotFound(member_name.to_string()))?;
+ 
+@@ -259,12 +255,11 @@
+                 .find(|arg| arg.name() == Some(needle_arg_name) && arg.direction() == Some(Out))
+                 .ok_or(ArgumentNotFound(needle_arg_name.to_string()))?
+                 .ty()
+-                .inner()
+                 .clone()
+         } else {
+             let mut combined_sig = String::new();
+             for arg in args.iter().filter(|arg| arg.direction() == Some(Out)) {
+-                write!(combined_sig, "{}", arg.ty().inner())?;
++                write!(combined_sig, "{}", arg.ty())?;
+             }
+             Signature::from_str(&combined_sig)?
+         }
+@@ -288,7 +283,7 @@
+ /// use std::collections::HashMap;
+ /// use std::io::{Seek, SeekFrom, Write};
+ /// use tempfile::tempfile;
+-/// use zvariant::{Type, Value};
++/// use zbus::{Type, Value};
+ /// use zbus_lockstep::get_method_args_type;
+ ///
+ /// let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+@@ -349,9 +344,8 @@
+         .find(|iface| iface.name() == interface_name)
+         .ok_or(InterfaceNotFound(interface_name.to_owned()))?;
+ 
+-    let methods = interface.methods();
++    let mut methods = interface.methods();
+     let method = methods
+-        .iter()
+         .find(|method| method.name() == member_name)
+         .ok_or(MemberNotFound(member_name.to_owned()))?;
+ 
+@@ -364,12 +358,11 @@
+             })
+             .ok_or(ArgumentNotFound(needle_arg_name.to_string()))?
+             .ty()
+-            .inner()
+             .clone()
+     } else {
+         let mut combined_sig = String::new();
+         for arg in args.iter().filter(|arg| arg.direction() == Some(In)) {
+-            write!(combined_sig, "{}", arg.ty().inner())?;
++            write!(combined_sig, "{}", arg.ty())?;
+         }
+         Signature::from_str(&combined_sig)?
+     };
+@@ -382,7 +375,7 @@
+     use std::io::{Seek, SeekFrom, Write};
+ 
+     use tempfile::tempfile;
+-    use zvariant::{OwnedObjectPath, Type};
++    use zbus::{OwnedObjectPath, Type};
+ 
+     use crate::{get_method_args_type, get_method_return_type, get_signal_body_type};
+ 
+@@ -391,6 +384,31 @@
+     // zbus-lockstep will filter by appropriate direction and pick the first match.
+     //
+     // https://dbus.freedesktop.org/doc/dbus-specification.html#introspection-format
++    #[test]
++    fn rejects_malformed_xml_types_and_missing_interface_member_or_argument() {
++        use crate::error::LockstepError;
++        use std::io::Cursor;
++        let xml = r#"<node><interface name="org.example.Node"><signal name="Changed">
++            <arg name="value" type="s"/></signal></interface></node>"#;
++        assert!(matches!(
++            get_signal_body_type(Cursor::new(xml), "org.example.Other", "Changed", None),
++            Err(LockstepError::InterfaceNotFound(_))
++        ));
++        assert!(matches!(
++            get_signal_body_type(Cursor::new(xml), "org.example.Node", "Missing", None),
++            Err(LockstepError::MemberNotFound(_))
++        ));
++        assert!(matches!(
++            get_signal_body_type(Cursor::new(xml), "org.example.Node", "Changed", Some("missing")),
++            Err(LockstepError::ArgumentNotFound(_))
++        ));
++        let malformed = xml.replace("type=\"s\"", "type=\"(\"");
++        assert!(matches!(
++            get_signal_body_type(Cursor::new(malformed), "org.example.Node", "Changed", None),
++            Err(LockstepError::Xml(_))
++        ));
++    }
++
+     #[test]
+     fn test_overlapping_names_return_type() {
+         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+--- a/src/macros.rs
++++ b/src/macros.rs
+@@ -174,7 +174,7 @@
+ /// ```rust
+ /// use std::str::FromStr;
+ /// use zbus_lockstep::method_return_signature;
+-/// use zvariant::Signature;
++/// use zbus::Signature;
+ ///
+ /// let sig = method_return_signature!("RequestName");
+ /// assert_eq!(&sig, &Signature::from_str("u").expect("Valid signature pattern"));
+@@ -282,7 +282,7 @@
+ /// ```rust
+ /// use std::str::FromStr;
+ /// use zbus_lockstep::method_args_signature;
+-/// use zvariant::Signature;
++/// use zbus::Signature;
+ ///
+ /// let sig = method_args_signature!("RequestName");
+ /// assert_eq!(&sig, &Signature::from_str("(su)").expect("Valid signature pattern"));
+@@ -386,7 +386,7 @@
+ /// ```rust
+ /// use std::str::FromStr;
+ /// use zbus_lockstep::signal_body_type_signature;
+-/// use zvariant::Signature;
++/// use zbus::Signature;
+ ///
+ /// let sig = signal_body_type_signature!("AddNode");
+ /// assert_eq!(&sig, &Signature::from_str("(so)").expect("Valid signature pattern"));
+@@ -491,7 +491,7 @@
+ /// ```rust
+ /// use std::str::FromStr;
+ /// use zbus_lockstep::property_type_signature;
+-/// use zvariant::Signature;
++/// use zbus::Signature;
+ ///
+ /// let sig = property_type_signature!("Features");
+ /// assert_eq!(&sig, &Signature::from_str("as").expect("Valid signature pattern"));
+@@ -553,7 +553,7 @@
+ mod test {
+     use std::str::FromStr;
+ 
+-    use zvariant::Signature;
++    use zbus::Signature;
+ 
+     use crate::signal_body_type_signature;
+ 
+@@ -568,7 +568,7 @@
+         let sig = crate::signal_body_type_signature!("AddNode");
+         assert_eq!(
+             &sig,
+-            &zvariant::Signature::from_str("(so)").expect("Valid signature pattern")
++            &zbus::Signature::from_str("(so)").expect("Valid signature pattern")
+         );
+     }
+ 
+--- /dev/null
++++ b/xml/test_definition_file.xml
+@@ -0,0 +1,31 @@
++<node>
++  <interface name="org.example.Node">
++    <signal name="AddNode">
++      <arg name="nodeAdded" type="(so)"/>
++    </signal>
++
++    <signal name="Alert">
++      <arg name="urgent" type="b"/>
++      <arg name="color" type="s"/>
++      <arg name="volume" type="d"/>
++    </signal>
++
++    <signal name="RemoveNode">
++      <arg name="nodeRemoved" type="(so)"/>
++    </signal>
++
++    <signal name="U32AsEnum">
++        <arg name="my_type" type="u"/>
++    </signal>
++
++    <method name="RequestName">
++      <arg direction="in" name="apple" type="s"/>
++      <arg direction="in" name="orange" type="u"/>
++      <arg direction="out" name="grape" type="u"/>
++    </method>
++
++    <property name="Features" type="as" access="read">
++    </property>
++
++  </interface>
++</node>

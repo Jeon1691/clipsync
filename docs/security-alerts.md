@@ -17,7 +17,7 @@ Reviewed on 2026-11-11 against `master` commit
 
 The 2026-11-15 follow-up also patches RUSTSEC-2026-0523 and RUSTSEC-2026-0524
 with quinn-proto 0.11.19, and RUSTSEC-2026-0538 with quinn-udp 0.5.16.
-The workspace requires Rust 1.88, checked in CI, and fuzz jobs validate their
+The v0.2.0 workspace requires Rust 1.95, checked in CI, and fuzz jobs validate their
 lockfile with `cargo metadata --locked` before building.
 
 The security workflow audits both committed lockfiles. Vulnerabilities, unsound
@@ -45,54 +45,28 @@ remove or rotate any example key, restart, and re-pair their clients. A binary
 update does not retroactively protect an old handshake. See the
 [release notes](releases/v0.1.16.md) and [key rotation](self-hosting.md#token-keys-and-rotation).
 
-## Remaining maintenance advisories
+## Maintenance-advisory migration
 
-These are informational unmaintained-package findings, not patched-version
-vulnerability findings. They still contribute to Scorecard alert #25. The
-2026-11-15 review found no released, compatible upgrade that removes all six while
-preserving the current accessibility, window decorations, and mobile bindings.
-Review again by **2026-12-11** and check weekly Dependabot PRs.
+The v0.2.0 migration removes all six former informational maintenance findings:
+`basic-toml`, `paste`, `ttf-parser`, `zbus_names`, `zvariant`, and
+`zvariant_derive`. It upgrades eframe to 0.37 and UniFFI to 0.32.2, selects
+winit's existing Crossfont Wayland title renderer, backports Askama's upstream
+TOML-parser fix, and migrates the AccessKit/AT-SPI source stack to maintained
+zbus 6.3 APIs. Accessibility, native decorations/title text, both graphics
+backends, clipboard formats, and mobile bindings remain enabled.
 
-| Advisory | Dependency | Current dependency path |
-| --- | --- | --- |
-| [RUSTSEC-2026-0374](https://rustsec.org/advisories/RUSTSEC-2026-0374.html) | basic-toml | UniFFI → Askama's code generator |
-| [RUSTSEC-2024-0436](https://rustsec.org/advisories/RUSTSEC-2024-0436.html) | paste | eframe's optional wgpu backend → wgpu-hal → metal; compile-time macro |
-| [RUSTSEC-2026-0192](https://rustsec.org/advisories/RUSTSEC-2026-0192.html) | ttf-parser | eframe/winit → native font rendering |
-| [RUSTSEC-2026-0371](https://rustsec.org/advisories/RUSTSEC-2026-0371.html) | zbus_names | eframe → AccessKit/AT-SPI on Linux |
-| [RUSTSEC-2026-0370](https://rustsec.org/advisories/RUSTSEC-2026-0370.html) | zvariant | eframe → AccessKit/AT-SPI on Linux |
-| [RUSTSEC-2026-0372](https://rustsec.org/advisories/RUSTSEC-2026-0372.html) | zvariant_derive | Linux accessibility stack's compile-time macros |
+Both real lockfile audits now report zero vulnerabilities and no warnings,
+without advisory ignores. This is not solely a released-dependency update:
+seven explicit compatibility source forks are maintained by ClipSync. Their
+pinned original sources, complete local diffs, upstream licenses, ownership,
+weekly review policy, and retirement conditions are recorded in
+[vendor/README.md](../vendor/README.md). Local source patches require manual
+security review because registry advisories do not fully assess modified code.
 
-The follow-up checked these replacement paths against current upstream releases:
-
-- **Binding generation:** [UniFFI 0.32.2](https://github.com/mozilla/uniffi-rs/blob/v0.32.2/uniffi_bindgen/Cargo.toml)
-  still enables Askama's `config` feature. Released Askama 0.16.1 still uses
-  `basic-toml` for that feature. Upstream
-  [commit 3863808](https://github.com/askama-rs/askama/commit/3863808cf594054f7644979ed92caaafc878f378)
-  replaces the parser with maintained `toml`, but the fix is not yet published.
-  Recheck when a release containing this commit is compatible with UniFFI.
-- **Window titles and fonts:** eframe 0.37 uses Skrifa for its own font parsing,
-  but its winit 0.30 dependency still selects `sctk-adwaita` 0.10.1 with
-  `ab_glyph`, which retains `ttf-parser`. The
-  [winit 0.30.13 manifest](https://github.com/rust-windowing/winit/blob/v0.30.13/Cargo.toml)
-  cannot select the newer `sctk-adwaita` Skrifa backend. Track
-  [sctk-adwaita #99](https://github.com/PolyMeilex/sctk-adwaita/issues/99) and a
-  compatible winit release that preserves title text.
-- **Linux accessibility:** even the latest AccessKit Unix adapter, 0.24.1,
-  [requires zbus 5.19](https://docs.rs/crate/accesskit_unix/0.24.1/source/Cargo.toml).
-  The maintained replacement is zbus 6, which
-  [incorporates the former standalone wire-format crates](https://rustsec.org/advisories/RUSTSEC-2026-0370.html).
-  This needs an AccessKit/AT-SPI migration before ClipSync can adopt it.
-- **Graphics macros:** resolving eframe 0.33.3 retained `metal` 0.32 and `paste`;
-  an actual `cargo audit --json` still reported all six maintenance advisories,
-  so that ineffective upgrade was reverted. eframe 0.34.3 and later move to a
-  newer graphics stack and raise the compiler requirement; the latest
-  [eframe 0.37 requires Rust 1.95](https://docs.rs/crate/eframe/0.37.0/source/Cargo.toml).
-  A larger GUI migration solely to remove this one warning is deferred while
-  the other upstream blockers remain. Rust 1.88 remains the tested minimum.
-
-Both lockfiles remain audited without advisory ignores, package renames, or
-locally maintained dependency forks. Native accessibility, title bars, image
-formats, and mobile bindings remain enabled.
+See [dependency migration](dependency-migration.md) for each replacement path,
+actual Rust 1.95 minimum, upstream-source evidence, behavior tests, and remaining
+platform verification limits. The first patch-retirement review is due
+**2026-12-11**. Weekly dependency checks and both lockfile audits remain in place.
 
 ## Compiler-warning review and strict checks
 
