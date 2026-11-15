@@ -12,6 +12,11 @@ case "$repro_platform" in
   linux/amd64|linux/arm64) ;;
   *) echo "CLIPSYNC_REPRO_PLATFORM must be linux/amd64 or linux/arm64." >&2; exit 2 ;;
 esac
+repro_report_owner="$(id -u):$(id -g)"
+if [[ ! "$repro_report_owner" =~ ^[0-9]+:[0-9]+$ ]]; then
+  echo "The report owner must be a numeric UID:GID pair." >&2
+  exit 2
+fi
 repro_repo="$(git rev-parse --show-toplevel)"
 repro_report_parent="${1:-$repro_repo/target/reproducibility-report}"
 mkdir -p "$repro_report_parent"
@@ -46,10 +51,16 @@ for repro_build in first second; do
     --mount "type=bind,src=$repro_temporary/source.bundle,dst=/input/source.bundle,readonly" \
     --mount "type=bind,src=$repro_report/$repro_build,dst=/report" \
     --env "REPEATABILITY_CONTAINER=${repro_prefix}:${repro_build}" \
+    --env "REPEATABILITY_REPORT_OWNER=$repro_report_owner" \
     "${repro_prefix}:${repro_build}" bash -euo pipefail -c '
       git clone --quiet /input/source.bundle /build/source
       cd /build/source
       bash scripts/check-repeatable-build.sh --single /report
+      # Exported files stay readable; only their containing directory needs
+      # caller ownership so host-side comparison cleanup can unlink them.
+      test -d /report/outputs
+      test ! -L /report/outputs
+      chown -- "$REPEATABILITY_REPORT_OWNER" /report/outputs
     '
 done
 cmp "$repro_report/first/native-packages.txt" "$repro_report/second/native-packages.txt"

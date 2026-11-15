@@ -27,6 +27,12 @@ elif args[0] == "version":
 elif args[:2] == ["image", "inspect"]:
     print('[{"Id":"synthetic-fixture"}]')
 elif args[0] == "run":
+    if mode == "require-caller-ownership":
+        expected = f"REPEATABILITY_REPORT_OWNER={os.getuid()}:{os.getgid()}"
+        settings = [args[i + 1] for i, arg in enumerate(args) if arg == "--env"]
+        if expected not in settings:
+            print("exported output directories would remain owned by container root", file=sys.stderr)
+            raise SystemExit(78)
     mounts = [args[i + 1] for i, arg in enumerate(args) if arg == "--mount"]
     fields = [dict(item.split("=", 1) for item in mount.split(",") if "=" in item) for mount in mounts]
     report = pathlib.Path(next(item["src"] for item in fields if item["dst"] == "/report"))
@@ -139,6 +145,23 @@ class BuildReconstructionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.runs()[0] / "platform.txt").read_text(), "linux/arm64\n")
         self.assert_platform_arguments("linux/arm64", expected_builds=2)
+
+    def test_build_exports_request_the_callers_ownership_before_host_cleanup(self):
+        result = self.invoke(mode="require-caller-ownership")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        current, = self.runs()
+        self.assertTrue((current / "comparison.txt").is_file())
+        for build in ["first", "second"]:
+            self.assertFalse((current / build / "outputs").exists())
+
+    def test_malformed_caller_ids_fail_before_docker_or_report_creation(self):
+        identity = self.tools / "id"
+        identity.write_text("#!/bin/sh\nprintf '%s\\n' '0 --reference=/other'\n")
+        identity.chmod(0o755)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertFalse(self.parent.exists())
+        self.assertFalse(self.log.exists())
 
     def test_second_build_and_comparison_failures_do_not_publish_success(self):
         for mode in ["fail-second", "packages-differ", "outputs-differ"]:
