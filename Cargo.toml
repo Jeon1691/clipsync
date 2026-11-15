@@ -82,7 +82,7 @@ tokio-tungstenite = { version = "0.26", features = [
     "rustls-tls-native-roots",
     "rustls-tls-webpki-roots",
 ] }
-toml = "0.8"
+toml = "1.2"
 tower-http = { version = "0.6", features = ["trace", "limit", "timeout"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
