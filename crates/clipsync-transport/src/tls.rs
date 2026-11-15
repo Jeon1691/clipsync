@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use rustls::pki_types::CertificateDer;
+use rustls::pki_types::{pem::PemObject, CertificateDer};
 use rustls::ClientConfig;
 use rustls_platform_verifier::BuilderVerifierExt;
 use tracing::info;
@@ -52,14 +52,17 @@ fn build() -> Result<ClientConfig, TransportError> {
         .with_no_client_auth())
 }
 
+/// Load the extra CA certificates specified by `CLIPSYNC_CA_FILE`.
+///
+/// Returns no extra certificates when unset; rejects unreadable, malformed,
+/// or certificate-free PEM bundles.
 fn load_extra_cas() -> Result<Vec<CertificateDer<'static>>, TransportError> {
     let Some(path) = ca_file_path() else {
         return Ok(Vec::new());
     };
     let data = std::fs::read(&path)
         .map_err(|e| TransportError::Protocol(format!("{CA_FILE_ENV} ({path}): {e}")))?;
-    let mut cursor = std::io::Cursor::new(data);
-    let certs = rustls_pemfile::certs(&mut cursor)
+    let certs = CertificateDer::pem_slice_iter(&data)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| TransportError::Protocol(format!("{CA_FILE_ENV} parse: {e}")))?;
     if certs.is_empty() {
