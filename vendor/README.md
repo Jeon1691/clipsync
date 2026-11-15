@@ -1,6 +1,6 @@
 # ClipSync-maintained dependency compatibility patches
 
-These seven directories are **local compatibility forks maintained by ClipSync**.
+These eight directories are **local compatibility and reproducibility forks maintained by ClipSync**.
 They are not upstream releases or upstream-approved fixes. Cargo selects them
 explicitly through `[patch.crates-io]`; package names and release versions remain
 those of their source distributions. The upstreams remain the authorities for
@@ -18,6 +18,7 @@ modifications use each source's existing license expression.
 | Source | Local maintenance scope | Retirement condition |
 | --- | --- | --- |
 | askama_derive 0.16.1 | Backport upstream [3863808](https://github.com/askama-rs/askama/commit/3863808cf594054f7644979ed92caaafc878f378): use maintained `toml` with its parse/serde features instead of `basic-toml`. | Compatible Askama release containing that commit. |
+| uniffi_internal_macros 0.32.2 | Backport upstream [ef9625b](https://github.com/mozilla/uniffi-rs/commit/ef9625b68dd51207f55f024a27649e58edb52b09): emit `Node` descendant checks in declaration order using the existing `IndexSet` dependency. Preserve all struct/enum fields and recursive traversal; add stable expansion and semantic traversal tests. The original source and local changes use MPL-2.0. | Compatible UniFFI release containing that commit; 0.32.2 remains the latest release checked on 2026-11-15. |
 | accesskit_unix 0.24.1 | Use zbus 6 types/builders and its default runtime on the existing dedicated accessibility thread; retain Tokio support and all AT-SPI interfaces. | Compatible AccessKit Unix release using zbus 6. |
 | accesskit_atspi_common 0.21.1 | Use the merged zbus 6 wire types. | Compatible upstream translation layer using zbus 6. |
 | atspi-common 0.13.0 | Use zbus 6 wire/name types, deferred builder errors, renamed message decoding API, and current XML validators. Preserve AT-SPI signatures and interface names. Port upstream tests; add malformed wire-name/path rejection checks. | Compatible AT-SPI release using zbus 6. |
@@ -44,7 +45,7 @@ must pass the same behavior tests before removing a patch.
 # archives from the pinned static.crates.io URLs. No source file is modified.
 python3 scripts/check-dependency-patches.py --offline
 # Tests disposable copies: parser config, wire round trips, malformed inputs,
-# XML signatures, and compile-time validators.
+# XML signatures, compile-time validators, and deterministic Node traversal.
 python3 scripts/test-dependency-patches.py --toolchain 1.100.0
 ```
 

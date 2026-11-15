@@ -5489,8 +5489,6 @@ dependencies = [
 [[package]]
 name = "uniffi_internal_macros"
 version = "0.32.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f4bad017164375d99450d70495014810d15a84ba9da6ed14b9628b1424223ba"
 dependencies = [
  "anyhow",
  "indexmap",

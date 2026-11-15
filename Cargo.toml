@@ -115,6 +115,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage,coverage_nightly)
 # See vendor/README.md for upstream provenance, exact scope and retirement criteria.
 [patch.crates-io]
 askama_derive = { path = "vendor/askama_derive" }
+uniffi_internal_macros = { path = "vendor/uniffi_internal_macros" }
 accesskit_unix = { path = "vendor/accesskit_unix" }
 accesskit_atspi_common = { path = "vendor/accesskit_atspi_common" }
 atspi-common = { path = "vendor/atspi-common" }

@@ -88,6 +88,11 @@ only after both environments and both comparisons succeed. A failure does not
 constitute reproducibility evidence. The source, recipe, and recorded platform
 together identify this procedure's native platform scope.
 
+On an output mismatch, `differences/first/` and `differences/second/` retain the
+actual differing binaries before container cleanup, alongside bounded byte
+differences and `comparison-failed.txt`. Matching binaries are discarded after
+comparison to keep reports small. These failed-run files are diagnostic evidence.
+
 The first [repeatability run](https://github.com/Jeon1691/clipsync/actions/runs/43686133672)
 already compared all six Linux outputs byte-for-byte in one environment. The
 stronger dual-environment workflow now verifies reconstruction from the frozen

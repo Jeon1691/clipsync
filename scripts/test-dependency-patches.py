@@ -40,8 +40,8 @@ def main():
     # Copy on every invocation; a stale disposable lock cannot affect the run.
     shutil.copyfile(ROOT / "vendor/test-workspace.Cargo.lock", work / "Cargo.lock")
     command = ["cargo"] + ([f"+{args.toolchain}"] if args.toolchain else [])
-    command += ["test", "--locked", "--manifest-path", str(work / "Cargo.toml"), "--lib"]
-    for name in ["askama_derive", "atspi-common", "zbus-lockstep", "zbus-lockstep-macros"]:
+    command += ["test", "--locked", "--manifest-path", str(work / "Cargo.toml"), "--lib", "--tests"]
+    for name in ["askama_derive", "atspi-common", "zbus-lockstep", "zbus-lockstep-macros", "uniffi_internal_macros"]:
         command += ["-p", name]
     env = dict(os.environ, CARGO_TARGET_DIR=str(target / "patch-tests"))
     subprocess.run(command, cwd=ROOT, env=env, check=True)

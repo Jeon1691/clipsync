@@ -13,7 +13,7 @@ import unittest
 
 REPO = Path(__file__).resolve().parents[2]
 DOCKER_FIXTURE = r'''#!/usr/bin/env python3
-import json, os, pathlib, subprocess, sys
+import hashlib, json, os, pathlib, subprocess, sys
 args = sys.argv[1:]
 with open(os.environ["DOCKER_FIXTURE_LOG"], "a") as log:
     log.write(json.dumps(args) + "\n")
@@ -35,9 +35,16 @@ elif args[0] == "run":
     (report / "bundle-heads.txt").write_text(heads)
     second = report.name == "second"
     packages = "different" if mode == "packages-differ" and second else "synthetic-native-package 1.0"
-    digest = "different" if mode == "outputs-differ" and second else "synthetic-output-hash"
+    content = b"different bytes\n" if mode == "outputs-differ" and second else b"synthetic output bytes\n"
+    digest = hashlib.sha256(content).hexdigest()
+    (report / "outputs").mkdir()
+    (report / "outputs/synthetic-artifact").write_bytes(content)
+    matching = b"matching output bytes\n"
+    (report / "outputs/matching-artifact").write_bytes(matching)
+    (report / "artifacts.txt").write_text("matching-artifact\nsynthetic-artifact\n")
     (report / "native-packages.txt").write_text(packages + "\n")
-    (report / "first.sha256").write_text(digest + "  synthetic-artifact\n")
+    (report / "first.sha256").write_text(hashlib.sha256(matching).hexdigest() + "  matching-artifact\n" +
+                                       digest + "  synthetic-artifact\n")
 '''
 
 
@@ -113,6 +120,7 @@ class BuildReconstructionTests(unittest.TestCase):
             self.assertEqual((current / "reproduced.sha256").read_bytes(), (current / "first/first.sha256").read_bytes())
             for build in ["first", "second"]:
                 self.assertIn(self.commit, (current / build / "bundle-heads.txt").read_text())
+                self.assertFalse((current / build / "outputs").exists())
         self.assert_platform_arguments("linux/amd64", expected_builds=4)
 
     def assert_platform_arguments(self, platform, expected_builds):
@@ -141,6 +149,25 @@ class BuildReconstructionTests(unittest.TestCase):
                 current, = set(self.runs()) - before
                 self.assertFalse((current / "comparison.txt").exists())
                 self.assertFalse((current / "reproduced.sha256").exists())
+
+    def test_differing_output_bytes_survive_container_and_image_cleanup(self):
+        result = self.invoke(mode="outputs-differ")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        current, = self.runs()
+        self.assertEqual((current / "differences/first/synthetic-artifact").read_bytes(),
+                         b"synthetic output bytes\n")
+        self.assertEqual((current / "differences/second/synthetic-artifact").read_bytes(),
+                         b"different bytes\n")
+        self.assertIn("DIFFERS: synthetic-artifact",
+                      (current / "comparison-failed.txt").read_text())
+        self.assertTrue((current / "differences/synthetic-artifact.bytes.txt").read_text())
+        for build in ["first", "second"]:
+            self.assertFalse((current / "differences" / build / "matching-artifact").exists())
+            self.assertFalse((current / build / "outputs").exists())
+        self.assertFalse((current / "comparison.txt").exists())
+        self.assertFalse((current / "reproduced.sha256").exists())
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        self.assertTrue(any(call[:2] == ["image", "rm"] for call in calls))
 
     def test_unknown_platform_fails_before_docker_or_report_creation(self):
         result = self.invoke(platform="linux/unknown")

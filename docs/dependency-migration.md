@@ -14,7 +14,7 @@ it belongs in v0.2.0, not a patch release advertised as Rust 1.88 compatible.
 | zvariant / RUSTSEC-2026-0370 | AccessKit/AT-SPI compatibility patches → maintained zbus 6.3 wire implementation. |
 | zvariant_derive / RUSTSEC-2026-0372 | zbus 6.3 macros replace the old standalone wire derives. |
 
-The seven explicit source patches are **ClipSync-maintained compatibility forks**,
+The eight explicit source patches are **ClipSync-maintained compatibility and reproducibility forks**,
 not a claim that the affected upstreams have published fixes. Their exact scope,
 original archive hashes, pinned Git revisions, full local diffs, licenses,
 maintenance owner, review cadence, and retirement conditions are in
@@ -23,6 +23,17 @@ They migrate real dependency APIs; they do not rename the affected packages or
 suppress their advisories. Cargo's audit has limited visibility into local source
 changes, so the source comparison and behavior tests are required additional
 controls, not replaced by an empty audit report.
+
+UniFFI 0.32.2 also emits `Node` descendant checks by iterating a randomly seeded
+`HashSet`. Repeated compiler expansions at the same source path produce different
+code; the Linux reconstruction check reproduced differing `uniffi-bindgen` and
+mobile static-library bytes while the other outputs matched. The explicit
+`uniffi_internal_macros` backport of upstream
+[ef9625b](https://github.com/mozilla/uniffi-rs/commit/ef9625b68dd51207f55f024a27649e58edb52b09)
+keeps the first occurrence of each field type in declaration order. This preserves
+the emitted checks and traversal behavior. Its tests cover repeated expansion,
+all struct and enum fields, duplicate field values, and recursive descendants.
+The backport must be retired when a compatible released UniFFI includes the fix.
 
 ## Compatibility decisions
 
@@ -65,7 +76,7 @@ Local validation on 2026-11-15 used Rust 1.100.0, with an actual Rust 1.95.0 che
 - Linux aarch64 in a private Debian Bookworm container: desktop/all-target check,
   desktop build, and workspace/all-target Clippy with warnings denied pass.
 - Upstream source tests pass: 45 Askama tests, 1,142 AT-SPI wire/schema tests,
-  and 26 XML validator tests. Negative tests include invalid D-Bus names/paths,
+  26 XML validator tests, and five UniFFI macro/traversal checks. Negative tests include invalid D-Bus names/paths,
   invalid message bodies, malformed XML types, and missing interfaces/members/
   arguments. No validator was removed.
 - A private Xvfb and D-Bus session runs the real Linux desktop, confirms its

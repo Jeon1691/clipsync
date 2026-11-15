@@ -144,6 +144,10 @@ while IFS= read -r repeat_artifact; do
   if [[ "$repeat_single" == 1 ]]; then
     test -f "$repeat_first"
     (cd "$repeat_root/first/target/release" && sha256sum "$repeat_artifact") >> "$repeat_report/first.sha256"
+    # The caller compares independent containers after this one exits. Retain
+    # the actual bytes until that comparison can preserve any differing output.
+    mkdir -p "$repeat_report/outputs"
+    cp "$repeat_first" "$repeat_report/outputs/$repeat_artifact"
     continue
   fi
   if [[ ! -f "$repeat_first" || ! -f "$repeat_second" ]]; then

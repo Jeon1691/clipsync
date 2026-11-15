@@ -53,7 +53,22 @@ for repro_build in first second; do
     '
 done
 cmp "$repro_report/first/native-packages.txt" "$repro_report/second/native-packages.txt"
-cmp "$repro_report/first/first.sha256" "$repro_report/second/first.sha256"
+if ! cmp "$repro_report/first/first.sha256" "$repro_report/second/first.sha256"; then
+  mkdir -p "$repro_report/differences/first" "$repro_report/differences/second"
+  while IFS= read -r repro_artifact; do
+    repro_first="$repro_report/first/outputs/$repro_artifact"
+    repro_second="$repro_report/second/outputs/$repro_artifact"
+    if cmp -s "$repro_first" "$repro_second"; then continue; fi
+    echo "DIFFERS: $repro_artifact" | tee -a "$repro_report/comparison-failed.txt"
+    cp "$repro_first" "$repro_report/differences/first/"
+    cp "$repro_second" "$repro_report/differences/second/"
+    cmp -l "$repro_first" "$repro_second" | head -n 40 \
+      > "$repro_report/differences/$repro_artifact.bytes.txt" || true
+  done < "$repro_report/first/artifacts.txt"
+  rm -rf -- "$repro_report/first/outputs" "$repro_report/second/outputs"
+  exit 1
+fi
+rm -rf -- "$repro_report/first/outputs" "$repro_report/second/outputs"
 cp "$repro_report/first/first.sha256" "$repro_report/reproduced.sha256"
 echo 'All Linux workspace outputs match across both independently reconstructed environments.' \
   | tee "$repro_report/comparison.txt"

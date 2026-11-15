@@ -59,6 +59,17 @@
       "patch": "patches/atspi-proxies.patch"
     },
     {
+      "name": "uniffi_internal_macros",
+      "version": "0.32.2",
+      "archive_url": "https://static.crates.io/crates/uniffi_internal_macros/uniffi_internal_macros-0.32.2.crate",
+      "archive_sha256": "0f4bad017164375d99450d70495014810d15a84ba9da6ed14b9628b1424223ba",
+      "repository": "https://github.com/mozilla/uniffi-rs",
+      "revision": "7bc621ee9d0d15371d792612707ba5ed4111f950",
+      "path_in_repository": "uniffi_internal_macros",
+      "license": "MPL-2.0",
+      "patch": "patches/uniffi_internal_macros.patch"
+    },
+    {
       "name": "zbus-lockstep",
       "version": "0.7.0",
       "archive_url": "https://static.crates.io/crates/zbus-lockstep/zbus-lockstep-0.7.0.crate",

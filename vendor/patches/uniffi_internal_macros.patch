@@ -1,0 +1,219 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 32a78a9ec91d9c17eeab2289ff57c141b30eae33..c3f1e464b4fd19b5087bbf8fd27f778ec89560b7 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -61,3 +61,10 @@ features = [
+     "visit-mut",
+     "extra-traits",
+ ]
++
++[dev-dependencies.uniffi_pipeline]
++version = "=0.32.2"
++
++[[test]]
++name = "node_descendants"
++path = "tests/node_descendants.rs"
+diff --git a/src/node.rs b/src/node.rs
+index 77ef2d05d6257fa8abb7ac7d1507b7ee524b40bc..d6a56d4ece56baba83f7bdff6395088559ac81fb 100644
+--- a/src/node.rs
++++ b/src/node.rs
+@@ -2,8 +2,7 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+-use std::collections::HashSet;
+-
++use indexmap::IndexSet;
+ use proc_macro2::TokenStream;
+ use quote::{format_ident, quote};
+ use syn::{Data, DataEnum, DataStruct, DeriveInput, Ident, Result};
+@@ -19,11 +18,13 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream> {
+ fn render_struct(ident: Ident, st: DataStruct) -> Result<TokenStream> {
+     let type_name = ident.to_string();
+     let members = st.fields.members();
++    // Deduplicate in declaration order: iterating a HashSet would emit the checks in an
++    // order seeded per process, so each build would expand the derive differently.
+     let unique_field_types = st
+         .fields
+         .iter()
+         .map(|f| &f.ty)
+-        .collect::<HashSet<_>>()
++        .collect::<IndexSet<_>>()
+         .into_iter();
+ 
+     Ok(quote! {
+@@ -88,7 +89,7 @@ fn render_enum(ident: Ident, en: DataEnum) -> Result<TokenStream> {
+         .variants
+         .iter()
+         .flat_map(|v| v.fields.iter().map(|f| &f.ty))
+-        .collect::<HashSet<_>>()
++        .collect::<IndexSet<_>>()
+         .into_iter();
+ 
+     Ok(quote! {
+@@ -133,3 +134,56 @@ fn render_enum(ident: Ident, en: DataEnum) -> Result<TokenStream> {
+         }
+     })
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use syn::parse_quote;
++
++    // The field type named by each `has_descendant_type` check, in expansion order.
++    fn check_order(input: DeriveInput) -> Vec<String> {
++        let expanded = expand_derive(input).unwrap().to_string();
++        expanded
++            .match_indices(" as :: uniffi_pipeline :: Node >")
++            .map(|(end, _)| {
++                let start = expanded[..end].rfind('<').unwrap() + 1;
++                expanded[start..end].trim().to_string()
++            })
++            .collect()
++    }
++
++    // With this many distinct types, a HashSet order matches declaration order only by
++    // chance, so these fail on the order that made builds irreproducible.
++    #[test]
++    fn struct_checks_follow_declaration_order() {
++        let order = check_order(parse_quote! {
++            struct S { a: A, b: B, c: C, d: D, a2: A, e: E, f: F, g: G, h: H }
++        });
++        assert_eq!(order, ["A", "B", "C", "D", "E", "F", "G", "H"]);
++    }
++
++    #[test]
++    fn enum_checks_follow_declaration_order() {
++        let order = check_order(parse_quote! {
++            enum E { One(A, B), Two { c: C, a: A }, Three(D, E, F), Four { g: G, h: H } }
++        });
++        assert_eq!(order, ["A", "B", "C", "D", "E", "F", "G", "H"]);
++    }
++    #[test]
++    fn repeated_struct_and_enum_expansions_are_identical() {
++        let inputs: [DeriveInput; 2] = [
++            parse_quote! {
++                struct Repeated { a: A, b: B, c: C, d: D, again: A, e: E, f: F, g: G, h: H }
++            },
++            parse_quote! {
++                enum Repeated { One(A, B), Two { c: C, again: A }, Three(D, E, F), Four(G, H) }
++            },
++        ];
++        for input in inputs {
++            let expected = expand_derive(input.clone()).unwrap().to_string();
++            for _ in 0..32 {
++                assert_eq!(expand_derive(input.clone()).unwrap().to_string(), expected);
++            }
++        }
++    }
++}
+diff --git a/tests/node_descendants.rs b/tests/node_descendants.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..786102f7c60aab6be6b12596854d817e5ede3aff
+--- /dev/null
++++ b/tests/node_descendants.rs
+@@ -0,0 +1,103 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++// ClipSync regression contracts for deterministic Node derives.
++
++use std::collections::HashSet;
++use uniffi_pipeline::Node;
++
++#[derive(Debug, Node)]
++struct Leaf {
++    number: u32,
++}
++
++#[derive(Debug, Node)]
++struct Root {
++    first: Leaf,
++    repeated_type: Leaf,
++    sequence: Vec<Leaf>,
++    choice: Choice,
++    enabled: bool,
++}
++
++#[derive(Debug, Node)]
++enum Choice {
++    Named { leaf: Leaf, label: String },
++    Tuple(Leaf, bool),
++    Empty,
++}
++
++#[derive(Debug, Node)]
++struct Recursive {
++    child: Option<Box<Recursive>>,
++    leaf: Leaf,
++}
++
++#[test]
++fn struct_and_enum_descendants_keep_every_field_and_repeated_value() {
++    let root = Root {
++        first: Leaf { number: 1 },
++        repeated_type: Leaf { number: 2 },
++        sequence: vec![Leaf { number: 3 }, Leaf { number: 4 }],
++        choice: Choice::Named {
++            leaf: Leaf { number: 5 },
++            label: "named".into(),
++        },
++        enabled: true,
++    };
++    assert!(Root::has_descendant_type::<Leaf>(&mut HashSet::new()));
++    assert!(Root::has_descendant_type::<Choice>(&mut HashSet::new()));
++    assert!(Root::has_descendant_type::<Vec<Leaf>>(&mut HashSet::new()));
++    assert!(!Root::has_descendant_type::<f64>(&mut HashSet::new()));
++    let mut leaves = Vec::new();
++    root.visit::<Leaf>(|leaf| leaves.push(leaf.number));
++    assert_eq!(leaves, [1, 2, 3, 4, 5]);
++    let mut labels = Vec::new();
++    root.try_visit_descendants(&mut |node| {
++        if let Some(label) = node.as_any().downcast_ref::<String>() {
++            labels.push(label.clone());
++        }
++        Ok(())
++    })
++    .unwrap();
++    assert_eq!(labels, ["named"]);
++    assert!(root.enabled);
++
++    let tuple = Choice::Tuple(Leaf { number: 6 }, false);
++    let mut tuple_leaves = Vec::new();
++    tuple.visit::<Leaf>(|leaf| tuple_leaves.push(leaf.number));
++    assert_eq!(tuple_leaves, [6]);
++    let mut flags = Vec::new();
++    tuple
++        .try_visit_descendants(&mut |node| {
++            if let Some(flag) = node.as_any().downcast_ref::<bool>() {
++                flags.push(*flag);
++            }
++            Ok(())
++        })
++        .unwrap();
++    assert_eq!(flags, [false]);
++    assert!(Choice::has_descendant_type::<Leaf>(&mut HashSet::new()));
++    let mut empty_leaves = Vec::new();
++    Choice::Empty.visit::<Leaf>(|leaf| empty_leaves.push(leaf.number));
++    assert!(empty_leaves.is_empty());
++}
++
++#[test]
++fn recursive_descendant_detection_terminates_and_reaches_later_fields() {
++    assert!(Recursive::has_descendant_type::<Leaf>(&mut HashSet::new()));
++    assert!(Recursive::has_descendant_type::<Recursive>(
++        &mut HashSet::new()
++    ));
++    assert!(!Recursive::has_descendant_type::<f64>(&mut HashSet::new()));
++    let root = Recursive {
++        child: Some(Box::new(Recursive {
++            child: None,
++            leaf: Leaf { number: 7 },
++        })),
++        leaf: Leaf { number: 8 },
++    };
++    let mut leaves = Vec::new();
++    root.visit::<Leaf>(|leaf| leaves.push(leaf.number));
++    assert_eq!(leaves, [7, 8]);
++}
