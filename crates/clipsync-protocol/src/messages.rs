@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 

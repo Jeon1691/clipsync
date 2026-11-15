@@ -1,10 +1,11 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::detect::{hash_item, tool_exists, which_bin, Capabilities};
+use crate::detect::{hash_item, which_bin, Capabilities};
 use crate::item::{tiff_to_png, ClipboardItem, FileRef, ImageMime};
 use crate::{ClipboardBackend, ClipboardError, Result};
 
@@ -34,6 +35,7 @@ impl Tool {
 }
 
 impl CommandClipboard {
+    #[cfg(target_os = "macos")]
     pub fn macos_tools() -> Option<Self> {
         let pbcopy = which_bin("pbcopy")?;
         let pbpaste = which_bin("pbpaste")?;
@@ -320,7 +322,6 @@ fn parse_uri_list(bytes: &[u8]) -> Result<Option<ClipboardItem>> {
     }
 }
 
-#[allow(dead_code)]
 pub fn files_to_uri_list_from_paths(paths: &[std::path::PathBuf]) -> String {
     paths
         .iter()
@@ -378,14 +379,4 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
-}
-
-#[allow(dead_code)]
-pub fn wayland_watch_available() -> bool {
-    tool_exists("wl-paste")
-}
-
-#[allow(dead_code)]
-pub fn command_timeout() -> Duration {
-    Duration::from_secs(5)
 }

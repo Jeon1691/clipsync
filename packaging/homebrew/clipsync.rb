@@ -1,3 +1,5 @@
+# Copyright the ClipSync contributors.
+# SPDX-License-Identifier: MIT
 class Clipsync < Formula
   desc "End-to-end encrypted multi-device clipboard sync"
   homepage "https://github.com/Jeon1691/clipsync"

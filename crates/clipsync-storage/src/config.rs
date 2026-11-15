@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use serde::{Deserialize, Serialize};
 
 use clipsync_protocol::{SyncDirection, DEFAULT_TTL_SECS};
@@ -32,6 +34,8 @@ pub struct NotifyConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WebhookConfig {
     pub url: String,
+    // Accept legacy config files, but never serialize credentials into metadata.
+    #[serde(default, skip_serializing)]
     pub secret: String,
 }
 

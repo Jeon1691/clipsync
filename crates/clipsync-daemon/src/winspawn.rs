@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 //! Windows child-process isolation so `Command::output()` does not wait on grandchildren.
 
 use std::process::{Child, Command};

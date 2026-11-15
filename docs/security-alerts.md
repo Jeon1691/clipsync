@@ -39,7 +39,7 @@ The 2026-11-15 Best Practices review found two additional issues in the defaults
   shorter than 32 bytes fail without printing the value. Examples no longer
   provide a shared key.
 
-These fixes are prepared for v0.1.16. Upgrade both clients and re-pair to replace
+These fixes were published in v0.1.16. Upgrade both clients and re-pair to replace
 keys from an earlier handshake. Self-hosted relay operators should rebuild,
 remove or rotate any example key, restart, and re-pair their clients. A binary
 update does not retroactively protect an old handshake. See the
@@ -94,26 +94,21 @@ Both lockfiles remain audited without advisory ignores, package renames, or
 locally maintained dependency forks. Native accessibility, title bars, image
 formats, and mobile bindings remain enabled.
 
-## Compiler-warning backlog
+## Compiler-warning review and strict checks
 
-CI continues to run `cargo clippy --workspace --all-targets --locked` with
-warnings visible. A Rust 1.100 evaluation of `-- -D warnings` found existing
-diagnostics, including large error/enum variants and unused dependencies.
-The strict gate is not enabled. The [warning review](compiler-warnings.md)
-records the complete three-platform inventory, accepted tradeoffs, and tracked
-cleanup. No lint suppressions or service behavior changes were added to claim
-a warning-free build.
+The earlier Rust 1.100 review found 113 distinct warning locations across the
+three supported platforms. The follow-up fixes practical style, platform
+selection, dependency and metadata warnings and makes Clippy warnings errors in
+CI. Deliberate public-error and queue layouts retain narrow, reasoned lint
+expectations instead of broad suppressions or compatibility-breaking boxing.
+See [compiler warnings](compiler-warnings.md) for the current policy and
+historical inventory, and the final hosted CI results for platform verification.
 
-## Repository and project-history findings
+## Silver/Gold review follow-up
 
-| Code Scanning alert | Current state / next action |
-| --- | --- |
-| #2 Branch-Protection | The active [Protect master ruleset](https://github.com/Jeon1691/clipsync/rules/27029148) prevents deletion and force pushes, requires PRs and resolved review threads, dismisses stale approvals, and has no administrator bypass. It requires up-to-date `linux`, `macos`, `windows`, `audit`, `fuzz`, and the aggregate `CodeQL` result. The code-scanning merge gate blocks CodeQL security findings at medium severity or higher and code findings at error severity. The alert predates this policy; re-evaluate on the next Scorecard run. |
-| #19 Code-Review | Scorecard found no approved changesets in its recent history. Maintainer review and future reviewed merges are needed; repository history cannot be repaired by this patch. |
-| #21 Maintained | The repository was created on 2026-09-16. Scorecard flags repositories younger than 90 days; re-evaluate after 2026-12-15 as well as maintaining normal project activity. |
-| #22 SAST | GitHub CodeQL default setup is already configured for Actions, Python, Ruby, and Rust. Scorecard needs successful analysis on merged PRs to observe its use. |
-| #23 CII-Best-Practices | Requires the maintainer to register and truthfully complete the [OpenSSF Best Practices self-assessment](https://www.bestpractices.dev/). A badge cannot be earned by adding an image to the README. |
-
-GitHub alerts are re-evaluated after these changes reach the default branch and
-the corresponding dependency/CodeQL/Scorecard analyses run. No alert is manually
-dismissed by this change.
+The higher-tier review additionally fixes webhook DNS/IPv6 destination bypasses
+and separates device/webhook credentials from metadata, with private atomic
+migration and startup error preservation. See the [v0.1.17 release notes](releases/v0.1.17.md),
+[assurance case](assurance-case.md), and [complete criterion register](best-practices-levels.md).
+The current public Best Practices entry has earned Passing; Silver/Gold are not
+claimed until every required criterion has evidence.

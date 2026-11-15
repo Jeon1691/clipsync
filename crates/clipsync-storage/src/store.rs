@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +16,8 @@ pub struct RoomRecord {
     pub epoch: u64,
     pub role: DeviceRole,
     pub created_at: DateTime<Utc>,
+    // Kept in memory for callers; legacy inline credentials are migrated on load.
+    #[serde(default, skip_serializing)]
     pub device_token: String,
     pub peers: Vec<PeerRecord>,
 }
@@ -77,13 +81,31 @@ impl LocalStore {
             return Ok(AppConfig::default());
         }
         let raw = std::fs::read_to_string(path)?;
-        Ok(toml::from_str(&raw)?)
+        let mut cfg: AppConfig = toml::from_str(&raw)?;
+        if let Some(webhook) = cfg.webhook.as_mut() {
+            if webhook.secret.is_empty() {
+                webhook.secret = self.load_credential("webhook")?;
+            } else {
+                // Persist the secret successfully before removing the legacy copy.
+                self.save_config(&cfg)?;
+            }
+        }
+        Ok(cfg)
     }
 
     pub fn save_config(&self, cfg: &AppConfig) -> Result<()> {
         std::fs::create_dir_all(&self.paths.config_dir)?;
+        if let Some(webhook) = &cfg.webhook {
+            if webhook.secret.is_empty() {
+                return Err(StorageError::Secret("missing webhook credential".into()));
+            }
+            self.save_credential("webhook", &webhook.secret)?;
+        }
         let raw = toml::to_string_pretty(cfg)?;
-        std::fs::write(self.paths.config_file(), raw)?;
+        crate::secrets::write_private(&self.paths.config_file(), raw.as_bytes())?;
+        if cfg.webhook.is_none() {
+            self.delete_credential("webhook")?;
+        }
         Ok(())
     }
 
@@ -93,13 +115,28 @@ impl LocalStore {
             return Ok(StateFile::default());
         }
         let raw = std::fs::read_to_string(path)?;
-        Ok(serde_json::from_str(&raw)?)
+        let mut state: StateFile = serde_json::from_str(&raw)?;
+        let legacy = state.rooms.iter().any(|room| !room.device_token.is_empty());
+        for room in &mut state.rooms {
+            if room.device_token.is_empty() {
+                room.device_token = self.load_credential(&device_token_name(&room.room_id))?;
+            }
+        }
+        if legacy {
+            self.save_state(&state)?;
+        }
+        Ok(state)
     }
 
     pub fn save_state(&self, state: &StateFile) -> Result<()> {
         let path = self.paths.state_file();
-        std::fs::write(&path, serde_json::to_string_pretty(state)?)?;
-        set_private_file(&path)?;
+        for room in &state.rooms {
+            if room.device_token.is_empty() {
+                return Err(StorageError::Secret("missing device credential".into()));
+            }
+            self.save_credential(&device_token_name(&room.room_id), &room.device_token)?;
+        }
+        crate::secrets::write_private(&path, &serde_json::to_vec_pretty(state)?)?;
         Ok(())
     }
 
@@ -155,12 +192,47 @@ impl LocalStore {
         });
         self.save_state(&state)?;
         if let Some(room) = &removed {
+            self.delete_credential(&device_token_name(&room.room_id))?;
             let _ = self.secrets.delete_named(&format!("room-{}", room.room_id));
             let _ = self
                 .secrets
                 .delete_named(&format!("epoch-{}", room.room_id));
         }
         Ok(removed)
+    }
+
+    // These credentials use canonical private files, without stale keychain fallback.
+    fn load_credential(&self, name: &str) -> Result<String> {
+        let value = std::fs::read_to_string(self.paths.data_dir.join(format!("{name}.secret")))?;
+        if value.is_empty() {
+            return Err(StorageError::Secret("empty credential file".into()));
+        }
+        Ok(value)
+    }
+
+    fn save_credential(&self, name: &str, value: &str) -> Result<()> {
+        let path = self.paths.data_dir.join(format!("{name}.secret"));
+        if std::fs::read_to_string(&path).ok().as_deref() == Some(value) {
+            set_private_file(&path)?;
+            // Windows FlushFileBuffers requires a writable handle.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)?
+                .sync_all()?;
+            #[cfg(unix)]
+            std::fs::File::open(&self.paths.data_dir)?.sync_all()?;
+            return Ok(());
+        }
+        crate::secrets::write_private(&path, value.as_bytes())?;
+        Ok(())
+    }
+
+    fn delete_credential(&self, name: &str) -> Result<()> {
+        match std::fs::remove_file(self.paths.data_dir.join(format!("{name}.secret"))) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub fn save_room_keys(
@@ -190,6 +262,11 @@ impl LocalStore {
         self.secrets
             .save_named(&format!("epoch-{room_id}"), &hex::encode(key))
     }
+}
+
+fn device_token_name(room_id: &RoomId) -> String {
+    // Encoding prevents a deserialized ID from introducing path separators.
+    format!("device-token-{}", hex::encode(room_id.as_str()))
 }
 
 fn decode_key(hex_str: &str) -> Result<[u8; 32]> {

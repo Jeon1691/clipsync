@@ -28,7 +28,17 @@ public discussion and CI record; it does not itself establish independent
 approval of changes authored by the maintainer. Review requirements follow the
 [repository rules](https://github.com/Jeon1691/clipsync/rules).
 
+Commits entering `master` must be cryptographically signed and verified by
+GitHub. Register your public key as a **Signing Key** (authentication-only
+registration does not establish signature verification) and use a verified
+commit identity. See [signing and verification](docs/builds.md#source-tag-signatures);
+never submit private keys. A cryptographic signature is separate from a legal
+DCO sign-off.
+
 Contributions are made under the project's [MIT license](LICENSE-MIT).
+Project roles and decision-making are in [GOVERNANCE.md](GOVERNANCE.md).
+Follow the [code of conduct](CODE_OF_CONDUCT.md). See the
+[roadmap and small contributor tasks](ROADMAP.md) for suitable first changes.
 
 ## Build and check
 
@@ -37,9 +47,13 @@ Install Rust through rustup and update the stable toolchain:
 ```sh
 rustup update stable
 rustup component add rustfmt clippy
+git clone https://github.com/Jeon1691/clipsync.git
+cd clipsync
 ```
 
 The repository selects stable in [rust-toolchain.toml](rust-toolchain.toml).
+On macOS install Xcode Command Line Tools (`xcode-select --install`). On Windows
+install the Visual Studio C++ build tools and Windows SDK for the MSVC target.
 The minimum supported Rust version is the workspace `rust-version` in
 [Cargo.toml](Cargo.toml); the minimum-version CI job checks it separately.
 Keep the manifest and CI consistent if a change raises that minimum.
@@ -90,6 +104,11 @@ GitHub's code-scanning setup.
 - Follow rustfmt and the existing crate structure and naming. Address compiler
   and Clippy warnings introduced by the change; justify any targeted lint
   exception in the code.
+- The primary implementation language is Rust. Its selected coding standard is
+  the [Rust Style Guide](https://doc.rust-lang.org/style-guide/), enforced by
+  rustfmt and Clippy in CI. Support scripts follow existing local conventions
+  and must pass the relevant parser checks; this is not a claim of full
+  style-guide enforcement for every packaging language.
 - Add automated tests for major new functionality. For a bug fix, add a focused
   regression test when the behavior can be reproduced reliably. Exercise failure
   paths and boundaries, especially untrusted protocol input and file handling.
@@ -111,3 +130,31 @@ GitHub's code-scanning setup.
 Use the checks appropriate to the change and report their results in the pull
 request. Documentation-only changes should verify commands and links; they do
 not need an unrelated full build.
+
+## Review and acceptance
+
+Before acceptance, read the complete diff and check:
+
+- The change solves the stated problem, stays in scope, and preserves documented
+  CLI, protocol, native clipboard and binding behavior or explains migration.
+- New major functionality **must** have automated tests. Bug fixes should have
+  a regression reproducing the original defect, including failure and boundary
+  cases. Explain any missing platform or test coverage.
+- Untrusted inputs, authorization, secrets, resource bounds, file paths and
+  network destinations follow the [security requirements](docs/security.md)
+  and [assurance case](docs/assurance-case.md).
+- Formatting, lint, build, test and security results are acceptable. Document
+  narrowly justified lint exceptions where they occur; do not disable checks
+  to make a change pass.
+- Public documentation, dependency lockfiles, supported Rust version and
+  release/upgrade notes agree with the resulting behavior.
+
+The reviewer requests changes for unresolved defects and records acceptance or
+the reason for rejection in the pull request. The maintainer is responsible for
+the final decision. Independent human review is preferred; the current solo
+project cannot require approval from an unavailable second person or claim that
+bot/AI comments meet the two-person-review criterion.
+
+See [testing](docs/testing.md), [builds](docs/builds.md) and
+[the complete badge assessment](docs/best-practices-levels.md) for measurement
+commands, verification limits and outstanding work.

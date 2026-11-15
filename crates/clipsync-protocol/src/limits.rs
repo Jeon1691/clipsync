@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 pub const PAIRING_TTL_SECS: u64 = 120;
 pub const PAIRING_MAX_ATTEMPTS: u32 = 3;
 pub const PAIRING_MAX_JOINERS: u32 = 1;

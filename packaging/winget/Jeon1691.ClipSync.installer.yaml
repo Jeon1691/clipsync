@@ -1,3 +1,5 @@
+# Copyright the ClipSync contributors.
+# SPDX-License-Identifier: MIT
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
 
 PackageIdentifier: Jeon1691.ClipSync

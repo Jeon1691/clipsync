@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 //! Native mobile bindings. The OS clipboard stays in Swift/Kotlin.
 
 uniffi::setup_scaffolding!();

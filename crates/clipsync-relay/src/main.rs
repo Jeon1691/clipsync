@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use clap::Parser;
 use clipsync_relay::{serve, RelayConfig};
 use tracing_subscriber::EnvFilter;

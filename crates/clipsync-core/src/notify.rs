@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -39,14 +41,6 @@ impl Notifier {
         };
         send("ClipSync", &body);
     }
-
-    #[allow(dead_code)]
-    pub fn error(&self, message: &str) {
-        if !self.cfg.enabled {
-            return;
-        }
-        send("ClipSync", message);
-    }
 }
 
 fn send(title: &str, body: &str) {
@@ -58,12 +52,10 @@ fn send(title: &str, body: &str) {
             escape_as(title)
         );
         let _ = Command::new("osascript").args(["-e", &script]).status();
-        return;
     }
     #[cfg(target_os = "linux")]
     {
         let _ = Command::new("notify-send").args([title, body]).status();
-        return;
     }
     #[cfg(target_os = "windows")]
     {
@@ -78,6 +70,7 @@ fn send(title: &str, body: &str) {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn escape_as(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }

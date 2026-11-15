@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 //! ClipSync window for macOS, Windows, and Linux.
 
 use std::sync::mpsc::{self, Receiver, Sender};

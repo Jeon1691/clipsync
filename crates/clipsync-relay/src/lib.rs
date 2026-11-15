@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 //! Zero-knowledge ClipSync relay: pairing rendezvous and encrypted frame routing.
 
 mod auth;

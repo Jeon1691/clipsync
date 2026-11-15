@@ -1,0 +1,105 @@
+# Building, installing and verifying
+
+Cargo builds the workspace dependency graph without recursive subdirectory
+builds. Use the committed lockfile and `--locked`. Rust compiler and linker
+configuration uses standard Cargo mechanisms, including `RUSTFLAGS`,
+`CARGO_ENCODED_RUSTFLAGS`, `CARGO_TARGET_<TRIPLE>_LINKER`, `CARGO_TARGET_DIR`, and
+`CARGO_PROFILE_RELEASE_*`. Native dependency build scripts use their applicable
+`CC`, `CXX`, `CFLAGS` and `CXXFLAGS`; Rust itself does not interpret C flags.
+The project does not replace user-supplied compiler/linker variables.
+
+For debug information in an optimized build:
+
+```sh
+CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=none cargo build --release --workspace --locked
+```
+
+The host packaging helper also honors these profile settings and skips its
+extra strip step when debug information is requested:
+
+```sh
+CARGO_PROFILE_RELEASE_DEBUG=2 scripts/package-release.sh
+```
+
+`CLIPSYNC_PRESERVE_DEBUG=1` explicitly preserves symbols in that helper. The
+published workflow builds compact production archives; it is separate from a
+local debug package. Do not mistake symbol stripping for a security boundary.
+
+## Installation locations and removal
+
+Homebrew installs into its configured prefix; use `brew install
+jeon1691/tap/clipsync`, `brew upgrade clipsync`, and `brew uninstall clipsync`.
+For source installation use Cargo's destination convention:
+
+```sh
+cargo install --path crates/clipsync-cli --locked --root /chosen/prefix
+cargo uninstall clipsync-cli --root /chosen/prefix
+```
+
+`CARGO_INSTALL_ROOT` is the equivalent Cargo environment setting. The Windows
+installer accepts `-InstallDir`. These use their package-manager conventions;
+the repository does not supply a `make install` that interprets `DESTDIR`.
+Before removing a paired installation run `clipsync daemon stop` and, if retiring
+the device, `clipsync room leave`. Uninstalling a binary does not securely erase
+clipboard history, inbox files, backups or private application data.
+
+## Repeatability and reproducibility
+
+The [Linux repeatability workflow](../.github/workflows/reproducible.yml) runs
+[the comparison script](../scripts/check-repeatable-build.sh) in a digest-pinned
+builder with Rust 1.100.0. It builds all workspace executables and mobile shared/
+static libraries twice in separate fresh source and target directories, retains
+environment/package versions and hashes, and fails on differing bytes. It shares
+downloaded registry sources, not compiled objects. This is a scoped Linux check;
+native packages are recorded rather than pinned, and it does not verify
+distributed archive metadata or all release platforms. The first [successful run](https://github.com/Jeon1691/clipsync/actions/runs/43686133672)
+compared all six outputs byte-for-byte identical: CLI, desktop, relay, bindgen,
+mobile shared library and static library. This establishes project-controlled
+Linux repeatability (Silver). It does not yet establish Gold independent
+reconstruction: the native package set is recorded but not frozen and recreated
+from the instructions by a clean external environment.
+
+Release provenance and `Cargo.lock` establish origin and dependency integrity;
+they do not prove bit-for-bit repeatability. Current release archives do not yet have a verified independent
+reproducible-build procedure. Archive timestamps and native signing add further
+packaging considerations. Silver `build_repeatable` is supported by the Linux
+result above; Gold `build_reproducible` remains unmet pending a sufficiently
+specified and independently reconstructable build environment. The official
+criteria do not require every platform/archive to be verified before a scoped
+build claim, and this document does not invent that stronger requirement.
+
+For future verification, record the exact source commit, rustc/linker versions,
+target, container/SDK digest and dependency checksums. Set a fixed
+`SOURCE_DATE_EPOCH`, normalize absolute source paths with `--remap-path-prefix`,
+and normalize archive ordering, timestamps, ownership and compression. Build
+twice in fresh directories without reusing produced object files and compare
+hashes of every distributed artifact. A fresh independently provisioned environment must be sufficiently specified
+to repeat the procedure; an outside participant can provide further corroboration.
+Publish logs, hashes and any target-specific exceptions; a
+successful cached rebuild alone is insufficient.
+
+## Source-tag signatures
+
+New security/important release tags must be SSH signed. The public key is
+[release-signing.pub](keys/release-signing.pub), with fingerprint
+`SHA256:PctnByIWeY8g6MvP2GQ/E9htrJ7Q736/6T0jQhMq+ic`.
+The private key is held in the maintainer's 1Password signing setup, outside the
+public software distribution service. The repository contains only the public
+key. GitHub's Verified label depends on account key registration and is distinct
+from a valid local signature. On 2026-11-15 the existing public key was also
+registered as a GitHub **Signing Key** after owner reauthentication; current and
+earlier signed PR commits were confirmed `verified: true`, `reason: valid`.
+
+After independently establishing trust in that fingerprint/key, verify:
+
+```sh
+git fetch origin tag v0.1.16
+ssh-keygen -lf docs/keys/release-signing.pub
+git -c gpg.ssh.allowedSignersFile=docs/keys/allowed_signers verify-tag v0.1.16
+```
+
+The allowed principal is `16333003+Jeon1691@users.noreply.github.com`. Verify the
+tag's object digest against the intended release. A key fetched from a newly
+untrusted checkout alone is not independent trust establishment. Public old tags
+are not rewritten to manufacture a signed history. Archive attestation
+verification is documented separately in [packaging](packaging.md).

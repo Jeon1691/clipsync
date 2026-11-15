@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 //! User-level service lifecycle (launchd/systemd/Windows logon) and IPC.
 
 mod ipc;

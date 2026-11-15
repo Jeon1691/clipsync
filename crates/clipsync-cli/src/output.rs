@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 pub fn emit(json: bool, value: serde_json::Value) {
     if json {
         println!("{}", value);

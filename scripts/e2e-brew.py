@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright the ClipSync contributors.
+# SPDX-License-Identifier: MIT
 """Live E2E against the Homebrew clipsync binary and hosted relay."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -32,6 +34,10 @@ pub struct PendingCreate {
 }
 
 impl PendingCreate {
+    #[expect(
+        clippy::result_large_err,
+        reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+    )]
     pub async fn wait(
         self,
         store: &LocalStore,
@@ -53,6 +59,10 @@ impl PendingCreate {
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 pub async fn begin_create_room(
     identity: &DeviceIdentity,
     cfg: &AppConfig,
@@ -110,6 +120,10 @@ pub async fn begin_create_room(
     })
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 pub async fn create_room(
     store: &LocalStore,
     identity: &DeviceIdentity,
@@ -126,6 +140,10 @@ pub async fn create_room(
     Ok(offer)
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 pub async fn join_room(
     store: &LocalStore,
     identity: &DeviceIdentity,
@@ -190,7 +208,14 @@ pub async fn join_room(
     store.current_room().map_err(Into::into)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep explicit borrows of the existing pairing session state; reviewed in docs/compiler-warnings.md."
+)]
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 async fn run_pairing(
     store: &LocalStore,
     identity: &DeviceIdentity,
@@ -420,6 +445,10 @@ fn device_bind_nonce(
     clipsync_crypto::derive_nonce(key, index)
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 async fn connect_relay_ws(ws: &str) -> Result<RelayConnection, CoreError> {
     match RelayConnection::connect(ws).await {
         Ok(conn) => Ok(conn),
@@ -436,6 +465,10 @@ async fn connect_relay_ws(ws: &str) -> Result<RelayConnection, CoreError> {
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 pub fn leave_room(store: &LocalStore) -> Result<(), CoreError> {
     match store.leave_current()? {
         Some(room) => {
@@ -453,6 +486,10 @@ fn b64_encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 fn b64_decode(s: &str) -> Result<Vec<u8>, CoreError> {
     base64::engine::general_purpose::STANDARD
         .decode(s)

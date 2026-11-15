@@ -1,3 +1,5 @@
+# Copyright the ClipSync contributors.
+# SPDX-License-Identifier: MIT
 # Insert this hostname *before* the `*.develicit.dev` catch-all in
 # /etc/cloudflared/config.yml on the Proxmox host.
 #

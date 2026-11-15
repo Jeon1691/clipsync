@@ -1,20 +1,14 @@
 # OpenSSF Best Practices passing assessment worksheet
 
-Prepared on **2026-11-15** against local commit
-`000d5151d1aabf59d259b4b608e1a4f7a6a3b1e9` and the accompanying
-[contribution guide](../CONTRIBUTING.md). This is an evidence worksheet for the
-maintainer, not a completed self-assessment or a claim that a badge was earned.
-Evidence from this branch becomes a public assessment URL only after it is
-published in the repository. Recheck the exact release and default-branch state
-when submitting answers.
+Passing was earned on **2026-11-15** in [project 16709](https://www.bestpractices.dev/en/projects/16709), with all required criteria satisfied. The tables below retain the original evidence worksheet and its historical review labels. The public entry is authoritative for current answers. See [the Silver/Gold register](best-practices-levels.md) for the complete higher-tier assessment and remaining requirements.
 
 ## Registration state and prepared project data
 
 The initial public exact-repository lookup returned no entry. After the
 maintainer completed GitHub login/account linking, [project 16709](https://www.bestpractices.dev/en/projects/16709)
 was registered for `https://github.com/Jeon1691/clipsync` on 2026-11-15.
-The saved assessment is in progress; consult that entry for its current answers
-and badge state. Registration alone is not a passing badge. The
+The assessment earned Passing (100%) on 2026-11-15; consult the entry for current
+answers and badge state. The
 [official API documentation](https://github.com/ossf/best-practices-badge/blob/main/docs/api.md)
 defines the public project/badge interfaces.
 
@@ -29,7 +23,7 @@ defines the public project/badge interfaces.
 | Public issue/discussion archive | [Issues](https://github.com/Jeon1691/clipsync/issues) and [pull requests](https://github.com/Jeon1691/clipsync/pulls). |
 | Contribution requirements | [CONTRIBUTING.md](../CONTRIBUTING.md), after publication. |
 | Vulnerability reporting | [SECURITY.md](../SECURITY.md); [private advisory form](https://github.com/Jeon1691/clipsync/security/advisories/new). |
-| Releases | [GitHub releases](https://github.com/Jeon1691/clipsync/releases). Latest public release observed: `v0.1.15`; `v0.1.16` is the candidate in this change. |
+| Releases | [GitHub releases](https://github.com/Jeon1691/clipsync/releases). The v0.1.16 security release is published; newer release candidates are described in their release notes. |
 | Account/project owner, contact information, terms and data-license agreement | The owner completed GitHub account linking directly. No personal email or credentials belong in this worksheet. |
 | CPE or other optional identifiers | Leave unset unless an existing, accurate identifier is confirmed. |
 
@@ -118,7 +112,7 @@ form requires them. Prefer commit-specific links for historical evidence.
 | `tests_documented_added` | SUGGESTED | Evidence: contribution guide records the test policy. |
 | `warnings` | MUST | Evidence: compiler diagnostics and `cargo clippy --workspace --all-targets --locked` run in CI. |
 | `warnings_fixed` | MUST | Evidence: [three-platform warning review](compiler-warnings.md) records all 113 distinct locations, OS-specific counts, causes, accepted API/performance tradeoffs, and tracked cleanup. These are reviewed warnings, not blanket false positives; new diagnostics require review. |
-| `warnings_strict` | SUGGESTED | Considered: CI runs Clippy, but does not currently pass `-D warnings`. Assess practical strictness and record the current answer accurately. |
+| `warnings_strict` | SUGGESTED | Evidence: CI now enforces Clippy `-D warnings` after practical cleanup and narrow documented exceptions; see [the current warning policy](compiler-warnings.md). |
 
 ## Security
 

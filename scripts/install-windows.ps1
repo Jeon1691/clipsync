@@ -1,3 +1,5 @@
+# Copyright the ClipSync contributors.
+# SPDX-License-Identifier: MIT
 # Install ClipSync on Windows from GitHub Releases.
 # Usage:
 #   irm https://raw.githubusercontent.com/Jeon1691/clipsync/master/scripts/install-windows.ps1 | iex

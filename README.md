@@ -3,6 +3,7 @@
 [![CI](https://github.com/Jeon1691/clipsync/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/Jeon1691/clipsync/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Jeon1691/clipsync?label=release&color=2ea44f)](https://github.com/Jeon1691/clipsync/releases/latest)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Jeon1691/clipsync/badge)](https://scorecard.dev/viewer/?uri=github.com/Jeon1691/clipsync)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16709/badge)](https://www.bestpractices.dev/projects/16709)
 
 End-to-end encrypted clipboard sync for **macOS**, **Linux**, and **Windows**.
 Pair two devices with a one-time 6-digit code. After pairing, a background
@@ -65,7 +66,7 @@ winget installs that same zip. From a clone:
 ./scripts/install-windows.ps1 -Winget
 ```
 
-Or point winget at the manifests in the repo (they match the latest GitHub release):
+Or point winget at the checked-in manifests (these target a specific older release; inspect the package version before installing):
 
 ```powershell
 winget install --manifest .\packaging\winget --accept-package-agreements --accept-source-agreements

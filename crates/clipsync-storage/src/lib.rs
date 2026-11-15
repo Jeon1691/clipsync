@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 //! Local configuration, credentials, and secret storage.
 
 mod config;

@@ -1,4 +1,6 @@
 # syntax=docker/dockerfile:1
+# Copyright the ClipSync contributors.
+# SPDX-License-Identifier: MIT
 FROM rust:1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c AS build
 WORKDIR /src
 COPY . .

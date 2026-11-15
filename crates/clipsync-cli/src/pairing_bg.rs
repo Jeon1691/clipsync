@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use std::fs::OpenOptions;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -7,6 +9,10 @@ use clipsync_storage::PairingWait;
 
 use crate::output::emit;
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 pub async fn spawn_background_create(
     app: &App,
     ttl: Option<&str>,

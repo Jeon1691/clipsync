@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use std::path::{Component, Path};
 
 use crate::{Result, TransferError};

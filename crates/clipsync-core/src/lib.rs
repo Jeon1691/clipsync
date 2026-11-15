@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 //! ClipSync client: pairing, sync engine, loop prevention, and command facade.
 
 mod engine;
@@ -34,6 +36,10 @@ pub struct App {
     pub store: LocalStore,
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 impl App {
     pub fn open() -> Result<Self, CoreError> {
         Ok(Self {
@@ -48,6 +54,8 @@ impl App {
     }
 
     pub fn init(&self, relay_url: Option<String>) -> Result<DeviceIdentity, CoreError> {
+        // Absence is handled by load_config; errors must not reset user data.
+        let mut cfg = self.store.load_config()?;
         let identity = match self.store.secrets.load_identity() {
             Ok(id) => id,
             Err(_) => {
@@ -56,7 +64,6 @@ impl App {
                 identity
             }
         };
-        let mut cfg = self.store.load_config().unwrap_or_default();
         if let Some(url) = relay_url {
             cfg.relay_url = url;
         }
@@ -313,6 +320,10 @@ pub struct PullResult {
     pub files: Vec<PathBuf>,
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 pub fn maybe_start_daemon(store: &LocalStore) -> Result<(), CoreError> {
     if std::env::var("CLIPSYNC_NO_DAEMON").ok().as_deref() == Some("1") {
         return Ok(());
@@ -322,6 +333,10 @@ pub fn maybe_start_daemon(store: &LocalStore) -> Result<(), CoreError> {
     Ok(())
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 async fn load_push_item(
     r#type: Option<&str>,
     files: &[PathBuf],
@@ -443,6 +458,10 @@ pub fn device_name() -> String {
         .unwrap_or_else(|| "clipsync-device".into())
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 pub fn device_id_or_new(store: &LocalStore) -> Result<DeviceId, CoreError> {
     Ok(store.secrets.load_identity()?.device_id.clone())
 }

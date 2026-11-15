@@ -1,11 +1,16 @@
 #![cfg(target_os = "macos")]
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 
 use std::path::PathBuf;
 
 use async_trait::async_trait;
 use objc2::runtime::ProtocolObject;
 use objc2::ClassType;
-#[allow(deprecated)]
+#[expect(
+    deprecated,
+    reason = "Read the legacy filename pasteboard flavor alongside modern file URLs for compatibility."
+)]
 use objc2_app_kit::NSFilenamesPboardType;
 use objc2_app_kit::{
     NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeTIFF,
@@ -13,7 +18,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSArray, NSData, NSDictionary, NSNumber, NSString, NSURL};
 
-use crate::detect::{hash_item, Capabilities};
+use crate::detect::Capabilities;
 use crate::item::{tiff_to_png, ClipboardItem, FileRef, ImageMime};
 use crate::{ClipboardBackend, ClipboardError, Result};
 
@@ -181,7 +186,10 @@ fn paths_from_file_urls(pb: &NSPasteboard) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-#[allow(deprecated)]
+#[expect(
+    deprecated,
+    reason = "Read the legacy filename pasteboard flavor alongside modern file URLs for compatibility."
+)]
 fn paths_from_filenames(pb: &NSPasteboard) -> Vec<PathBuf> {
     let ty = unsafe { NSFilenamesPboardType };
     let Some(obj) = pb.propertyListForType(ty) else {
@@ -367,11 +375,6 @@ impl ClipboardBackend for MacClipboard {
         let pb = NSPasteboard::generalPasteboard();
         Ok(pb.changeCount().to_string())
     }
-}
-
-#[allow(dead_code)]
-fn _hash(item: &ClipboardItem) -> String {
-    format!("{:x}", hash_item(item))
 }
 
 #[cfg(test)]

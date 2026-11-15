@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};

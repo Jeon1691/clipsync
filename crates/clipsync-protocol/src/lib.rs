@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 //! ClipSync wire protocol: routing headers, control messages, binary chunks, limits.
 
 mod chunk;

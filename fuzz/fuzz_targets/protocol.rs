@@ -1,4 +1,6 @@
 #![no_main]
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 
 use clipsync_protocol::{decode_chunk_frame, encode_chunk_frame, ControlMessage};
 use libfuzzer_sys::fuzz_target;

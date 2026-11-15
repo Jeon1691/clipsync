@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use clipsync_clipboard::ClipboardError;
 use clipsync_crypto::{AeadError, CryptoError};
 use clipsync_daemon::DaemonError;
@@ -98,7 +100,7 @@ mod tests {
     #[test]
     fn format_error_includes_source_chain() {
         let inner = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "tls eof");
-        let outer = std::io::Error::new(std::io::ErrorKind::Other, inner);
+        let outer = std::io::Error::other(inner);
         let msg = format_error(&outer);
         assert!(msg.contains("tls eof"), "{msg}");
     }
