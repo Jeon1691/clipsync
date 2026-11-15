@@ -10,6 +10,7 @@ Install the tooling and run from the repository root:
 rustup toolchain install nightly
 cargo install cargo-fuzz --version 0.13.2 --locked
 mkdir -p fuzz/corpus/protocol
+cargo +nightly metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
 cargo +nightly fuzz run protocol fuzz/corpus/protocol fuzz/seeds/protocol -- -max_total_time=60 -max_len=1048576
 ```
 

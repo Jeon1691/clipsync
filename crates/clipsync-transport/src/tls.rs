@@ -52,6 +52,10 @@ fn build() -> Result<ClientConfig, TransportError> {
         .with_no_client_auth())
 }
 
+/// Load the extra CA certificates specified by `CLIPSYNC_CA_FILE`.
+///
+/// Returns no extra certificates when unset; rejects unreadable, malformed,
+/// or certificate-free PEM bundles.
 fn load_extra_cas() -> Result<Vec<CertificateDer<'static>>, TransportError> {
     let Some(path) = ca_file_path() else {
         return Ok(Vec::new());
