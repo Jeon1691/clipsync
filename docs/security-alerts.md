@@ -15,6 +15,11 @@ Reviewed on 2026-11-11 against `master` commit
 | Code Scanning #24 | Add a cargo-fuzz target for binary chunk and JSON control-message decoding, with seed inputs and scheduled/PR CI runs. |
 | Code Scanning #25, vulnerability findings | Remove the vulnerable quick-xml dependency through eframe 0.32.3; update rustls, rustls-webpki, webpki-roots, and webpki-root-certs. Update Tokio and rustix for memory-safety advisories, replace rustls-pemfile with rustls's PEM API, and replace yanked lockfile entries. |
 
+The 2026-11-15 follow-up also patches RUSTSEC-2026-0523 and RUSTSEC-2026-0524
+with quinn-proto 0.11.19, and RUSTSEC-2026-0538 with quinn-udp 0.5.16.
+The workspace requires Rust 1.88, checked in CI, and fuzz jobs validate their
+lockfile with `cargo metadata --locked` before building.
+
 The security workflow audits both committed lockfiles. Vulnerabilities, unsound
 code advisories, and yanked packages fail the audit job. Unmaintained-package
 warnings remain visible; they are not suppressed with an advisory ignore list.
