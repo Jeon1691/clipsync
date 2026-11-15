@@ -2163,6 +2163,35 @@
         }
       ],
       "notes": "Actual Windows CI passed the Rust workspace but failed F35/F36 evidence with undefined cp1252 byte0x90. The focused child process reproduces both ASCII-locale and Windows1252 decoding of UTF-8 fixtures; original code fails while explicit UTF-8 reads preserve source bytes and valid registrations. Malformed UTF-8 remains rejected without replacement or source rewriting. These are variants of one source-decoding defect."
+    },
+    {
+      "id": "F106",
+      "kind": "Build/CI",
+      "fixes": [
+        "7f6e9767a28a5989c41fde1811924c2fa8058101"
+      ],
+      "description": "Root-created exported output directories caused host cleanup to fail after a successful independent six-output comparison",
+      "checks": [
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_build_reconstruction.py",
+          "test": "test_build_reconstruction.BuildReconstructionTests.test_build_exports_request_the_callers_ownership_before_host_cleanup",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        },
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_build_reconstruction.py",
+          "test": "test_build_reconstruction.BuildReconstructionTests.test_malformed_caller_ids_fail_before_docker_or_report_creation",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        }
+      ],
+      "notes": "Actual hosted d86 reconstruction built both environments and passed native-package and all-six-output comparisons, then failed strict cleanup because Docker root owned the 0755 outputs directories. A real Linux Docker volume reproduced root-producer/UID1001-consumer unlink failure; the actual corrected command changes only directory ownership, preserving directory0755, root-owned file0644 and payload SHA, then UID1001 cleanup succeeds. The registered Python checks protect caller ownership handoff and malformed-ID rejection with synthetic orchestration; the separate native Docker probe and full hosted reconstruction establish actual permission behavior. No cleanup failure is ignored or success marker emitted early."
     }
   ]
 }

@@ -1,6 +1,6 @@
 # Six-month regression-test audit — 2026-11-15
 
-The complete ledger now registers **60 of 105 distinct corrected defects (57.14%)**,
+The complete ledger now registers **61 of 106 distinct corrected defects (57.55%)**,
 meeting the Silver requirement of at least 50%. [The machine-readable ledger](regressions.json)
 and [CI checker](../scripts/check-regressions.py) preserve the full denominator
 and derive credit from concrete test references, not a manually entered Boolean.
@@ -39,9 +39,9 @@ that an assertion reproduces a historical defect.
 
 | Scope | Registered defects | Complete defects | Fraction |
 | --- | ---: | ---: | ---: |
-| Broad ledger | 60 | 105 | 57.14% |
+| Broad ledger | 61 | 106 | 57.55% |
 | Project runtime/security | 47 | 60 | 78.33% |
-| All project-authored corrections | 60 | 92 | 65.22% |
+| All project-authored corrections | 61 | 93 | 65.59% |
 
 The original baseline increased from **24/84 (28.57%)** to **44/84 (52.38%)** without
 removing defects or treating test variants as extra bugs. The newly covered rows
@@ -121,6 +121,15 @@ ledger conservatively gives no credit because its Rust inventory covers only
 product-workspace packages; those tests run in the separate locked upstream CI
 workspace. No unrelated test is substituted for them. The final total is
 **60/105 (57.14%)**, retaining all earlier rows and honest missing-credit reasons.
+
+F106 records the output-directory ownership correction after the next actual
+hosted run passed both six-output and native-package comparisons but failed
+strict host cleanup. A separate real Docker root producer/UID1001 consumer
+reproduces the unlink failure and verifies the directory-only ownership handoff
+without mode or content changes. Synthetic Python contracts protect the caller
+handoff and reject malformed IDs before Docker. The complete ledger is now
+**61/106 (57.55%)**; cleanup errors remain fatal and the full reconstruction
+must finish successfully before the complete workflow is called passing.
 
 The scope table is derived from the ledger: runtime/security includes the
 `Runtime` and `Runtime-PR16` rows; project-authored corrections include every
@@ -276,6 +285,8 @@ whether the assertion meaningfully protects the stated behavior.
 | F103 | Dependency | [276c37c](https://github.com/Jeon1691/clipsync/commit/276c37c92f975ee745fc91c7a126165e34e5b341) | UniFFI randomized descendant-check emission prevented reproducible build output | **Uncredited by this inventory** — [three macro regressions](../vendor/uniffi_internal_macros/src/node.rs) and [two semantic contracts](../vendor/uniffi_internal_macros/tests/node_descendants.rs) run in the separate locked upstream workspace; actual RED/GREEN expansion and binary comparison evidence is retained. |
 | F104 | Build/CI | [276c37c](https://github.com/Jeon1691/clipsync/commit/276c37c92f975ee745fc91c7a126165e34e5b341) | Independent-container failure cleanup discarded differing binary bytes | **Registered** — [actual publication-wrapper diagnostic lifecycle](../scripts/tests/test_build_reconstruction.py) preserves both differing payloads and bounded diagnostics without success markers, Linux/macOS; synthetic orchestration is not build reproducibility proof. |
 | F105 | Build/CI | [8e63e94](https://github.com/Jeon1691/clipsync/commit/8e63e94894cc5a752627df975cdfc3429966fe43) | Process-locale decoding rejected valid UTF-8 regression sources on Windows | **Registered** — [strict UTF-8 evidence contracts](../scripts/tests/test_regression_policy.py) cover real ASCII-locale subprocesses, Windows1252 simulation and malformed-source rejection without modifying source bytes, all platforms. |
+
+| F106 | Build/CI | [7f6e976](https://github.com/Jeon1691/clipsync/commit/7f6e9767a28a5989c41fde1811924c2fa8058101) | Root-owned exported directories broke host cleanup after matching builds | **Registered** — [caller ownership and malformed-ID contracts](../scripts/tests/test_build_reconstruction.py), plus separate real Docker permission RED/GREEN; modes and payload hashes stay unchanged, Linux/macOS orchestration. |
 
 The [official Silver criterion](https://www.bestpractices.dev/en/criteria/1#regression_tests_added50)
 defines the badge requirement. This ledger's defect taxonomy and conservative

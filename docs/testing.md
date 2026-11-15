@@ -186,13 +186,13 @@ dynamic-analysis coverage.
 ## Regression policy and remaining higher-tier work
 
 The [full audit](regression-audit.md) and [machine-readable ledger](regressions.json)
-now register **60/105 (57.14%)** distinct corrected defects, exceeding the 50%
+now register **61/106 (57.55%)** distinct corrected defects, exceeding the 50%
 Silver regression requirement. The checker validates real test references and
 the full denominator in all three CI platform jobs; future fixes must update
 the ledger and cannot silently delete uncovered cases. This fraction is separate
 from product-source statement coverage.
 
-The integrated v0.2.0 candidate passed 310 local Rust tests and 81 Python
+The integrated v0.2.0 candidate passed 310 local Rust tests and 83 Python
 policy/packaging tests; hosted native macOS ASan also passed. Exact sources,
 scope and pre-release fuzz logs are recorded in [release verification](releases/v0.2.0-verification.md).
 Historical/hunk-restored implementations fail the
