@@ -1,6 +1,6 @@
 # Six-month regression-test audit — 2026-11-15
 
-The complete ledger now registers **46 of 86 distinct corrected defects (53.49%)**,
+The complete ledger now registers **47 of 87 distinct corrected defects (54.02%)**,
 meeting the Silver requirement of at least 50%. [The machine-readable ledger](regressions.json)
 and [CI checker](../scripts/check-regressions.py) preserve the full denominator
 and derive credit from concrete test references, not a manually entered Boolean.
@@ -34,9 +34,9 @@ that an assertion reproduces a historical defect.
 
 | Scope | Registered defects | Complete defects | Fraction |
 | --- | ---: | ---: | ---: |
-| Broad ledger | 46 | 86 | 53.49% |
+| Broad ledger | 47 | 87 | 54.02% |
 | Project runtime/security | 41 | 54 | 75.93% |
-| All project-authored corrections | 46 | 74 | 62.16% |
+| All project-authored corrections | 47 | 75 | 62.67% |
 
 The original baseline increased from **24/84 (28.57%)** to **44/84 (52.38%)** without
 removing defects or treating test variants as extra bugs. The newly covered rows
@@ -46,6 +46,11 @@ The follow-up also discovered and fixed two new defects: concurrent test-fixture
 collisions (F85) and the mobile constructor discarding initialization failures
 (F86). Both have focused regressions. Appending them produces **46/86 (53.49%)**;
 the original 84-row denominator and its uncredited rows remain intact.
+
+The publication follow-up adds F87: an incomplete upload could previously leave
+a public release exposed. The real publication shell now verifies all uploaded
+assets in a draft before making it public. Its failure/order fixtures register
+this additional defect, giving the current **47/87 (54.02%)** total.
 
 Historical staging source, older packaging scripts and isolated reversals of
 the relevant fix hunks fail the targeted cases; current source passes. The proof
@@ -179,3 +184,5 @@ defines the badge requirement. This ledger's defect taxonomy and conservative
 qualifications are project self-assessment evidence, not an official taxonomy
 imposed by OpenSSF. See [testing](testing.md) for the separate production-source
 line/region/branch measurements; a regression-defect fraction is not statement coverage.
+
+| F87 | Build/CI | [d9ec242](https://github.com/Jeon1691/clipsync/commit/d9ec24225f22128a1fa2ef3df5c12b02d782b394) | Public release exposed before complete uploaded asset verification | **Registered** — actual publication shell rejects changed uploaded evidence and verifies a complete draft before public transition; Linux/macOS fixture, Ubuntu publisher. |

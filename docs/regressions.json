@@ -1696,6 +1696,35 @@
         }
       ],
       "notes": "The isolated bad-config child fails against the ignored-error constructor and passes with propagation. F53 fixed App.init itself; this distinct public FFI caller still discarded the returned error."
+    },
+    {
+      "id": "F87",
+      "kind": "Build/CI",
+      "fixes": [
+        "d9ec24225f22128a1fa2ef3df5c12b02d782b394"
+      ],
+      "description": "Release publication exposed a public release before completing and verifying its uploaded asset set",
+      "checks": [
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_release_publication.py",
+          "test": "test_release_publication.ReleasePublicationTests.test_changed_uploaded_evidence_never_publishes_the_draft",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        },
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_release_publication.py",
+          "test": "test_release_publication.ReleasePublicationTests.test_new_release_is_drafted_uploaded_downloaded_verified_then_published",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        }
+      ],
+      "notes": "The actual publication shell runs against an isolated GitHub fixture. A changed uploaded evidence file must leave the release unpublished; a valid complete set is verified before the public transition. Windows skips the Ubuntu publication-shell fixture rather than claiming local execution."
     }
   ]
 }
