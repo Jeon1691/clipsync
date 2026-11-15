@@ -6,8 +6,13 @@
 # archives, independently provisioned environments, or macOS/Windows artifacts.
 set -euo pipefail
 
+repeat_single=0
+if [[ "${1:-}" == --single ]]; then
+  repeat_single=1
+  shift
+fi
 if [[ $# -gt 1 ]]; then
-  echo "usage: $0 [report-directory]" >&2
+  echo "usage: $0 [--single] [report-directory]" >&2
   exit 2
 fi
 if [[ "$(uname -s)" != Linux ]]; then
@@ -56,7 +61,7 @@ PY
   echo "Commit: $(git -C "$repeat_repo" rev-parse HEAD)"
   echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH"
   echo "Container: ${REPEATABILITY_CONTAINER:-caller-provided environment}"
-  echo "Native packages below are recorded, not pinned by this script."
+  echo "Native packages below are recorded; Dockerfile.reproducible freezes the reconstruction environment."
   echo "No compiled objects are shared between the two builds."
   uname -a
   rustc -vV
@@ -69,7 +74,9 @@ if command -v dpkg-query >/dev/null; then
 fi
 
 git -C "$repeat_repo" archive --format=tar HEAD > "$repeat_report/source.tar"
-for repeat_build in first second; do
+repeat_builds=(first second)
+if [[ "$repeat_single" == 1 ]]; then repeat_builds=(first); fi
+for repeat_build in "${repeat_builds[@]}"; do
   mkdir -p "$repeat_root/$repeat_build/source" "$repeat_root/$repeat_build/target"
   tar -xf "$repeat_report/source.tar" -C "$repeat_root/$repeat_build/source"
   find "$repeat_root/$repeat_build/source" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
@@ -103,7 +110,7 @@ if not outputs:
 print("\n".join(sorted(outputs)))
 PY
 
-for repeat_build in first second; do
+for repeat_build in "${repeat_builds[@]}"; do
   (
     repeat_tree="$repeat_root/$repeat_build"
     cd "$repeat_tree/source"
@@ -134,6 +141,11 @@ repeat_result=0
 while IFS= read -r repeat_artifact; do
   repeat_first="$repeat_root/first/target/release/$repeat_artifact"
   repeat_second="$repeat_root/second/target/release/$repeat_artifact"
+  if [[ "$repeat_single" == 1 ]]; then
+    test -f "$repeat_first"
+    (cd "$repeat_root/first/target/release" && sha256sum "$repeat_artifact") >> "$repeat_report/first.sha256"
+    continue
+  fi
   if [[ ! -f "$repeat_first" || ! -f "$repeat_second" ]]; then
     echo "Missing required output: $repeat_artifact" | tee -a "$repeat_report/comparison.txt"
     repeat_result=1

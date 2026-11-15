@@ -1,0 +1,25 @@
+# syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+# Copyright the ClipSync contributors.
+# SPDX-License-Identifier: MIT
+FROM rust:1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c
+
+# Snapshot metadata and package hashes remain authenticated by Debian's archive
+# keys. Only expiration of this deliberately frozen metadata is ignored.
+RUN rm /etc/apt/sources.list.d/debian.sources \
+    && printf '%s\n' \
+      'deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://snapshot.debian.org/archive/debian/20261115T000000Z bookworm main' \
+      'deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://snapshot.debian.org/archive/debian/20261115T000000Z bookworm-updates main' \
+      'deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://snapshot.debian.org/archive/debian-security/20261115T000000Z bookworm-security main' \
+      > /etc/apt/sources.list \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
+    && apt-get install -y --no-install-recommends \
+      python3 pkg-config libgtk-3-dev libxkbcommon-dev libwayland-dev \
+      libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# rustup is part of the pinned base. A numbered Rust distribution is immutable;
+# rustup verifies its manifest/component checksums rather than resolving stable.
+RUN rustup toolchain install 1.100.0 --profile minimal --no-self-update \
+    && rustup default 1.100.0
+ENV RUSTUP_TOOLCHAIN=1.100.0 CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 TZ=UTC LC_ALL=C.UTF-8
+WORKDIR /build
