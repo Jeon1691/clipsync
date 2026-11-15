@@ -27,7 +27,7 @@ def sources(root):
         if name.startswith("vendor/"):
             continue
         path = root / name
-        if path.is_file() and (path.suffix in SUFFIXES or path.name in {"Dockerfile", "PKGBUILD"} or name.startswith(".githooks/")):
+        if path.is_file() and (path.suffix in SUFFIXES or path.name == "PKGBUILD" or path.name.startswith("Dockerfile") or name.startswith(".githooks/")):
             yield path
 
 

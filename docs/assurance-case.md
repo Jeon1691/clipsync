@@ -10,7 +10,8 @@ assessment; it is not an independent audit.
 ## Requirements, assumptions and threats
 
 The intended requirements are listed in [security.md](security.md): authorized
-pairing; confidential, authenticated payloads against the relay/network;
+pairing; confidential, authenticated payloads against an honest-but-curious
+relay and network attackers within the transport assumptions below;
 rejection of invalid or stale messages; constrained file writes/resource use;
 and private, replaceable local credentials. Availability against an arbitrary
 hostile relay, endpoint compromise and forward secrecy for stored payloads are
@@ -19,8 +20,13 @@ outside the provided guarantees.
 Assume an uncompromised authorized endpoint, trustworthy OS/crypto dependencies,
 a correctly authenticated out-of-band pairing-code exchange, private local data
 directories and correctly configured HTTPS/WSS for public transport. Attackers
-may control the network, relay, malformed protocol/file inputs or a webhook
-destination. An authorized malicious peer can intentionally send content; the
+may control the network, malformed protocol/file inputs or a webhook
+destination. The relay generates the pairing password, so a malicious relay
+operator during pairing is outside the confidentiality guarantee: knowing the
+password can enable impersonation of a pairing participant. Use a trusted relay
+for pairing. TLS authenticates the selected service; it does not make a malicious
+service operator trustworthy. This is the honest-but-curious relay model already
+stated in the security requirements. An authorized malicious peer can intentionally send content; the
 receiver still treats its filenames, manifests and sizes as untrusted. Relay
 operators observe routing, size and timing metadata. Same-user malware and
 administrators can access local clipboard contents and keys.
@@ -84,7 +90,7 @@ administrators can access local clipboard contents and keys.
 | Resource exhaustion / malformed input (CWE-400/20) | Typed Serde messages, frame/chunk/file limits, bounded channels, pairing TTL/attempts and transfer/session pruning; protocol fuzzing and stability/large-payload tests. Internet-scale DoS protection still needs deployment controls |
 | Secret exposure (CWE-200/522/732) | No checked-in active example secret; separate private credential files, non-secret metadata serialization, atomic migration, no credential value in weak-key error; storage/config regressions. Debug/log output and backups require care |
 | Memory corruption (CWE-119/787) | Predominantly safe Rust, native-path sanitizer testing and libFuzzer+ASan; no assertion of complete OS/FFI coverage. Released executables have the documented exploit-mitigation flags |
-| Supply-chain compromise (CWE-1104/494) | Audit both lockfiles, monitor dependencies, pin CI inputs, verify release provenance before running/uploading archives; old unmaintained components remain transparently tracked |
+| Supply-chain compromise (CWE-1104/494) | Audit both lockfiles, monitor dependencies, pin CI inputs, verify release provenance before running/uploading archives; seven local compatibility patches retain upstream provenance, full diffs and explicit maintenance/test obligations |
 
 ## Findings, validation and residual work
 

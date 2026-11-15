@@ -45,7 +45,7 @@ jobs:
       - name: Linux desktop and clipboard dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y xclip xvfb libgtk-3-dev libxkbcommon-dev libwayland-dev libxkbcommon-x11-dev
+          sudo apt-get install -y xclip xvfb libgtk-3-dev libxkbcommon-dev libwayland-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev
       - name: Install coverage tool
         run: cargo install cargo-llvm-cov --version 0.9.1 --locked
       - name: Measure every workspace package and target
