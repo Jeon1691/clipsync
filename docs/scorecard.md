@@ -14,7 +14,7 @@ it is not a simple average of the checks.
 | Vulnerabilities | 4 | Track the six upstream maintenance advisories in [security-alerts.md](security-alerts.md). Native audits currently report no patched-version vulnerabilities. |
 | Code-Review | 0 | Merge real changes after independent human review and approval; recent commit history currently contains no qualifying approvals. |
 | Maintained | 0 | The repository is younger than 90 days. Recheck after 2026-12-15 while continuing normal development and issue triage. |
-| CII-Best-Practices | 0 | Complete the prepared [evidence worksheet](best-practices-assessment.md), then register and submit accurate answers through the maintainer's account. |
+| CII-Best-Practices | 0 | Complete the remaining verified answers in [project 16709](https://www.bestpractices.dev/en/projects/16709) using the [evidence worksheet](best-practices-assessment.md). |
 | Contributors | 0 | Reflects actual contributor/organization history. Broader contributions must be genuine; changing profile metadata is not a security improvement. |
 | Packaging | Not scored | GitHub Release archives and the Homebrew tap exist, but Scorecard does not detect a supported package-publishing workflow. This inconclusive result is excluded from the current total. |
 
@@ -51,7 +51,8 @@ The maintainer confirmed on 2026-11-15 that this is a solo project. The active
 [Protect master ruleset](https://github.com/Jeon1691/clipsync/rules/27029148)
 prevents force pushes/deletion and requires PRs, resolved threads,
 up-to-date branches, and the Linux/macOS/Windows CI checks. It now also requires
-the dependency audit, protocol fuzzing, and CodeQL result. Required results are
+the dependency audit, protocol fuzzing, stable `Minimum Rust` check, and CodeQL
+result, including all four configured language-analysis jobs. Required results are
 bound to the GitHub App that actually produces them. CodeQL merge protection
 blocks security findings at medium severity or higher and code findings at error
 severity. Administrator bypass has been removed and stale approvals are
@@ -62,7 +63,7 @@ first adding a trusted reviewer would block the current contribution flow.
 After an independent reviewer is available, consider requiring at least one
 approval and approval of the latest push. Two independent approvals and enforced
 CODEOWNERS review are further steps for a larger team. The minimum-Rust check
-will be made required after its stable check name has passed on this branch.
+was made required after its stable check name passed on the improvement branch.
 The settings above were applied through the repository rules API; they are
 external configuration, not automatically deployed by merging this document.
 Scorecard's review-dependent scoring tiers can keep Branch-Protection at 4 even
@@ -80,7 +81,10 @@ or reducing audit coverage would hide the exposure rather than fix it. Prefer
 tested upstream migrations that keep supported platforms and the declared
 minimum Rust version consistent.
 
-The Best Practices badge is a separate project self-assessment. The
+The Best Practices badge is a separate project self-assessment. The maintainer
+completed GitHub account linking, and [project 16709](https://www.bestpractices.dev/en/projects/16709)
+is registered for the exact repository URL. Its saved answers and completion
+state are the authority; registration alone does not earn a passing badge. The
 [contribution guide](../CONTRIBUTING.md) and
 [criterion-by-criterion worksheet](best-practices-assessment.md) provide a
 prepared registration record, evidence, and concrete gaps. Existing

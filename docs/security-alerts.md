@@ -24,6 +24,27 @@ The security workflow audits both committed lockfiles. Vulnerabilities, unsound
 code advisories, and yanked packages fail the audit job. Unmaintained-package
 warnings remain visible; they are not suppressed with an advisory ignore list.
 
+## Pairing and deployment follow-up
+
+The 2026-11-15 Best Practices review found two additional issues in the defaults:
+
+- Both pairing participants encrypted their device-binding messages with the
+  same SPAKE2 wrapping key and nonce. Sender A now derives nonce index 2 and
+  sender B index 3; both avoid legacy index 1. Tests reproduce the original
+  collision, observe real pairing traffic, and check both directions of a
+  legacy/new v1 wire exchange. Key derivation and receiver framing are unchanged.
+- Root Docker Compose supplied a public example token-signing key. Compose now
+  forwards an optional configured value; absent, empty, and whitespace-only
+  values use an OS-generated 32-byte key. Explicit nonblank environment keys
+  shorter than 32 bytes fail without printing the value. Examples no longer
+  provide a shared key.
+
+These fixes are prepared for v0.1.16. Upgrade both clients and re-pair to replace
+keys from an earlier handshake. Self-hosted relay operators should rebuild,
+remove or rotate any example key, restart, and re-pair their clients. A binary
+update does not retroactively protect an old handshake. See the
+[release notes](releases/v0.1.16.md) and [key rotation](self-hosting.md#token-keys-and-rotation).
+
 ## Remaining maintenance advisories
 
 These are informational unmaintained-package findings, not patched-version
@@ -78,9 +99,10 @@ formats, and mobile bindings remain enabled.
 CI continues to run `cargo clippy --workspace --all-targets --locked` with
 warnings visible. A Rust 1.100 evaluation of `-- -D warnings` found existing
 diagnostics, including large error/enum variants and unused dependencies.
-The strict gate is not enabled: resolving these warnings requires a separate
-code review, including the public error types. No lint suppressions or service
-behavior changes were added as part of this security follow-up.
+The strict gate is not enabled. The [warning review](compiler-warnings.md)
+records the complete three-platform inventory, accepted tradeoffs, and tracked
+cleanup. No lint suppressions or service behavior changes were added to claim
+a warning-free build.
 
 ## Repository and project-history findings
 
