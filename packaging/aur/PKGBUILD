@@ -1,3 +1,5 @@
+# Copyright the ClipSync contributors.
+# SPDX-License-Identifier: MIT
 # Maintainer: ClipSync contributors
 pkgname=clipsync-bin
 pkgver=0.1.0

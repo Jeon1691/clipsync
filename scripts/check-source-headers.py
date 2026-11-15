@@ -23,7 +23,7 @@ def sources(root):
     )
     for name in sorted(set(result.stdout.decode().split("\0")) - {""}):
         path = root / name
-        if path.is_file() and (path.suffix in SUFFIXES or path.name == "Dockerfile"):
+        if path.is_file() and (path.suffix in SUFFIXES or path.name in {"Dockerfile", "PKGBUILD"} or name.startswith(".githooks/")):
             yield path
 
 
