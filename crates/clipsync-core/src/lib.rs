@@ -1,5 +1,6 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 //! ClipSync client: pairing, sync engine, loop prevention, and command facade.
 
 mod engine;
@@ -464,4 +465,81 @@ pub fn device_name() -> String {
 )]
 pub fn device_id_or_new(store: &LocalStore) -> Result<DeviceId, CoreError> {
     Ok(store.secrets.load_identity()?.device_id.clone())
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod regression_tests {
+    #[test]
+    fn http_requests_identify_the_current_package_version() {
+        const CHILD: &str = "CLIPSYNC_TEST_USER_AGENT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "regression_tests::http_requests_identify_the_current_package_version",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("NO_PROXY", "127.0.0.1")
+                .env("no_proxy", "127.0.0.1");
+            for name in [
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+            ] {
+                child.env_remove(name);
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "HTTP fixture failed: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let mut buffer = [0; 1024];
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    assert_ne!(count, 0);
+                    request.extend_from_slice(&buffer[..count]);
+                    assert!(request.len() < 32768);
+                }
+                let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                assert!(
+                    request.contains(&format!(
+                        "\r\nuser-agent: clipsync-cli/{}\r\n",
+                        env!("CARGO_PKG_VERSION")
+                    )),
+                    "wrong public client version: {request}"
+                );
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+            });
+            assert!(super::http_client()
+                .get(format!("http://{address}/healthz"))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success());
+            tokio::time::timeout(std::time::Duration::from_secs(30), server)
+                .await
+                .unwrap()
+                .unwrap();
+        });
+    }
 }

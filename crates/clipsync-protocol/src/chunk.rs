@@ -64,6 +64,7 @@ pub fn decode_chunk_frame(buf: &[u8]) -> Result<ChunkFrame> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

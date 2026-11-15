@@ -48,6 +48,7 @@ cargo +nightly-2026-11-11 llvm-cov report --lcov --skip-functions --output-path 
 cargo +nightly-2026-11-11 llvm-cov report --html --output-dir coverage
 cargo +nightly-2026-11-11 llvm-cov report --json --summary-only --output-path coverage/summary.json
 cargo +nightly-2026-11-11 llvm-cov report > coverage/summary.txt
+python3 scripts/check-coverage.py coverage/summary.json
 ```
 
 On Linux, prefix the instrumented test command with `xvfb-run -a`.
@@ -55,10 +56,10 @@ On Linux, prefix the instrumented test command with `xvfb-run -a`.
 Silver requires at least 80% statement coverage; Gold requires at least 90%
 statement and 80% branch coverage. LLVM reports source lines and regions rather
 than a language-independent statement count. Review both metrics and the missing
-source before using this evidence for a statement-coverage assertion. The
-workflow deliberately has no percentage gate until a representative baseline and
-a realistic improvement target have been reviewed. Adding a workflow alone does
-not establish that a coverage threshold is met.
+source before using this evidence for a statement-coverage assertion. The workflow now requires at least 80% product lines and executable regions.
+The checker sums only validated production-file counters, rejects missing
+crates, duplicate/non-product files and inconsistent totals, and retains the
+full HTML/JSON reports even when the threshold fails.
 
 Coverage is specific to the compiler, host, active `cfg` paths, and tests. The
 Linux workflow does not measure Windows or macOS implementations, iOS/Android
@@ -67,24 +68,44 @@ not instrumented by this command. The HTML report keeps uncovered desktop and
 mobile Rust paths visible; compiling those crates does not demonstrate their
 native UI or foreign-function behavior.
 
-### Recorded baseline
+### Production-source measurement
 
-A clean measurement on 2026-11-15 of the 0.1.17 candidate, using
-`aarch64-apple-darwin`, Rust `nightly-2026-11-11`, and cargo-llvm-cov 0.9.1, passed
-all 74 workspace tests and reported 50 Rust source files:
+Inline `#[cfg(test)]` modules/helpers are marked `coverage(off)` only when the
+nightly coverage tool is active, following the tool's documented approach.
+Standalone test directories are already excluded by the tool. Tests still run;
+their assertion lines do not increase production coverage. Desktop/mobile and
+all other product source stay in the denominator. Stable builds/MSRV remain
+unchanged; the known coverage cfg names are declared through workspace lints.
+
+A clean macOS measurement of the regression candidate passed all 190 Rust tests:
 
 | Metric | Covered / total | Coverage |
 | --- | ---: | ---: |
-| Lines | 3,762 / 6,515 | 57.74% |
-| Regions | 4,050 / 7,439 | 54.44% |
-| Branches | 422 / 1,044 | 40.42% |
-| Functions | 421 / 772 | 54.53% |
+| Product-source lines | 5,116 / 5,924 | 86.36% |
+| Executable regions | 5,304 / 6,591 | 80.47% |
+| Branches | 751 / 1,064 | 70.58% |
 
-Desktop `main.rs` and the mobile library were included at 0% line coverage. The
-current evidence does not meet the Silver or Gold coverage thresholds. Improve
-tests for uncovered application and failure paths, then record a fresh full
-workspace report. The hosted Linux result is a separate baseline and must be
-reviewed after the workflow runs.
+Hosted Linux evidence for the same source is available in the
+[coverage run](https://github.com/Jeon1691/clipsync/actions/runs/43696427313):
+4,703/5,421 lines (86.76%), 4,883/6,080 executable regions (80.31%) and
+659/952 branches (69.22%). The required gate passes on the real Linux runner;
+platform-specific denominators are reported separately rather than summed.
+
+Both product lines and executable regions exceed the 80% Silver gate. LLVM
+executable-region mapping provides this project's Rust statement-coverage
+evidence, with the additional line threshold retained. Gold's 90% statement
+and 80% branch targets remain unmet. Earlier
+57.74% macOS / 59.17% Linux line reports included inline test-code lines and
+are historical source-report baselines, not directly comparable production-only
+measurements. Do not claim an increase from changing the denominator. The new
+method provides a consistent baseline for future product-path tests.
+
+The partial-write regression deliberately enforces a file-size limit in one
+child process. Its LLVM profile is discarded to `/dev/null` so exit-time
+profiling is not truncated by the same limit; normal storage tests retain their
+profiles. The fixture still asserts that the real failed write preserves the
+old credential. This is a conservative measurement limit, not an exclusion of
+a product file or feature.
 
 ## Dynamic analysis and fuzzing
 
@@ -107,7 +128,7 @@ CARGO_TARGET_DIR=target/native-asan \
 RUSTFLAGS='-Zsanitizer=address -Cdebug-assertions=yes' \
 RUSTDOCFLAGS='-Zsanitizer=address -Cdebug-assertions=yes' \
 ASAN_OPTIONS=detect_stack_use_after_return=1 \
-cargo +nightly-2026-11-11 test --target aarch64-apple-darwin -p clipsync-clipboard -p clipsync-daemon --all-targets --locked -- --test-threads=1
+cargo +nightly-2026-11-11 test --target aarch64-apple-darwin -p clipsync-clipboard -p clipsync-daemon -p clipsync-mobile --all-targets --locked -- --test-threads=1
 ```
 
 The [Rust sanitizer guide](https://doc.rust-lang.org/unstable-book/compiler-flags/sanitizer.html)
@@ -153,31 +174,29 @@ mobile bridge, race, or external-library coverage. Add
 targeted sanitizer/device tests for those boundaries before claiming broader
 dynamic-analysis coverage.
 
-## Higher-tier testing work
+## Regression policy and remaining higher-tier work
 
-The [regression audit](regression-audit.md) reviews the complete source history
-within the six-month window. Focused regression evidence covers 23/53
-project-authored runtime/security defects (43.40%); its broader conservative
-ledger covers 24/84 (28.57%). Neither supports the required 50% claim. The ledger
-names missing reproductions rather than treating a passing smoke check as
-coverage of every related bug.
+The [full audit](regression-audit.md) and [machine-readable ledger](regressions.json)
+now register **46/86 (53.49%)** distinct corrected defects, exceeding the 50%
+Silver regression requirement. The checker validates real test references and
+the full denominator in all three CI platform jobs; future fixes must update
+the ledger and cannot silently delete uncovered cases. This fraction is separate
+from product-source statement coverage.
 
-The hosted Linux [coverage run](https://github.com/Jeon1691/clipsync/actions/runs/43686133645)
-measured 3,489/5,897 lines (59.17%), 3,684/6,734 regions (54.71%) and 397/924
-branches (42.97%). These are separate OS/cfg-specific denominators, not a merged
-percentage with the macOS baseline. Both remain below the relevant thresholds.
+Local validation passed 190 Rust tests, 37 Python policy/packaging tests, and
+62 native macOS clipboard/daemon/mobile ASan tests. Historical/hunk-restored implementations fail the
+targeted transfer, CLI, storage, TLS, service and packaging cases. Current source
+passes. Characterization tests with no reliable historical failure are not
+credited in the defect fraction.
 
-Useful next test areas are sustained two-peer daemon sessions and IPC, adapter
-selection and command failures, desktop pairing/error transitions, mobile
-callbacks and local service cleanup. The macOS baseline needs at least 1,450
-more existing lines covered to reach 80% lines, and roughly 1,902 more regions
-to reach 80% regions; line coverage alone is not the statement assertion. This
-requires substantive integration/platform testing, not excluding desktop/mobile
-code or adding assertions that merely repeat implementation details.
+The added cases exercise sustained daemon/IPC sessions, adapter command failures,
+headless desktop state transitions, mobile callbacks and service cleanup. Native
+window startup, some OS failure paths and Gold thresholds still need more work.
+The complete desktop/mobile source remains visible in the reports.
 
-Before the 0.1.17 candidate was released, local ASan/assertion-enabled campaigns
-completed 23,944,020 protocol executions and 2,747,280 AEAD executions in 601
-seconds each, with exit code 0 and no findings. Native ASan passed 12 tests.
-Candidate metadata, commands, tool versions, logs and reports were retained in
-`coverage/release-0.1.17/`; the public workflow artifacts independently retain
-routine hosted results.
+The v0.1.17 security candidate's earlier ASan/assertion campaigns completed
+23,944,020 protocol and 2,747,280 AEAD executions in 601 seconds each, exit 0 with
+no findings. The follow-up adds tests and private clipboard/UI testability boundaries and
+propagates mobile constructor failures; the fuzzed crypto,
+protocol and fuzz sources are unchanged. Native ASan is rerun for the expanded
+clipboard/daemon/mobile tests. Public workflow artifacts retain the hosted results.

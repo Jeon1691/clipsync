@@ -9,6 +9,17 @@ use clipsync_relay::{router, RelayConfig};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 
+fn seed_identity_file(home: &Path) {
+    let paths = clipsync_storage::AppPaths::from_root(home.to_path_buf());
+    paths.ensure().unwrap();
+    let identity = clipsync_crypto::DeviceIdentity::generate();
+    std::fs::write(
+        paths.identity_file(),
+        serde_json::to_vec(&identity.to_stored()).unwrap(),
+    )
+    .unwrap();
+}
+
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_clipsync")
 }
@@ -68,6 +79,62 @@ fn kill_pid(pid: u32) {
         libc_kill(pid as i32, 15);
     }
     let _ = pid;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn foreground_offer_is_flushed_before_a_peer_joins() {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let (relay, relay_task) = start_relay().await;
+    let home = TempDir::new().unwrap();
+    seed_identity_file(home.path());
+    let mut child = tokio::process::Command::new(bin())
+        .args(["--json", "room", "create", "--foreground", "--no-auto-sync"])
+        .env("RUST_LOG", "error")
+        .env("CLIPSYNC_HOME", home.path())
+        .env("CLIPSYNC_RELAY_URL", &relay)
+        .env("CLIPSYNC_NO_DAEMON", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(30), output.read_line(&mut line))
+        .await
+        .expect("foreground code must be visible without completing pairing")
+        .unwrap();
+    let offer: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(offer["event"], "pairing_code");
+    assert_eq!(offer["pairing_code"].as_str().unwrap().len(), 6);
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "pairing still waits for its peer"
+    );
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
+    relay_task.abort();
+}
+
+#[test]
+fn background_failure_preserves_the_child_relay_error() {
+    // Refuse connections without depending on an external host or its DNS.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let relay = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let home = TempDir::new().unwrap();
+    seed_identity_file(home.path());
+    let output = clipsync(home.path(), &relay, &["room", "create", "--no-auto-sync"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&relay),
+        "child failure lost the affected relay: {stderr}"
+    );
+    assert!(!stderr.trim().ends_with("background pairing failed"));
 }
 
 #[cfg(unix)]

@@ -131,6 +131,7 @@ fn is_public(ip: IpAddr) -> bool {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

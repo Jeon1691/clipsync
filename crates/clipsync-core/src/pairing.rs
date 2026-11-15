@@ -497,6 +497,7 @@ fn b64_decode(s: &str) -> Result<Vec<u8>, CoreError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use clipsync_crypto::{derive_nonce, PairingKeys};

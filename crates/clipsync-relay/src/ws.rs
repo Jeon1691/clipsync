@@ -556,3 +556,8 @@ async fn send_err(tx: &mpsc::Sender<WsOut>, code: &str, message: &str) {
     )
     .await;
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "ws_tests.rs"]
+mod tests;

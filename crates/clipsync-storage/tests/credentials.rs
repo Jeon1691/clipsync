@@ -164,3 +164,105 @@ fn truncated_credential_is_rejected_without_rewriting_metadata() {
     assert!(store.load_state().is_err());
     assert_eq!(std::fs::read(store.paths.state_file()).unwrap(), before);
 }
+
+#[cfg(unix)]
+#[test]
+fn partial_secret_write_does_not_destroy_the_previous_credential() {
+    const CHILD: &str = "CLIPSYNC_TEST_PARTIAL_WRITE_CHILD";
+    if let Some(root) = std::env::var_os(CHILD) {
+        let store = LocalStore::open_from(AppPaths::from_root(root.into())).unwrap();
+        let previous = std::fs::read(store.paths.data_dir.join("partial.secret")).unwrap();
+        assert!(store
+            .secrets
+            .save_named("partial", &"x".repeat(1024))
+            .is_err());
+        assert_eq!(
+            std::fs::read(store.paths.data_dir.join("partial.secret")).unwrap(),
+            previous
+        );
+        return;
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
+    std::fs::write(
+        store.paths.data_dir.join("partial.secret"),
+        "previous synthetic credential",
+    )
+    .unwrap();
+    // The OS enforces a short write in a separate process. No fault-injection
+    // hook, process-wide limit, or signal handler affects the normal test suite.
+    let output = std::process::Command::new("python3")
+        .arg("-c")
+        .arg("import os,resource,signal,sys; signal.signal(signal.SIGXFSZ,signal.SIG_IGN); resource.setrlimit(resource.RLIMIT_FSIZE,(64,64)); os.execv(sys.argv[1],sys.argv[1:])")
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", "partial_secret_write_does_not_destroy_the_previous_credential", "--nocapture"])
+        .env(CHILD, root.path())
+        // The intentional file-size limit would also truncate LLVM's exit-time
+        // profile. Discard only this fault-injection child's profile; ordinary
+        // storage tests still measure the real storage operations.
+        .env("LLVM_PROFILE_FILE", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "partial-write worker failed: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        std::fs::read_to_string(store.paths.data_dir.join("partial.secret")).unwrap(),
+        "previous synthetic credential"
+    );
+}
+
+#[test]
+fn missing_credentials_fail_without_overwriting_saved_metadata() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
+    let previous = store.load_config().unwrap();
+    store.save_config(&previous).unwrap();
+    let original = std::fs::read(store.paths.config_file()).unwrap();
+    let mut value = serde_json::to_value(previous).unwrap();
+    value["webhook"] = serde_json::json!({"url": "https://example.test/hook", "secret": ""});
+    let invalid: AppConfig = serde_json::from_value(value).unwrap();
+    assert!(store.save_config(&invalid).is_err());
+    assert_eq!(std::fs::read(store.paths.config_file()).unwrap(), original);
+    let mut invalid_room = room();
+    invalid_room.device_token.clear();
+    assert!(store
+        .save_state(&StateFile {
+            rooms: vec![invalid_room],
+            ..StateFile::default()
+        })
+        .is_err());
+    assert!(!store.paths.state_file().exists());
+}
+
+#[test]
+fn room_root_and_epoch_keys_are_replaceable_and_malformed_keys_are_rejected() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
+    let room = RoomId::new();
+    let root_key = [17; 32];
+    let epoch_key = [19; 32];
+    store
+        .save_room_keys(&room, &hex::encode(root_key), &hex::encode(epoch_key))
+        .unwrap();
+    assert_eq!(store.load_room_root(&room).unwrap(), root_key);
+    assert_eq!(store.load_epoch_key(&room).unwrap(), epoch_key);
+    let rotated = [23; 32];
+    store.save_epoch_key(&room, &rotated).unwrap();
+    assert_eq!(store.load_epoch_key(&room).unwrap(), rotated);
+    assert_eq!(store.load_room_root(&room).unwrap(), root_key);
+    std::fs::write(
+        store.paths.data_dir.join(format!("epoch-{room}.secret")),
+        "00",
+    )
+    .unwrap();
+    assert!(store.load_epoch_key(&room).is_err());
+    store.secrets.delete_named(&format!("room-{room}")).unwrap();
+    store
+        .secrets
+        .delete_named(&format!("epoch-{room}"))
+        .unwrap();
+}

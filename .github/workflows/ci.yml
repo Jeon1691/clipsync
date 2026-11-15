@@ -81,6 +81,23 @@ jobs:
           else
             cargo test --workspace --locked
           fi
+      - name: Regression coverage policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.platform }}" == "windows" ]]; then
+            python scripts/check-regressions.py --verify-tests --platform windows --report target/regression-policy-windows.json
+          else
+            python3 scripts/check-regressions.py --verify-tests --platform "${{ matrix.platform }}" --report "target/regression-policy-${{ matrix.platform }}.json"
+          fi
+      - name: Retain regression policy report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: regression-policy-${{ matrix.platform }}
+          path: target/regression-policy-${{ matrix.platform }}.json
+          if-no-files-found: warn
+          retention-days: 30
       - name: Long-run stability
         shell: bash
         run: cargo test --workspace --locked -- stability_
@@ -118,8 +135,11 @@ jobs:
       - name: Scripts compile
         if: matrix.platform != 'windows'
         run: |
-          python3 -m py_compile scripts/e2e-brew.py
+          python3 -m py_compile scripts/e2e-brew.py scripts/check-regressions.py scripts/check-coverage.py
           bash -n scripts/update-homebrew-formula.sh
+      - name: Script regression tests
+        if: matrix.platform != 'windows'
+        run: python3 -m unittest discover -s scripts/tests -v
       - name: PowerShell install script parses
         if: matrix.platform == 'windows'
         shell: pwsh

@@ -35,29 +35,31 @@ impl MacClipboard {
     }
 
     fn write_blocking(&self, item: &ClipboardItem) -> Result<()> {
-        let pb = NSPasteboard::generalPasteboard();
-        match item {
-            ClipboardItem::Text { text } => {
-                pb.clearContents();
-                let ty = unsafe { NSPasteboardTypeString };
-                if !pb.setString_forType(&NSString::from_str(text), ty) {
-                    return Err(ClipboardError::Message("failed to set text".into()));
-                }
-            }
-            ClipboardItem::Image { bytes, mime, .. } => write_image(&pb, *mime, bytes)?,
-            ClipboardItem::Files { files } => {
-                let paths: Vec<PathBuf> =
-                    files.iter().filter_map(|f| f.staged_path.clone()).collect();
-                if paths.len() != files.len() {
-                    return Err(ClipboardError::Message(
-                        "file items need staged inbox paths to land on the pasteboard".into(),
-                    ));
-                }
-                publish_files(&pb, &paths, None)?;
+        write_pasteboard(&NSPasteboard::generalPasteboard(), item)
+    }
+}
+
+fn write_pasteboard(pb: &NSPasteboard, item: &ClipboardItem) -> Result<()> {
+    match item {
+        ClipboardItem::Text { text } => {
+            pb.clearContents();
+            let ty = unsafe { NSPasteboardTypeString };
+            if !pb.setString_forType(&NSString::from_str(text), ty) {
+                return Err(ClipboardError::Message("failed to set text".into()));
             }
         }
-        Ok(())
+        ClipboardItem::Image { bytes, mime, .. } => write_image(pb, *mime, bytes)?,
+        ClipboardItem::Files { files } => {
+            let paths: Vec<PathBuf> = files.iter().filter_map(|f| f.staged_path.clone()).collect();
+            if paths.len() != files.len() {
+                return Err(ClipboardError::Message(
+                    "file items need staged inbox paths to land on the pasteboard".into(),
+                ));
+            }
+            publish_files(pb, &paths, None)?;
+        }
     }
+    Ok(())
 }
 
 fn read_pasteboard(pb: &NSPasteboard) -> Result<Option<ClipboardItem>> {
@@ -378,6 +380,7 @@ impl ClipboardBackend for MacClipboard {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -516,5 +519,286 @@ mod tests {
             }
         });
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Characterize actual TIFF interoperability on normal and fallback writes.
+    // AppKit can synthesize TIFF from PNG, so this is not by itself evidence
+    // that the historical explicit-TIFF-publication defect has a reproducer.
+    #[test]
+    fn png_clipboard_writes_publish_decodable_tiff_for_other_applications() {
+        let root = scratch_dir("tiff-representation");
+        let pixels = [12, 34, 56, 255, 78, 90, 123, 255];
+        let png = crate::item::encode_png_rgba(2, 1, &pixels).unwrap();
+        crate::stage::with_stage_root(&root, || {
+            for fallback in [false, true] {
+                let pb = NSPasteboard::pasteboardWithUniqueName();
+                if fallback {
+                    write_image_bytes_only(&pb, &png).unwrap();
+                } else {
+                    write_image(&pb, ImageMime::Png, &png).unwrap();
+                }
+                let tiff_type = unsafe { NSPasteboardTypeTIFF };
+                assert!(
+                    pb.types()
+                        .unwrap()
+                        .iter()
+                        .any(|kind| kind.to_string() == tiff_type.to_string()),
+                    "native applications must discover TIFF before choosing a representation"
+                );
+                let data = pb
+                    .dataForType(tiff_type)
+                    .expect("TIFF representation for native apps");
+                let bytes = data.to_vec();
+                assert_eq!(
+                    image::guess_format(&bytes).unwrap(),
+                    image::ImageFormat::Tiff
+                );
+                let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
+                assert_eq!(decoded.dimensions(), (2, 1));
+                assert_eq!(decoded.as_raw(), &pixels);
+            }
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // A real legacy filename property list must preserve all copied contents.
+    // AppKit can synthesize NSURL objects from it, so this compatibility case
+    // alone does not prove which native conversion/fallback path was used.
+    #[test]
+    #[expect(
+        deprecated,
+        reason = "Regression fixture intentionally publishes the legacy filename-only flavor."
+    )]
+    fn legacy_filename_clipboard_preserves_files_even_with_preview() {
+        let root = scratch_dir("filename-only");
+        let first = write_temp(&root, "legacy first.txt", b"legacy first");
+        let second = write_temp(&root, "second.txt", b"legacy second");
+        let names = NSArray::from_retained_slice(&[
+            NSString::from_str(first.to_str().unwrap()),
+            NSString::from_str(second.to_str().unwrap()),
+        ]);
+        let pb = NSPasteboard::pasteboardWithUniqueName();
+        pb.clearContents();
+        let filename_type = unsafe { NSFilenamesPboardType };
+        // NSArray<NSString> is the documented filename pasteboard property list.
+        assert!(unsafe { pb.setPropertyList_forType(&names, filename_type) });
+        assert!(pb
+            .types()
+            .unwrap()
+            .iter()
+            .any(|kind| kind.to_string() == filename_type.to_string()));
+        let png = crate::item::encode_png_rgba(1, 1, &[1, 2, 3, 255]).unwrap();
+        let png_type = unsafe { NSPasteboardTypePNG };
+        let _ = unsafe { pb.addTypes_owner(&NSArray::from_slice(&[png_type]), None) };
+        assert!(pb.setData_forType(Some(&NSData::with_bytes(&png)), png_type));
+        let Some(ClipboardItem::Files { files }) = read_pasteboard(&pb).unwrap() else {
+            panic!("legacy file copy was lost or replaced by its preview bitmap");
+        };
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].name, "legacy first.txt");
+        assert_eq!(files[0].bytes, b"legacy first");
+        assert_eq!(files[1].name, "second.txt");
+        assert_eq!(files[1].bytes, b"legacy second");
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod behavior_tests {
+    use super::*;
+    use crate::test_support::Scratch;
+
+    fn image() -> Vec<u8> {
+        crate::item::encode_png_rgba(2, 1, &[5, 6, 7, 255, 8, 9, 10, 255]).unwrap()
+    }
+    fn assert_pixels(pb: &NSPasteboard) {
+        let data = pb.dataForType(unsafe { NSPasteboardTypePNG }).unwrap();
+        assert_eq!(
+            image::load_from_memory(&data.to_vec())
+                .unwrap()
+                .to_rgba8()
+                .as_raw(),
+            &[5, 6, 7, 255, 8, 9, 10, 255]
+        );
+    }
+    #[test]
+    fn private_pasteboard_child() {
+        let Ok(case) = std::env::var("CLIPSYNC_PRIVATE_BOARD_CASE") else {
+            return;
+        };
+        let root = PathBuf::from(std::env::var_os("CLIPSYNC_NATIVE_FIXTURE").unwrap());
+        let pb = NSPasteboard::pasteboardWithUniqueName();
+        match case.as_str() {
+            "text" => {
+                pb.clearContents();
+                assert!(read_pasteboard(&pb).unwrap().is_none());
+                write_pasteboard(
+                    &pb,
+                    &ClipboardItem::Text {
+                        text: "native text payload".into(),
+                    },
+                )
+                .unwrap();
+                crate::test_support::assert_text(
+                    read_pasteboard(&pb).unwrap(),
+                    "native text payload",
+                );
+                write_pasteboard(
+                    &pb,
+                    &ClipboardItem::Text {
+                        text: String::new(),
+                    },
+                )
+                .unwrap();
+                assert!(read_pasteboard(&pb).unwrap().is_none());
+                pb.setData_forType(Some(&NSData::with_bytes(b"invalid PNG bytes")), unsafe {
+                    NSPasteboardTypePNG
+                });
+                pb.setData_forType(Some(&NSData::with_bytes(b"invalid TIFF bytes")), unsafe {
+                    NSPasteboardTypeTIFF
+                });
+                pb.setString_forType(
+                    &NSString::from_str("text survives invalid image flavors"),
+                    unsafe { NSPasteboardTypeString },
+                );
+                crate::test_support::assert_text(
+                    read_pasteboard(&pb).unwrap(),
+                    "text survives invalid image flavors",
+                );
+            }
+            "files" => {
+                let path = root.join("regular.txt");
+                std::fs::write(&path, b"native file data").unwrap();
+                let files = vec![FileRef {
+                    name: "regular.txt".into(),
+                    bytes: b"native file data".to_vec(),
+                    mime: None,
+                    staged_path: Some(path.clone()),
+                }];
+                write_pasteboard(
+                    &pb,
+                    &ClipboardItem::Files {
+                        files: files.clone(),
+                    },
+                )
+                .unwrap();
+                let Some(ClipboardItem::Files { files: read }) = read_pasteboard(&pb).unwrap()
+                else {
+                    panic!("native file write was lost");
+                };
+                assert_eq!(read[0].bytes, b"native file data");
+                assert_eq!(
+                    read[0]
+                        .staged_path
+                        .as_ref()
+                        .unwrap()
+                        .canonicalize()
+                        .unwrap(),
+                    path.canonicalize().unwrap()
+                );
+                for bad in [
+                    vec![],
+                    vec![FileRef {
+                        staged_path: None,
+                        ..files[0].clone()
+                    }],
+                    vec![FileRef {
+                        staged_path: Some(root.join("missing")),
+                        ..files[0].clone()
+                    }],
+                ] {
+                    assert!(write_pasteboard(&pb, &ClipboardItem::Files { files: bad }).is_err());
+                    assert!(
+                        matches!(
+                            read_pasteboard(&pb).unwrap(),
+                            Some(ClipboardItem::Files { .. })
+                        ),
+                        "rejected writes must preserve existing clipboard"
+                    );
+                }
+                let link = root.join("symlink");
+                std::os::unix::fs::symlink(&path, &link).unwrap();
+                assert!(load_file_refs(&[root.join("missing"), root.clone(), link])
+                    .unwrap()
+                    .is_none());
+                assert!(canonical_paths(&[]).is_err());
+                assert!(canonical_paths(&[root.join("missing")]).is_err());
+                use std::os::unix::ffi::OsStringExt;
+                let invalid = PathBuf::from(std::ffi::OsString::from_vec(vec![b'/', 0xff]));
+                assert!(file_url_objects(&[invalid]).is_err());
+            }
+            "image" => {
+                let bytes = image();
+                write_pasteboard(
+                    &pb,
+                    &ClipboardItem::Image {
+                        mime: ImageMime::Png,
+                        bytes: bytes.clone(),
+                        width: Some(2),
+                        height: Some(1),
+                    },
+                )
+                .unwrap();
+                assert_pixels(&pb);
+                let Some(ClipboardItem::Image { bytes: read, .. }) = read_pasteboard(&pb).unwrap()
+                else {
+                    panic!("image sidecar misclassified");
+                };
+                assert_eq!(read, bytes);
+                assert!(image_from_sidecar(&[]).unwrap().is_none());
+                assert!(image_from_sidecar(&[root.clone(), root.clone()])
+                    .unwrap()
+                    .is_none());
+                assert!(image_from_sidecar(&[root.join("missing")])
+                    .unwrap()
+                    .is_none());
+                let text = root.join("not-image");
+                std::fs::write(&text, b"ordinary file").unwrap();
+                assert!(image_from_sidecar(&[text]).unwrap().is_none());
+            }
+            "fallback" => {
+                let dir = crate::stage::pasteboard_dir();
+                std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+                std::fs::write(&dir, b"staging is deliberately unavailable").unwrap();
+                write_pasteboard(
+                    &pb,
+                    &ClipboardItem::Image {
+                        mime: ImageMime::Png,
+                        bytes: image(),
+                        width: None,
+                        height: None,
+                    },
+                )
+                .unwrap();
+                assert_pixels(&pb);
+                assert!(
+                    file_paths(&pb).unwrap().is_empty(),
+                    "fallback must not advertise nonexistent staged files"
+                );
+                let error = transcode_png(b"invalid image").unwrap_err();
+                assert!(!error.to_string().is_empty());
+                assert!(png_or_raw_to_tiff(b"invalid image").is_err());
+            }
+            _ => panic!("unknown private pasteboard case"),
+        }
+    }
+    #[test]
+    fn native_writes_and_failures_use_only_isolated_named_pasteboards() {
+        for case in ["text", "files", "image", "fallback"] {
+            let root = Scratch::new();
+            let out = root
+                .child("macos::behavior_tests::private_pasteboard_child")
+                .env("CLIPSYNC_PRIVATE_BOARD_CASE", case)
+                .env("CLIPSYNC_NATIVE_FIXTURE", &root.0)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "private pasteboard {case} failed: {} {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
     }
 }

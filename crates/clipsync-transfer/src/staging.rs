@@ -193,6 +193,7 @@ pub fn prune_idle_transfers(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};

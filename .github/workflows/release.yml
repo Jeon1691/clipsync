@@ -156,6 +156,17 @@ jobs:
           chmod +x "$bin"
           "$bin" --version
           "$bin" --help | grep -q "Usage: clipsync"
+      - name: Run verified Linux binary without desktop or DBus libraries
+        run: |
+          set -euo pipefail
+          bin="$(realpath clipsync-x86_64-unknown-linux-gnu/clipsync)"
+          docker run --rm --platform linux/amd64 \
+            --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --mount "type=bind,src=${bin},dst=/clipsync,readonly" \
+            --entrypoint /clipsync \
+            gcr.io/distroless/cc-debian12:latest@sha256:e5d81ddde149641e2a9ba55be4545bc125c67de07508b03ba4c22e6eb0ded5aa \
+            --version
 
   publish:
     permissions:

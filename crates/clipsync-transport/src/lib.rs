@@ -1,5 +1,6 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 //! WebSocket client with reconnect, heartbeat, and typed frames.
 
 mod tls;
@@ -286,6 +287,7 @@ pub fn backoff_delay(attempt: u32) -> Duration {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
