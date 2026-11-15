@@ -167,10 +167,14 @@ and requests. See [self-hosting](self-hosting.md) for deployment variables and
 TLS termination. The relay holds rooms, pairing sessions, and queued text in
 memory; restarting loses that state, even with a fixed token secret.
 
-`CLIPSYNC_RELAY_TOKEN_SECRET` supplies the HMAC signing key as string bytes;
-when absent the process generates a random 32-byte key. Webhook URL/secret
-settings are optional and must both be present to emit the webhook output
-described below. Without an explicit public URL, it is derived from the
+`CLIPSYNC_RELAY_TOKEN_SECRET` supplies the HMAC signing key as UTF-8 string
+bytes, without trimming or hex decoding. Unset, empty, or whitespace-only
+values generate a fresh random 32-byte key; an explicit nonblank value shorter
+than 32 bytes prevents startup without disclosing the value. Compose forwards
+the optional setting and has no shared default key. See
+[token rotation and re-pairing](self-hosting.md#token-keys-and-rotation).
+Webhook URL/secret settings are optional and must both be present to emit the
+webhook output described below. Without an explicit public URL, it is derived from the
 environment bind port (default `http://127.0.0.1:7600`); `--bind` alone does not
 recompute it. Current pairing responses advertise the relative `ws_path`, not
 that URL.
