@@ -125,7 +125,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish the tested architecture images and OCI index
+      - name: Upload the tested architecture images and candidate OCI index
         id: image
         run: |
           set -euo pipefail
@@ -145,11 +145,11 @@ jobs:
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
             references+=("${IMAGE}@${digest}")
           done
-          docker buildx imagetools create --tag "${IMAGE}:${GITHUB_REF_NAME}" "${references[@]}"
-          digest="$(docker buildx imagetools inspect "${IMAGE}:${GITHUB_REF_NAME}" --format '{{.Manifest.Digest}}')"
+          candidate="${IMAGE}:candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker buildx imagetools create --tag "$candidate" "${references[@]}"
+          digest="$(docker buildx imagetools inspect "$candidate" --format '{{.Manifest.Digest}}')"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          echo "Published ${IMAGE}@${digest}" >> "$GITHUB_STEP_SUMMARY"
       - name: Sign OCI build provenance
         id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
@@ -157,7 +157,7 @@ jobs:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
-          create-storage-record: false
+          create-storage-record: true
       - name: Verify signed index provenance
         env:
           GH_TOKEN: ${{ github.token }}
@@ -173,6 +173,20 @@ jobs:
             --source-ref "$GITHUB_REF" \
             --source-digest "$GITHUB_SHA" \
             --deny-self-hosted-runners
+      - name: Publish the verified index as the immutable version
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if docker buildx imagetools inspect "${IMAGE}:${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo 'This container version already exists; refusing to replace it.' >&2
+            exit 1
+          fi
+          docker buildx imagetools create --prefer-index=false \
+            --tag "${IMAGE}:${GITHUB_REF_NAME}" "${IMAGE}@${DIGEST}"
+          published="$(docker buildx imagetools inspect "${IMAGE}:${GITHUB_REF_NAME}" --format '{{.Manifest.Digest}}')"
+          [[ "$published" == "$DIGEST" ]]
+          echo "Published verified ${IMAGE}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && steps.attest.outcome == 'success'
         with:
