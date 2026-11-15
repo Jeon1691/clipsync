@@ -27,12 +27,12 @@ remaining checks.
 
 The release workflow now generates a signed SLSA provenance attestation using
 GitHub OIDC and `actions/attest`, verifies the archive digest and workflow/tag
-identity, and publishes a matching `.sigstore` bundle. The signature is bound
+identity, and publishes a matching `.sigstore.json` bundle. The signature is bound
 to the workflow that actually built the archive; no historical binary is
 retroactively described as built by this workflow. See
 [release verification](packaging.md) for consumer commands.
 
-Scorecard v5.1.1 recognizes `.sigstore` files as signatures and examines the
+Scorecard v5.6.0 recognizes `.sigstore.json` files as signatures and examines the
 latest five releases. Its current signature-only release credit is 8/10 per
 qualifying release, averaged over that window and rounded down. If all five
 currently unsigned releases are gradually replaced by signed releases, the
@@ -41,10 +41,9 @@ the same evaluator and a five-release window. This is a component estimate,
 not a promise of a particular overall score. The published score does not
 increase merely because the workflow change is merged.
 
-The bundle contains genuine signed build provenance. It is retained in its
-Sigstore format rather than renamed to `.intoto.jsonl` to obtain a different
-Scorecard classification. Scorecard's filename detection does not replace
-cryptographic verification.
+The bundle contains genuine signed build provenance, in the original Sigstore
+JSON format accepted by GitHub CLI. Scorecard's filename detection does not
+replace cryptographic verification.
 
 ## Review and branch policy
 
@@ -78,12 +77,13 @@ security policy, CI, tests, fuzzing, dependency updates, and release verificatio
 provide evidence, but the maintainer must confirm that each requirement is met.
 Adding an unearned badge image does not satisfy the assessment.
 
-The Scorecard action update is already proposed by Dependabot in
-[PR #8](https://github.com/Jeon1691/clipsync/pull/8). Review it separately;
-the current measurement and estimates above explicitly use v5.1.1 so an
-evaluator upgrade is not mistaken for a security improvement.
+This patch includes the Scorecard action v2.5.0 update proposed by Dependabot in
+[PR #8](https://github.com/Jeon1691/clipsync/pull/8), which uses Scorecard v5.6.0
+and recognizes standard `.sigstore.json` bundles. The measured baseline above
+uses v5.1.1; the future release-component estimates use v5.6.0. Compare evaluator
+versions explicitly rather than treating a version change as a security fix.
 
-References: [Scorecard checks](https://github.com/ossf/scorecard/blob/v5.1.1/docs/checks.md),
-[signature detection](https://github.com/ossf/scorecard/blob/v5.1.1/probes/releasesAreSigned/impl.go),
-[release scoring](https://github.com/ossf/scorecard/blob/v5.1.1/checks/evaluation/signed_releases.go),
+References: [Scorecard checks](https://github.com/ossf/scorecard/blob/v5.6.0/docs/checks.md),
+[signature detection](https://github.com/ossf/scorecard/blob/v5.6.0/probes/releasesAreSigned/impl.go),
+[release scoring](https://github.com/ossf/scorecard/blob/v5.6.0/checks/evaluation/signed_releases.go),
 and [GitHub artifact attestations](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations).

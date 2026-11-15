@@ -22,19 +22,22 @@ CD (`release.yml`) on `vX.Y.Z` tags:
 1. Builds macOS arm64/x86_64 and Linux x86_64 (Linux arm is best-effort)
 2. Signs build provenance for the archives using GitHub artifact attestations,
    verifies the signatures, and publishes the archives, SHA-256 files, and
-   `.sigstore` attestation bundles
+   `.sigstore.json` attestation bundles
 3. Updates `jeon1691/tap` when `TAP_DEPLOY_KEY` is configured
 
 Manual runs build and verify artifacts without publishing by default. Select a
 `v*` tag and enable the `publish` input to publish a manual run. A branch run
 never publishes a release or updates the Homebrew tap.
 
-To verify a downloaded release archive, download its matching `.sigstore`
+macOS release jobs use `macos-15`; GitHub retired all `macos-14` runners on
+2026-11-02.
+
+To verify a downloaded release archive, download its matching `.sigstore.json`
 bundle from the same release and run:
 
 ```bash
 gh attestation verify clipsync-x86_64-unknown-linux-gnu.tar.gz \
-  --bundle clipsync-x86_64-unknown-linux-gnu.sigstore \
+  --bundle clipsync-x86_64-unknown-linux-gnu.sigstore.json \
   --repo Jeon1691/clipsync \
   --signer-workflow Jeon1691/clipsync/.github/workflows/release.yml \
   --source-ref refs/tags/v0.1.15 \

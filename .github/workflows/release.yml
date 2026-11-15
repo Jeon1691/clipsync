@@ -32,10 +32,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             optional: false
-          - os: macos-14
+          - os: macos-15
             target: x86_64-apple-darwin
             optional: false
           - os: ubuntu-22.04
@@ -103,7 +103,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          bundle="dist/clipsync-${TARGET}.sigstore"
+          bundle="dist/clipsync-${TARGET}.sigstore.json"
           cp "$ATTESTATION_BUNDLE" "$bundle"
           shopt -s nullglob
           archives=(dist/*.tar.gz dist/*.zip)
@@ -125,7 +125,7 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/*.sha256
-            dist/*.sigstore
+            dist/*.sigstore.json
           if-no-files-found: error
 
   smoke:
@@ -143,7 +143,7 @@ jobs:
         run: |
           set -euo pipefail
           gh attestation verify dist/clipsync-x86_64-unknown-linux-gnu.tar.gz \
-            --bundle dist/clipsync-x86_64-unknown-linux-gnu.sigstore \
+            --bundle dist/clipsync-x86_64-unknown-linux-gnu.sigstore.json \
             --repo "$GITHUB_REPOSITORY" \
             --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
             --source-ref "$GITHUB_REF" \
@@ -178,7 +178,7 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           shopt -s nullglob
-          assets=(artifacts/*.tar.gz artifacts/*.zip artifacts/*.sha256 artifacts/*.sigstore)
+          assets=(artifacts/*.tar.gz artifacts/*.zip artifacts/*.sha256 artifacts/*.sigstore.json)
           if [[ ${#assets[@]} -eq 0 ]]; then
             echo "no release assets" >&2
             exit 1
