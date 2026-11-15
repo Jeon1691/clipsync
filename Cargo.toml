@@ -27,7 +27,7 @@ authors = ["ClipSync contributors"]
 repository = "https://github.com/Jeon1691/clipsync"
 
 [workspace.dependencies]
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 anyhow = "1"
 arboard = { version = "3.6", features = ["image-data", "wayland-data-control"] }
 async-trait = "0.1"
