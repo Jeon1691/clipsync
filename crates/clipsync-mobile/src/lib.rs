@@ -577,6 +577,8 @@ mod tests {
         });
         let mut cfg = client.app.store.load_config().unwrap();
         cfg.relay_url = format!("http://{address}");
+        cfg.sync.enabled = false;
+        cfg.sync.auto_start = false;
         client.app.store.save_config(&cfg).unwrap();
         let offer = client.create_room().unwrap();
         assert_eq!(offer.pairing_code.len(), 6);
@@ -614,7 +616,9 @@ mod tests {
             Some(joined.as_str())
         );
         let until = std::time::Instant::now() + Duration::from_secs(5);
-        while client.app.store.current_room().unwrap().room_id.as_str() != joined {
+        while client.app.store.current_room().unwrap().room_id.as_str() != joined
+            || !client.app.store.load_config().unwrap().sync.enabled
+        {
             assert!(
                 std::time::Instant::now() < until,
                 "creator did not commit completed pairing"
