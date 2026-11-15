@@ -1,6 +1,6 @@
 # Six-month regression-test audit — 2026-11-15
 
-The complete ledger now registers **57 of 98 distinct corrected defects (58.16%)**,
+The complete ledger now registers **60 of 105 distinct corrected defects (57.14%)**,
 meeting the Silver requirement of at least 50%. [The machine-readable ledger](regressions.json)
 and [CI checker](../scripts/check-regressions.py) preserve the full denominator
 and derive credit from concrete test references, not a manually entered Boolean.
@@ -39,9 +39,9 @@ that an assertion reproduces a historical defect.
 
 | Scope | Registered defects | Complete defects | Fraction |
 | --- | ---: | ---: | ---: |
-| Broad ledger | 57 | 98 | 58.16% |
-| Project runtime/security | 46 | 59 | 77.97% |
-| All project-authored corrections | 57 | 86 | 66.28% |
+| Broad ledger | 60 | 105 | 57.14% |
+| Project runtime/security | 47 | 60 | 78.33% |
+| All project-authored corrections | 60 | 92 | 65.22% |
 
 The original baseline increased from **24/84 (28.57%)** to **44/84 (52.38%)** without
 removing defects or treating test variants as extra bugs. The newly covered rows
@@ -111,6 +111,16 @@ presence/SPAKE delivery. Both public Core clients now complete and persist the
 same keys. Session authentication, bounded pending storage, replacement and
 disconnect/expiry contracts protect the correction. One ordering/session-lifecycle
 defect brings the complete ledger to **57/98 (58.16%)**.
+
+The final reconciliation adds malformed extra-CA handling (F99), three
+uncredited fixture corrections (F100–F102), UniFFI macro nondeterminism (F103),
+lost reconstruction diagnostics (F104), and locale-dependent policy decoding
+(F105). F99, F104 and F105 have focused locally reproduced failures. F103 has
+three deterministic-emission and two semantic vendor regressions, but this
+ledger conservatively gives no credit because its Rust inventory covers only
+product-workspace packages; those tests run in the separate locked upstream CI
+workspace. No unrelated test is substituted for them. The final total is
+**60/105 (57.14%)**, retaining all earlier rows and honest missing-credit reasons.
 
 The scope table is derived from the ledger: runtime/security includes the
 `Runtime` and `Runtime-PR16` rows; project-authored corrections include every
@@ -257,6 +267,15 @@ whether the assertion meaningfully protects the stated behavior.
 | F97 | Build/CI | [8488848](https://github.com/Jeon1691/clipsync/commit/8488848b10d6cdcdf2b99391b0507fddbbb6472e) | Coverage source classification accepted noncanonical aliases and duplicate build roots | **Registered** — [adversarial report fixtures](../scripts/tests/test_product_coverage.py) reject test aliases and duplicate product files without changing valid real totals, Linux/macOS. |
 
 | F98 | Runtime | [4cca45c](https://github.com/Jeon1691/clipsync/commit/4cca45c6937226657d32b484f0d2b8e0c3a72e65) | Early joiner socket lost creator presence and its first SPAKE message | **Registered** — [actual WebSocket ordering](../crates/clipsync-relay/tests/pairing_order.rs) and [full Core exchange/persisted keys](../crates/clipsync-relay/src/ws_tests.rs) use deterministic fences and private credentials, all three CI platforms. |
+
+
+| F99 | Runtime | [c335d3c](https://github.com/Jeon1691/clipsync/commit/c335d3cca102d177b36eb457b8f18627ea52039f) | Linux ignored malformed configured extra CA roots | **Registered** — [isolated single/mixed certificate fixtures](../crates/clipsync-transport/src/tls.rs) now reject every invalid trust anchor before client construction; valid private-CA, hostname and issuer contracts remain, all platforms. |
+| F100 | Build/CI | [c335d3c](https://github.com/Jeon1691/clipsync/commit/c335d3cca102d177b36eb457b8f18627ea52039f) | Windows deadline fixture assumed nanosecond SystemTime precision | **Uncredited** — a representable microsecond step fixes the fixture while preserving the exact production boundary; no independent fixture regression is claimed. |
+| F101 | Build/CI | 5294762, 248fc9e, 4cca45c | Loopback fixtures closed sockets before consumers received queued terminal frames | **Uncredited** — consumer fences preserve existing product assertions; no deterministic isolated old-fixture regression is claimed. |
+| F102 | Build/CI | 5cb9042 | Hostile-pairing fixture required a best-effort outbound error after client termination | **Uncredited** — exact local cryptographic failure and unchanged persistence remain asserted; no separate fixture regression is claimed. |
+| F103 | Dependency | [276c37c](https://github.com/Jeon1691/clipsync/commit/276c37c92f975ee745fc91c7a126165e34e5b341) | UniFFI randomized descendant-check emission prevented reproducible build output | **Uncredited by this inventory** — [three macro regressions](../vendor/uniffi_internal_macros/src/node.rs) and [two semantic contracts](../vendor/uniffi_internal_macros/tests/node_descendants.rs) run in the separate locked upstream workspace; actual RED/GREEN expansion and binary comparison evidence is retained. |
+| F104 | Build/CI | [276c37c](https://github.com/Jeon1691/clipsync/commit/276c37c92f975ee745fc91c7a126165e34e5b341) | Independent-container failure cleanup discarded differing binary bytes | **Registered** — [actual publication-wrapper diagnostic lifecycle](../scripts/tests/test_build_reconstruction.py) preserves both differing payloads and bounded diagnostics without success markers, Linux/macOS; synthetic orchestration is not build reproducibility proof. |
+| F105 | Build/CI | [8e63e94](https://github.com/Jeon1691/clipsync/commit/8e63e94894cc5a752627df975cdfc3429966fe43) | Process-locale decoding rejected valid UTF-8 regression sources on Windows | **Registered** — [strict UTF-8 evidence contracts](../scripts/tests/test_regression_policy.py) cover real ASCII-locale subprocesses, Windows1252 simulation and malformed-source rejection without modifying source bytes, all platforms. |
 
 The [official Silver criterion](https://www.bestpractices.dev/en/criteria/1#regression_tests_added50)
 defines the badge requirement. This ledger's defect taxonomy and conservative

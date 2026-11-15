@@ -66,10 +66,11 @@ cryptographic verification, and renaming a Sigstore bundle is not a DSSE export.
 The maintainer confirmed on 2026-11-15 that this is a solo project. The active
 [Protect master ruleset](https://github.com/Jeon1691/clipsync/rules/27029148)
 prevents force pushes/deletion and requires signed commits, PRs, resolved
-threads, up-to-date branches, and the Linux/macOS/Windows CI checks. Its 14
+threads, up-to-date branches, and the Linux/macOS/Windows CI checks. Its 15
 required contexts include dependency audit, protocol fuzzing, `Minimum Rust`,
 CodeQL and all four language-analysis jobs, product coverage, dependency-source
-and upstream tests, and Linux native dependency smoke testing. Required results are
+and upstream tests, Linux native dependency smoke testing and macOS product
+coverage. The macOS result passed before it became required. Required results are
 bound to the GitHub App that actually produces them. CodeQL merge protection
 blocks security findings at medium severity or higher and code findings at error
 severity. Administrator bypass has been removed and stale approvals are
@@ -95,7 +96,7 @@ do not create empty commits, reviews, or releases just to alter the score.
 The v0.2.0 [dependency migration](dependency-migration.md) removes the six former
 RustSec maintenance-advisory packages while retaining accessibility, title text,
 clipboard formats, both renderers, and mobile bindings. Both audited lockfiles
-are clean without ignores. Seven explicit source compatibility forks now require
+are clean without ignores. Eight explicit source patches now require
 ClipSync maintenance; their source hashes, complete diffs, licenses, review
 cadence, and retirement conditions are documented. This is an actual component
 migration with Rust 1.95 as the tested minimum. A clean local audit does not

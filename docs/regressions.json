@@ -2016,7 +2016,8 @@
       "id": "F98",
       "kind": "Runtime",
       "fixes": [
-        "4cca45c6937226657d32b484f0d2b8e0c3a72e65"
+        "4cca45c6937226657d32b484f0d2b8e0c3a72e65",
+        "d3cbc34ef7dd333fcc44710917685f7ad8bf741b"
       ],
       "description": "A joiner WebSocket admitted before its creator could lose peer presence and its first SPAKE message, preventing supported pairing from completing",
       "checks": [
@@ -2046,6 +2047,122 @@
         }
       ],
       "notes": "A deterministic Ping/Pong fence confirms the joiner sent its first actual SPAKE message while the creator socket is absent. Old behavior loses the message and fails; authenticated session-local routing and one bounded pending public SPAKE per direction complete the exchange. A second fixture delays the real create HTTP response, runs both public Core pairing APIs with child-local memory keyring, and compares persisted root/epoch keys and roles. Related role/session, replacement, disconnect and expiry contracts remain separate test variants of this ordering/session-lifecycle correction. No room key or authentication confirmation is buffered."
+    },
+    {
+      "id": "F99",
+      "kind": "Runtime",
+      "fixes": [
+        "c335d3cca102d177b36eb457b8f18627ea52039f"
+      ],
+      "description": "Linux silently discarded malformed configured extra CA roots and continued with native trust instead of reporting invalid TLS configuration",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transport/src/tls.rs",
+          "package": "clipsync-transport",
+          "target": "lib:clipsync_transport",
+          "test": "tls::tests::isolated_ca_files_reject_missing_empty_malformed_and_invalid_certificates",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Hosted Linux CI and isolated Linux replay reproduce acceptance of PEM with invalid DER. Every certificate is now validated as a trust anchor before configuring the unchanged platform verifier. Single invalid DER and mixed valid/invalid bundles in both orders fail loader, client config, reqwest and WSS setup. Valid private CA, wrong issuer and wrong hostname tests continue to pass; no system trust or verification policy is replaced."
+    },
+    {
+      "id": "F100",
+      "kind": "Build/CI",
+      "fixes": [
+        "c335d3cca102d177b36eb457b8f18627ea52039f"
+      ],
+      "description": "Deadline test fixtures assumed SystemTime could represent a one-nanosecond step on Windows",
+      "checks": [],
+      "notes": "Actual Windows CI fails the post-eight-second reconnect assertion because its 100ns clock representation rounds a 1ns addition away. A representable one-microsecond test step now checks the same strict production deadline without changing runtime logic. This is a fixture correction, not a production clock defect; no separate focused regression for the fixture quantization assumption is claimed."
+    },
+    {
+      "id": "F101",
+      "kind": "Build/CI",
+      "fixes": [
+        "5294762",
+        "248fc9e",
+        "4cca45c6937226657d32b484f0d2b8e0c3a72e65"
+      ],
+      "description": "Loopback WebSocket fixtures closed their server before the client consumed queued terminal frames",
+      "checks": [],
+      "notes": "Hosted Linux/Windows runs exposed scheduling-dependent loss of a queued control, binary frame or Pong when a fixture immediately dropped its socket. The related mock-server fixtures now keep the connection alive until a consumer acknowledgement or peer Close. These are test lifecycle variants, not extra relay/transport product defects. Current suites pass locally, but no deterministic isolated focused regression for the old fixture scheduling has been established; adjacent product assertions receive no additional defect credit."
+    },
+    {
+      "id": "F102",
+      "kind": "Build/CI",
+      "fixes": [
+        "5cb9042"
+      ],
+      "description": "A hostile-pairing fixture required a best-effort error frame after the real client had already returned a cryptographic failure and dropped its socket",
+      "checks": [],
+      "notes": "Actual Linux CI exposed the fixture waiting for an outbound error frame whose delivery was not a product guarantee. The correction checks the exact local CryptoError and unchanged persistent state while retaining required prelude assertions. This is a fixture correction with no separately established deterministic focused historical regression and receives no additional credit."
+    },
+    {
+      "id": "F103",
+      "kind": "Dependency",
+      "fixes": [
+        "276c37c92f975ee745fc91c7a126165e34e5b341"
+      ],
+      "description": "UniFFI Node derive emitted descendant checks in randomized HashSet order, preventing reproducible static mobile libraries and bindgen executables",
+      "checks": [],
+      "notes": "Exact upstream ef9625b is backported to the verified 0.32.2 archive. Three focused vendor macro tests demonstrated RED/GREEN, two semantic integration tests pass, same-path expanded tokens stabilize, and actual separately built mobile.a/mobile.so/bindgen outputs match after the fix. CI runs these tests in its locked separate upstream workspace. The ledger checker discovers product-workspace Rust tests only, so this external test inventory is conservatively uncredited rather than mapped to an unrelated product or Python test. This is not a claim that the fix lacks regression tests. Full independent-environment six-output CI remains separate required evidence."
+    },
+    {
+      "id": "F104",
+      "kind": "Build/CI",
+      "fixes": [
+        "276c37c92f975ee745fc91c7a126165e34e5b341"
+      ],
+      "description": "Independent-container reconstruction discarded differing binary bytes before its report could preserve them for diagnosis",
+      "checks": [
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_build_reconstruction.py",
+          "test": "test_build_reconstruction.BuildReconstructionTests.test_differing_output_bytes_survive_container_and_image_cleanup",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        }
+      ],
+      "notes": "The actual failed hosted reconstruction retained hashes but lost both differing binaries when containers exited. Replaying the prior outer shell in the synthetic Docker fixture fails on missing differences/first/synthetic-artifact; the corrected shell preserves both differing payloads and byte diagnostics after image cleanup, excludes matching outputs and emits no success markers. This is failure-evidence lifecycle protection, not proof that builds themselves are reproducible."
+    },
+    {
+      "id": "F105",
+      "kind": "Build/CI",
+      "fixes": [
+        "8e63e94894cc5a752627df975cdfc3429966fe43"
+      ],
+      "description": "Regression evidence was decoded using the process locale, causing valid UTF-8 Rust sources to fail Windows policy validation",
+      "checks": [
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_regression_policy.py",
+          "test": "test_regression_policy.RegressionPolicyTests.test_utf8_repository_sources_and_manifest_ignore_the_process_default_encoding",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_regression_policy.py",
+          "test": "test_regression_policy.RegressionPolicyTests.test_invalid_utf8_source_is_rejected_without_replacement_or_repair",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Actual Windows CI passed the Rust workspace but failed F35/F36 evidence with undefined cp1252 byte0x90. The focused child process reproduces both ASCII-locale and Windows1252 decoding of UTF-8 fixtures; original code fails while explicit UTF-8 reads preserve source bytes and valid registrations. Malformed UTF-8 remains rejected without replacement or source rewriting. These are variants of one source-decoding defect."
     }
   ]
 }
