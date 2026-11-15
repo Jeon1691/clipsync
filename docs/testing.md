@@ -48,6 +48,7 @@ cargo +nightly-2026-11-11 llvm-cov report --lcov --skip-functions --output-path 
 cargo +nightly-2026-11-11 llvm-cov report --html --output-dir coverage
 cargo +nightly-2026-11-11 llvm-cov report --json --summary-only --output-path coverage/summary.json
 cargo +nightly-2026-11-11 llvm-cov report > coverage/summary.txt
+python3 scripts/check-coverage.py coverage/summary.json
 ```
 
 On Linux, prefix the instrumented test command with `xvfb-run -a`.
@@ -55,10 +56,10 @@ On Linux, prefix the instrumented test command with `xvfb-run -a`.
 Silver requires at least 80% statement coverage; Gold requires at least 90%
 statement and 80% branch coverage. LLVM reports source lines and regions rather
 than a language-independent statement count. Review both metrics and the missing
-source before using this evidence for a statement-coverage assertion. The
-workflow deliberately has no percentage gate until a representative baseline and
-a realistic improvement target have been reviewed. Adding a workflow alone does
-not establish that a coverage threshold is met.
+source before using this evidence for a statement-coverage assertion. The workflow now requires at least 80% product lines and executable regions.
+The checker sums only validated production-file counters, rejects missing
+crates, duplicate/non-product files and inconsistent totals, and retains the
+full HTML/JSON reports even when the threshold fails.
 
 Coverage is specific to the compiler, host, active `cfg` paths, and tests. The
 Linux workflow does not measure Windows or macOS implementations, iOS/Android
@@ -76,15 +77,24 @@ their assertion lines do not increase production coverage. Desktop/mobile and
 all other product source stay in the denominator. Stable builds/MSRV remain
 unchanged; the known coverage cfg names are declared through workspace lints.
 
-A clean macOS measurement of the regression candidate passed all 103 Rust tests:
+A clean macOS measurement of the regression candidate passed all 190 Rust tests:
 
 | Metric | Covered / total | Coverage |
 | --- | ---: | ---: |
-| Product-source lines | 3,443 / 5,883 | 58.52% |
-| Regions | 3,472 / 6,549 | 53.02% |
-| Branches | 468 / 1,030 | 45.44% |
+| Product-source lines | 5,116 / 5,924 | 86.36% |
+| Executable regions | 5,304 / 6,591 | 80.47% |
+| Branches | 751 / 1,064 | 70.58% |
 
-These remain below the Silver/Gold statement/branch requirements. Earlier
+Hosted Linux evidence for the same source is available in the
+[coverage run](https://github.com/Jeon1691/clipsync/actions/runs/43696427313):
+4,703/5,421 lines (86.76%), 4,883/6,080 executable regions (80.31%) and
+659/952 branches (69.22%). The required gate passes on the real Linux runner;
+platform-specific denominators are reported separately rather than summed.
+
+Both product lines and executable regions exceed the 80% Silver gate. LLVM
+executable-region mapping provides this project's Rust statement-coverage
+evidence, with the additional line threshold retained. Gold's 90% statement
+and 80% branch targets remain unmet. Earlier
 57.74% macOS / 59.17% Linux line reports included inline test-code lines and
 are historical source-report baselines, not directly comparable production-only
 measurements. Do not claim an increase from changing the denominator. The new
@@ -118,7 +128,7 @@ CARGO_TARGET_DIR=target/native-asan \
 RUSTFLAGS='-Zsanitizer=address -Cdebug-assertions=yes' \
 RUSTDOCFLAGS='-Zsanitizer=address -Cdebug-assertions=yes' \
 ASAN_OPTIONS=detect_stack_use_after_return=1 \
-cargo +nightly-2026-11-11 test --target aarch64-apple-darwin -p clipsync-clipboard -p clipsync-daemon --all-targets --locked -- --test-threads=1
+cargo +nightly-2026-11-11 test --target aarch64-apple-darwin -p clipsync-clipboard -p clipsync-daemon -p clipsync-mobile --all-targets --locked -- --test-threads=1
 ```
 
 The [Rust sanitizer guide](https://doc.rust-lang.org/unstable-book/compiler-flags/sanitizer.html)
@@ -167,24 +177,26 @@ dynamic-analysis coverage.
 ## Regression policy and remaining higher-tier work
 
 The [full audit](regression-audit.md) and [machine-readable ledger](regressions.json)
-now register **44/84 (52.38%)** distinct corrected defects, exceeding the 50%
+now register **46/86 (53.49%)** distinct corrected defects, exceeding the 50%
 Silver regression requirement. The checker validates real test references and
 the full denominator in all three CI platform jobs; future fixes must update
 the ledger and cannot silently delete uncovered cases. This fraction is separate
 from product-source statement coverage.
 
-Local validation passed 103 Rust tests, 27 Python policy/packaging tests, and
-22 native macOS ASan tests. Historical/hunk-restored implementations fail the
+Local validation passed 190 Rust tests, 37 Python policy/packaging tests, and
+62 native macOS clipboard/daemon/mobile ASan tests. Historical/hunk-restored implementations fail the
 targeted transfer, CLI, storage, TLS, service and packaging cases. Current source
 passes. Characterization tests with no reliable historical failure are not
 credited in the defect fraction.
 
-Further product coverage needs sustained daemon/IPC sessions, adapter command
-failures, desktop pairing/error transitions, mobile callbacks and service cleanup.
+The added cases exercise sustained daemon/IPC sessions, adapter command failures,
+headless desktop state transitions, mobile callbacks and service cleanup. Native
+window startup, some OS failure paths and Gold thresholds still need more work.
 The complete desktop/mobile source remains visible in the reports.
 
 The v0.1.17 security candidate's earlier ASan/assertion campaigns completed
 23,944,020 protocol and 2,747,280 AEAD executions in 601 seconds each, exit 0 with
-no findings. The follow-up changes test/configuration code; the fuzzed crypto,
+no findings. The follow-up adds tests and private clipboard/UI testability boundaries and
+propagates mobile constructor failures; the fuzzed crypto,
 protocol and fuzz sources are unchanged. Native ASan is rerun for the expanded
-clipboard/daemon tests. Public workflow artifacts retain the hosted results.
+clipboard/daemon/mobile tests. Public workflow artifacts retain the hosted results.

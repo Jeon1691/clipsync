@@ -1651,6 +1651,51 @@
       "description": "RUSTSEC-2026-0538: quinn-udp receive loop could spin after truncated datagram",
       "checks": [],
       "notes": "No added project-owned reproducer/regression. Routine cargo-audit monitoring and upstream fixes alone are not counted as project test additions."
+    },
+    {
+      "id": "F85",
+      "kind": "Build/CI",
+      "fixes": [
+        "01d4a8b0655e07fecbb16b0f302516de439a9f0f"
+      ],
+      "description": "Parallel clipboard regression fixtures reused temporary files, producing cross-test clipboard results",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-clipboard/src/command.rs",
+          "package": "clipsync-clipboard",
+          "target": "lib:clipsync_clipboard",
+          "test": "command::regression_tests::concurrent_command_fixtures_never_share_files",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        }
+      ],
+      "notes": "Hosted macOS CI reproduced the wrong-fixture result. Atomic allocation and exclusive directory creation isolate each fixture; the concurrent test preserves this contract."
+    },
+    {
+      "id": "F86",
+      "kind": "Runtime",
+      "fixes": [
+        "01d4a8b0655e07fecbb16b0f302516de439a9f0f"
+      ],
+      "description": "Mobile FFI constructor discarded initialization errors and returned a usable client after configuration failure",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-mobile/src/lib.rs",
+          "package": "clipsync-mobile",
+          "target": "lib:clipsync_mobile",
+          "test": "tests::mobile_constructor_and_commands_are_exercised_in_an_isolated_host",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "The isolated bad-config child fails against the ignored-error constructor and passes with propagation. F53 fixed App.init itself; this distinct public FFI caller still discarded the returned error."
     }
   ]
 }

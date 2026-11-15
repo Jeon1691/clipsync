@@ -1,6 +1,6 @@
 # Six-month regression-test audit — 2026-11-15
 
-The complete ledger now registers **44 of 84 distinct corrected defects (52.38%)**,
+The complete ledger now registers **46 of 86 distinct corrected defects (53.49%)**,
 meeting the Silver requirement of at least 50%. [The machine-readable ledger](regressions.json)
 and [CI checker](../scripts/check-regressions.py) preserve the full denominator
 and derive credit from concrete test references, not a manually entered Boolean.
@@ -34,13 +34,18 @@ that an assertion reproduces a historical defect.
 
 | Scope | Registered defects | Complete defects | Fraction |
 | --- | ---: | ---: | ---: |
-| Broad ledger | 44 | 84 | 52.38% |
-| Project runtime/security | 40 | 53 | 75.47% |
-| All project-authored corrections | 44 | 72 | 61.11% |
+| Broad ledger | 46 | 86 | 53.49% |
+| Project runtime/security | 41 | 54 | 75.93% |
+| All project-authored corrections | 46 | 74 | 62.16% |
 
-The broad ledger increased from **24/84 (28.57%)** to **44/84 (52.38%)** without
+The original baseline increased from **24/84 (28.57%)** to **44/84 (52.38%)** without
 removing defects or treating test variants as extra bugs. The newly covered rows
 are F05, F07–F09, F12–F13, F15–F17, F20, F29, F33–F34, F37–F39, F52, F54, F68 and F71.
+
+The follow-up also discovered and fixed two new defects: concurrent test-fixture
+collisions (F85) and the mobile constructor discarding initialization failures
+(F86). Both have focused regressions. Appending them produces **46/86 (53.49%)**;
+the original 84-row denominator and its uncredited rows remain intact.
 
 Historical staging source, older packaging scripts and isolated reversals of
 the relevant fix hunks fail the targeted cases; current source passes. The proof
@@ -166,6 +171,8 @@ whether the assertion meaningfully protects the stated behavior.
 | F82 | Dependency | [63f23ed](https://github.com/Jeon1691/clipsync/commit/63f23ed) | RUSTSEC-2026-0523: quinn-proto MAX_STREAM_DATA bypassed stream limits | **Uncredited**; No added project-owned reproducer/regression. Routine cargo-audit monitoring and upstream fixes alone are not counted as project test additions. |
 | F83 | Dependency | [63f23ed](https://github.com/Jeon1691/clipsync/commit/63f23ed) | RUSTSEC-2026-0524: quinn-proto long Retry token caused panic/exhaustion | **Uncredited**; No added project-owned reproducer/regression. Routine cargo-audit monitoring and upstream fixes alone are not counted as project test additions. |
 | F84 | Dependency | [63f23ed](https://github.com/Jeon1691/clipsync/commit/63f23ed) | RUSTSEC-2026-0538: quinn-udp receive loop could spin after truncated datagram | **Uncredited**; No added project-owned reproducer/regression. Routine cargo-audit monitoring and upstream fixes alone are not counted as project test additions. |
+| F85 | Build/CI | [01d4a8b](https://github.com/Jeon1691/clipsync/commit/01d4a8b0655e07fecbb16b0f302516de439a9f0f) | Parallel clipboard regression fixtures reused temporary files, producing cross-test clipboard results | **Registered** — [command::regression_tests::concurrent_command_fixtures_never_share_files](../crates/clipsync-clipboard/src/command.rs); Hosted macOS CI reproduced the wrong-fixture result. Atomic allocation and exclusive directory creation isolate each fixture; the concurrent test preserves this contract. |
+| F86 | Runtime | [01d4a8b](https://github.com/Jeon1691/clipsync/commit/01d4a8b0655e07fecbb16b0f302516de439a9f0f) | Mobile FFI constructor discarded initialization errors and returned a usable client after configuration failure | **Registered** — [tests::mobile_constructor_and_commands_are_exercised_in_an_isolated_host](../crates/clipsync-mobile/src/lib.rs); The isolated bad-config child fails against the ignored-error constructor and passes with propagation. F53 fixed App.init itself; this distinct public FFI caller still discarded the returned error. |
 
 The [official Silver criterion](https://www.bestpractices.dev/en/criteria/1#regression_tests_added50)
 defines the badge requirement. This ledger's defect taxonomy and conservative
