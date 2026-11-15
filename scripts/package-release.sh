@@ -1,9 +1,20 @@
 #!/usr/bin/env bash
+# Copyright the ClipSync contributors.
+# SPDX-License-Identifier: MIT
 # Build and tar a clipsync release binary for the host or --target triple.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 target="${1:-$(rustc -vV | awk '/host:/{print $2}')}"
+preserve_debug="${CLIPSYNC_PRESERVE_DEBUG:-0}"
+case "${CARGO_PROFILE_RELEASE_DEBUG:-0}" in
+  0|false|none|"") ;;
+  *) preserve_debug=1 ;;
+esac
+if [[ "${CARGO_PROFILE_RELEASE_STRIP:-}" == "none" ]]; then preserve_debug=1; fi
+if [[ "$preserve_debug" == "1" ]]; then
+  export CARGO_PROFILE_RELEASE_STRIP=none
+fi
 out="${ROOT}/dist"
 mkdir -p "$out"
 echo "building clipsync for ${target}"
@@ -18,11 +29,11 @@ fi
 chmod +x "$bin"
 case "$target" in
   *apple-darwin*)
-    strip -x "$bin" || true
+    if [[ "$preserve_debug" != "1" ]]; then strip -x "$bin"; fi
     codesign --sign - --force --timestamp=none "$bin" || true
     ;;
   *)
-    strip "$bin" || true
+    if [[ "$preserve_debug" != "1" ]]; then strip "$bin"; fi
     ;;
 esac
 stage="clipsync-${target}"

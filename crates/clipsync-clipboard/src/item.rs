@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use clipsync_protocol::{
     ItemKind, FILE_MAX_BYTES, FILE_MAX_COUNT, IMAGE_MAX_BYTES, TEXT_MAX_BYTES, TRANSFER_MAX_BYTES,
 };
@@ -149,6 +151,7 @@ impl ClipboardItem {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn encode_png_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
     let img = image::RgbaImage::from_raw(width, height, rgba.to_vec())
         .ok_or_else(|| ClipboardError::Message("invalid rgba buffer".into()))?;
@@ -171,12 +174,14 @@ pub fn decode_image_limited(bytes: &[u8]) -> Result<image::DynamicImage> {
         .map_err(|e| ClipboardError::Message(e.to_string()))
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn decode_image_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
     let img = decode_image_limited(bytes)?.to_rgba8();
     let (w, h) = img.dimensions();
     Ok((w, h, img.into_raw()))
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn tiff_to_png(bytes: &[u8]) -> Result<Vec<u8>> {
     let img = decode_image_limited(bytes)?;
     let mut buf = Vec::new();

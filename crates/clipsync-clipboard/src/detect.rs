@@ -1,5 +1,10 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::command::CommandClipboard;
-use crate::{ClipboardBackend, ClipboardError, Result};
+#[cfg(not(target_os = "linux"))]
+use crate::ClipboardError;
+use crate::{ClipboardBackend, Result};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Capabilities {
@@ -79,13 +84,11 @@ pub fn detect_adapter() -> Result<(Box<dyn ClipboardBackend>, AdapterInfo)> {
                     },
                     fallback_reason: None,
                 };
-                return Ok((Box::new(ar), info));
+                Ok((Box::new(ar), info))
             }
-            Err(e) => {
-                return Err(ClipboardError::Unavailable(format!(
-                    "windows clipboard: {e}"
-                )));
-            }
+            Err(e) => Err(ClipboardError::Unavailable(format!(
+                "windows clipboard: {e}"
+            ))),
         }
     }
 
@@ -119,33 +122,38 @@ pub fn detect_adapter() -> Result<(Box<dyn ClipboardBackend>, AdapterInfo)> {
             capabilities: Capabilities::text_only(),
             fallback_reason: Some("no graphical clipboard adapter".into()),
         };
-        return Ok((Box::new(CommandClipboard::headless()), info));
+        Ok((Box::new(CommandClipboard::headless()), info))
     }
 
-    if let Ok(ar) = ArboardClipboard::new() {
-        let info = AdapterInfo {
-            name: "arboard",
-            source: "library",
-            capabilities: Capabilities {
-                text: true,
-                image: true,
-                files: true,
-                watch: true,
-            },
-            fallback_reason: Some("generic fallback".into()),
-        };
-        return Ok((Box::new(ar), info));
-    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        if let Ok(ar) = ArboardClipboard::new() {
+            let info = AdapterInfo {
+                name: "arboard",
+                source: "library",
+                capabilities: Capabilities {
+                    text: true,
+                    image: true,
+                    files: true,
+                    watch: true,
+                },
+                fallback_reason: Some("generic fallback".into()),
+            };
+            return Ok((Box::new(ar), info));
+        }
 
-    Err(ClipboardError::Unavailable(
-        "no clipboard adapter found".into(),
-    ))
+        Err(ClipboardError::Unavailable(
+            "no clipboard adapter found".into(),
+        ))
+    }
 }
 
+#[cfg(not(target_os = "linux"))]
 pub struct ArboardClipboard {
     // arboard Clipboard is not Sync on all platforms; wrap per-call.
 }
 
+#[cfg(not(target_os = "linux"))]
 impl ArboardClipboard {
     pub fn new() -> Result<Self> {
         let _ =
@@ -154,9 +162,13 @@ impl ArboardClipboard {
     }
 }
 
-use crate::item::{decode_image_rgba, encode_png_rgba, ClipboardItem, FileRef, ImageMime};
+use crate::item::ClipboardItem;
+#[cfg(not(target_os = "linux"))]
+use crate::item::{decode_image_rgba, encode_png_rgba, FileRef, ImageMime};
+#[cfg(not(target_os = "linux"))]
 use async_trait::async_trait;
 
+#[cfg(not(target_os = "linux"))]
 #[async_trait]
 impl ClipboardBackend for ArboardClipboard {
     fn name(&self) -> &'static str {
@@ -244,6 +256,7 @@ impl ClipboardBackend for ArboardClipboard {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn load_file_refs(paths: &[std::path::PathBuf]) -> Result<Option<Vec<FileRef>>> {
     let mut files = Vec::new();
     for path in paths {

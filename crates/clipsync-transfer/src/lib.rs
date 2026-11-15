@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 //! Chunked transfer, path sanitization, staging, and BLAKE3 commit.
 
 mod sanitize;

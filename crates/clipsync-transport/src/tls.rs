@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 //! OS trust store (macOS Keychain / system CAs) plus optional extra PEM roots.
 
 use std::sync::{Arc, OnceLock};
@@ -12,6 +14,10 @@ use crate::TransportError;
 /// `CLIPSYNC_CA_FILE` — PEM bundle of extra private/self-signed CAs.
 pub const CA_FILE_ENV: &str = "CLIPSYNC_CA_FILE";
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public TransportError payload and conversions; see docs/compiler-warnings.md."
+)]
 pub fn client_config() -> Result<Arc<ClientConfig>, TransportError> {
     static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
     if let Some(existing) = CONFIG.get() {
@@ -22,6 +28,10 @@ pub fn client_config() -> Result<Arc<ClientConfig>, TransportError> {
     Ok(CONFIG.get().cloned().unwrap_or(built))
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public TransportError payload and conversions; see docs/compiler-warnings.md."
+)]
 pub fn configure_reqwest(
     builder: reqwest::ClientBuilder,
 ) -> Result<reqwest::ClientBuilder, TransportError> {
@@ -32,6 +42,10 @@ pub fn ca_file_path() -> Option<String> {
     std::env::var(CA_FILE_ENV).ok().filter(|s| !s.is_empty())
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public TransportError payload and conversions; see docs/compiler-warnings.md."
+)]
 fn build() -> Result<ClientConfig, TransportError> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let extra = load_extra_cas()?;
@@ -56,6 +70,10 @@ fn build() -> Result<ClientConfig, TransportError> {
 ///
 /// Returns no extra certificates when unset; rejects unreadable, malformed,
 /// or certificate-free PEM bundles.
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public TransportError payload and conversions; see docs/compiler-warnings.md."
+)]
 fn load_extra_cas() -> Result<Vec<CertificateDer<'static>>, TransportError> {
     let Some(path) = ca_file_path() else {
         return Ok(Vec::new());

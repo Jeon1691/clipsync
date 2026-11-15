@@ -1,0 +1,147 @@
+# Copyright the ClipSync contributors.
+# SPDX-License-Identifier: MIT
+name: coverage and dynamic analysis
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  schedule:
+    - cron: '35 18 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  coverage:
+    name: Workspace line and branch coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_LLVM_COV_TARGET_DIR: target/coverage
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          # Branch instrumentation requires nightly; production MSRV is checked in ci.yml.
+          toolchain: nightly-2026-11-11
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: llvm-cov-0.9.1
+      - name: Linux desktop and clipboard dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xclip xvfb libgtk-3-dev libxkbcommon-dev libwayland-dev libxkbcommon-x11-dev
+      - name: Install coverage tool
+        run: cargo install cargo-llvm-cov --version 0.9.1 --locked
+      - name: Measure every workspace package and target
+        run: |
+          cargo llvm-cov clean --workspace
+          xvfb-run -a cargo llvm-cov --workspace --all-features --all-targets --branch --locked --no-report -- --test-threads=1
+      - name: Export coverage reports
+        run: |
+          mkdir -p coverage
+          # Skip per-function LCOV records: the native LLVM exporter can crash on them.
+          # Line and branch records, and function metrics in other reports, are retained.
+          cargo llvm-cov report --lcov --skip-functions --output-path coverage/lcov.info
+          cargo llvm-cov report --html --output-dir coverage
+          cargo llvm-cov report --json --summary-only --output-path coverage/summary.json
+          cargo llvm-cov report | tee coverage/summary.txt
+          {
+            echo '### Workspace line and branch coverage'
+            echo '```text'
+            cat coverage/summary.txt
+            echo '```'
+            echo 'Full source report: download the coverage artifact and open html/index.html.'
+            echo 'Silver target: 80% statement coverage. Gold targets: 90% statement and 80% branch coverage. These remain unmet until measured and reviewed; no files are excluded to improve the percentage.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload LCOV, HTML, and line/branch summaries
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: workspace-coverage
+          path: coverage/
+          if-no-files-found: error
+          retention-days: 30
+
+  crypto-fuzz:
+    name: AEAD properties with AddressSanitizer
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: nightly-2026-11-11
+          components: rust-src
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: fuzz
+          key: crypto-asan
+      - name: Install fuzzer
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Exercise AEAD round trips and tamper rejection
+        run: |
+          set -euo pipefail
+          mkdir -p fuzz/corpus/crypto_aead coverage
+          cargo metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
+          cargo fuzz run --sanitizer address --debug-assertions crypto_aead fuzz/corpus/crypto_aead fuzz/seeds/crypto_aead -- -max_total_time=60 -max_len=65536 2>&1 | tee coverage/crypto-asan.txt
+      - name: Upload sanitizer log and reproducing inputs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: crypto-asan
+          path: |
+            coverage/crypto-asan.txt
+            fuzz/artifacts/crypto_aead/
+          if-no-files-found: warn
+          retention-days: 30
+
+  native-asan:
+    name: macOS clipboard and daemon AddressSanitizer
+    # This standard runner is Apple Silicon; the test binaries run natively.
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      CARGO_TARGET_DIR: target/native-asan
+      RUSTFLAGS: -Zsanitizer=address -Cdebug-assertions=yes
+      RUSTDOCFLAGS: -Zsanitizer=address -Cdebug-assertions=yes
+      ASAN_OPTIONS: detect_stack_use_after_return=1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: nightly-2026-11-11
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: native-asan
+      - name: Exercise native clipboard and daemon boundaries
+        run: |
+          set -euo pipefail
+          mkdir -p coverage
+          cargo test --target aarch64-apple-darwin -p clipsync-clipboard -p clipsync-daemon --all-targets --locked -- --test-threads=1 2>&1 | tee coverage/native-asan.txt
+      - name: Upload native sanitizer log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-native-asan
+          path: coverage/native-asan.txt
+          if-no-files-found: error
+          retention-days: 30

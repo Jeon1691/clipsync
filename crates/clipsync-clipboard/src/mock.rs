@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::sync::Arc;

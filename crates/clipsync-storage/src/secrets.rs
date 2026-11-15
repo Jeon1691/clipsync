@@ -1,4 +1,8 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use clipsync_crypto::{DeviceIdentity, StoredIdentity};
+use std::io::Write;
+use std::path::Path;
 use tracing::warn;
 
 use crate::paths::{set_private_file, AppPaths};
@@ -25,8 +29,7 @@ impl SecretStore {
         let stored = identity.to_stored();
         let payload = serde_json::to_string(&stored)?;
         let path = self.paths.identity_file();
-        std::fs::write(&path, &payload)?;
-        set_private_file(&path)?;
+        write_private(&path, payload.as_bytes())?;
         if let Err(e) = set_keyring(&self.account("identity"), &payload) {
             warn!(error = %e, "keychain unavailable; identity kept in 0600 file");
         }
@@ -56,8 +59,7 @@ impl SecretStore {
 
     pub fn save_named(&self, name: &str, value: &str) -> Result<()> {
         let path = self.paths.data_dir.join(format!("{name}.secret"));
-        std::fs::write(&path, value)?;
-        set_private_file(&path)?;
+        write_private(&path, value.as_bytes())?;
         if let Err(e) = set_keyring(&self.account(name), value) {
             warn!(error = %e, key = name, "keychain unavailable");
         }
@@ -78,6 +80,23 @@ impl SecretStore {
         let _ = std::fs::remove_file(path);
         Ok(())
     }
+}
+
+/// Create with private permissions before writing, then atomically replace.
+/// A failed write leaves the previous credential available for retry/recovery.
+pub(crate) fn write_private(path: &Path, value: &[u8]) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("missing parent"))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    set_private_file(tmp.path())?;
+    tmp.write_all(value)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|error| error.error)?;
+    // Make credential renames durable before removing a legacy metadata copy.
+    #[cfg(unix)]
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]

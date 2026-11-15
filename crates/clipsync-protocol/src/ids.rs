@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 

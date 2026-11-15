@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 //! Pairing (SPAKE2), key derivation, AEAD, Noise session handshake, epoch wrapping.
 
 mod aead;

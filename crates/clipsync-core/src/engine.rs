@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,6 +40,10 @@ pub struct SyncHandle {
     pub last_item: Arc<Mutex<Option<ClipboardItem>>>,
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 pub async fn run_daemon(clipboard: Option<SystemClipboard>) -> Result<(), CoreError> {
     let store = LocalStore::open()?;
     let _ = crate::App {
@@ -74,7 +80,7 @@ pub async fn run_daemon(clipboard: Option<SystemClipboard>) -> Result<(), CoreEr
                             if let Ok(Some(req)) = read_request(&mut stream).await {
                                 let resp = handle_ipc(&store2, &h, req).await;
                                 let _ = write_response(&mut stream, &resp).await;
-                                if matches!(req_is_shutdown(&resp), true) {
+                                if req_is_shutdown(&resp) {
                                     // ignore
                                 }
                             }
@@ -232,6 +238,10 @@ async fn sync_loop(
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 async fn run_session(
     store: &LocalStore,
     clipboard: &SystemClipboard,
@@ -331,7 +341,7 @@ async fn run_session(
                         handle.peer_online.store(peer_online, Ordering::Relaxed);
                         if let Some(q) = queued_text {
                             if let Ok(item) = open_text(&epoch_key, &q.routing, &q.nonce, &q.ciphertext) {
-                                apply_remote(clipboard, &mut guard, &handle, &notifier, &q.routing.message_id.0, item, &mut last_sig).await;
+                                apply_remote(clipboard, &mut guard, handle, &notifier, &q.routing.message_id.0, item, &mut last_sig).await;
                             }
                         }
                         if peer_online && !noise_done {
@@ -459,6 +469,10 @@ async fn run_session(
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 async fn send_item(
     conn: &RelayConnection,
     identity: &DeviceIdentity,
@@ -548,6 +562,10 @@ async fn send_item(
     Ok(())
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 async fn send_binary(
     conn: &RelayConnection,
     epoch_key: &[u8; 32],
@@ -577,6 +595,10 @@ async fn send_binary(
     Ok(())
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 fn open_text(
     epoch_key: &[u8; 32],
     routing: &RoutingHeader,
@@ -592,6 +614,10 @@ fn open_text(
     Ok(ClipboardItem::Text { text })
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 fn open_manifest(
     epoch_key: &[u8; 32],
     routing: &RoutingHeader,
@@ -606,6 +632,10 @@ fn open_manifest(
     Ok(serde_json::from_slice(&pt)?)
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 fn decode_nonce(hex_str: &str) -> Result<[u8; 12], CoreError> {
     let b = hex::decode(hex_str).map_err(|e| CoreError::Message(e.to_string()))?;
     if b.len() != 12 {
@@ -616,6 +646,10 @@ fn decode_nonce(hex_str: &str) -> Result<[u8; 12], CoreError> {
     Ok(n)
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 async fn item_from_payload(
     manifest: &ManifestPlain,
     payload: Vec<u8>,
@@ -694,6 +728,10 @@ async fn apply_remote(
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 pub async fn oneshot_push(store: &LocalStore, item: ClipboardItem) -> Result<(), CoreError> {
     let cfg = store.load_config()?;
     let identity = store.secrets.load_identity()?;
@@ -719,10 +757,18 @@ pub async fn oneshot_push(store: &LocalStore, item: ClipboardItem) -> Result<(),
     Ok(())
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 async fn wait_hello_ok(conn: &mut RelayConnection) -> Result<(), CoreError> {
     wait_hello_ok_msg(conn).await.map(|_| ())
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 async fn wait_hello_ok_msg(conn: &mut RelayConnection) -> Result<ControlMessage, CoreError> {
     let deadline = tokio::time::sleep(Duration::from_secs(10));
     tokio::pin!(deadline);
@@ -743,6 +789,10 @@ async fn wait_hello_ok_msg(conn: &mut RelayConnection) -> Result<ControlMessage,
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep explicit borrows of the existing session state; reviewed in docs/compiler-warnings.md."
+)]
 async fn apply_hello_ok(
     hello: &ControlMessage,
     identity: &DeviceIdentity,
@@ -807,6 +857,10 @@ async fn apply_hello_ok(
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 pub async fn oneshot_pull(
     store: &LocalStore,
     copy: bool,
@@ -894,6 +948,10 @@ pub async fn oneshot_pull(
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
 async fn finish_pull(
     item: ClipboardItem,
     copy: bool,

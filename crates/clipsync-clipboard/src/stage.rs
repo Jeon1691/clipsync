@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 //! Files placed here exist so Finder (and other desktops) can paste an image.
 //! The pasteboard still carries PNG/TIFF for apps that want pixels. A later
 //! read treats paths inside this directory as that image, so the original

@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 //! WebSocket client with reconnect, heartbeat, and typed frames.
 
 mod tls;
@@ -39,6 +41,10 @@ pub enum TransportError {
 pub type Result<T> = std::result::Result<T, TransportError>;
 
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The 256-entry queue bounds inline control messages; avoid per-message allocation and preserve the public Incoming layout."
+)]
 pub enum Incoming {
     Control(ControlMessage),
     Binary(Vec<u8>),
@@ -50,6 +56,10 @@ pub struct RelayConnection {
     outgoing: mpsc::Sender<Outgoing>,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The 256-entry queue bounds inline control messages; avoid per-message allocation and preserve the public Incoming layout."
+)]
 enum Outgoing {
     Control(ControlMessage),
     Binary(Vec<u8>),
@@ -57,6 +67,10 @@ enum Outgoing {
 }
 
 impl RelayConnection {
+    #[expect(
+        clippy::result_large_err,
+        reason = "Preserve the public TransportError payload and conversions; see docs/compiler-warnings.md."
+    )]
     pub async fn connect(ws_url: &str) -> Result<Self> {
         let _ = Url::parse(ws_url)?;
         let mut req = ws_url
@@ -147,10 +161,10 @@ impl RelayConnection {
                             }
                             Some(Ok(Message::Binary(b))) => {
                                 last_rx = SystemTime::now();
-                                if b.starts_with(CHUNK_MAGIC) || !b.is_empty() {
-                                    if in_tx.send(Incoming::Binary(b.to_vec())).await.is_err() {
-                                        break;
-                                    }
+                                if (b.starts_with(CHUNK_MAGIC) || !b.is_empty())
+                                    && in_tx.send(Incoming::Binary(b.to_vec())).await.is_err()
+                                {
+                                    break;
                                 }
                             }
                             Some(Ok(Message::Ping(p))) => {
@@ -178,6 +192,10 @@ impl RelayConnection {
         })
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "Preserve the public TransportError payload and conversions; see docs/compiler-warnings.md."
+    )]
     pub async fn send_control(&self, msg: ControlMessage) -> Result<()> {
         self.outgoing
             .send(Outgoing::Control(msg))
@@ -185,6 +203,10 @@ impl RelayConnection {
             .map_err(|_| TransportError::Closed)
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "Preserve the public TransportError payload and conversions; see docs/compiler-warnings.md."
+    )]
     pub async fn send_binary(&self, bytes: Vec<u8>) -> Result<()> {
         self.outgoing
             .send(Outgoing::Binary(bytes))

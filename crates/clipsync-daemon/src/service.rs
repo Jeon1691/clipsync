@@ -1,5 +1,9 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(target_os = "macos")]
+use std::process::Stdio;
 
 use clipsync_storage::AppPaths;
 
@@ -33,17 +37,17 @@ pub fn install_and_start(paths: &AppPaths) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         install_launchd(&exe, paths)?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(target_os = "linux")]
     {
         install_systemd(&exe, paths)?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(target_os = "windows")]
     {
         install_windows(&exe, paths)?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
@@ -63,7 +67,7 @@ pub fn stop_and_uninstall() -> Result<()> {
             launchctl_quiet(&["unload", &plist]);
             let _ = std::fs::remove_file(path);
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(target_os = "linux")]
     {
@@ -77,13 +81,13 @@ pub fn stop_and_uninstall() -> Result<()> {
             .args(["--user", "daemon-reload"])
             .status();
         let _ = std::fs::remove_file(xdg_autostart_path());
-        return Ok(());
+        Ok(())
     }
     #[cfg(target_os = "windows")]
     {
         let _ = std::fs::remove_file(windows_startup_vbs());
         let _ = std::fs::remove_file(windows_startup_cmd());
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
@@ -227,11 +231,8 @@ fn install_systemd(exe: &PathBuf, paths: &AppPaths) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let home = dirs_home();
-    let mut env = format!(
-        "{}",
-        systemd_env_line("HOME", &home.display().to_string())
-            + &systemd_env_line("PATH", &daemon_path_env(exe))
-    );
+    let mut env = systemd_env_line("HOME", &home.display().to_string())
+        + &systemd_env_line("PATH", &daemon_path_env(exe));
     if let Ok(h) = std::env::var("CLIPSYNC_HOME") {
         env.push_str(&systemd_env_line("CLIPSYNC_HOME", &h));
     }
@@ -315,7 +316,7 @@ fn install_windows(exe: &PathBuf, paths: &AppPaths) -> Result<()> {
     if let Some(parent) = cmd_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut bat = format!("@echo off\r\n");
+    let mut bat = String::from("@echo off\r\n");
     if let Ok(h) = std::env::var("CLIPSYNC_HOME") {
         bat.push_str(&format!("set CLIPSYNC_HOME={h}\r\n"));
     }
@@ -376,6 +377,7 @@ fn dirs_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+#[cfg(target_os = "macos")]
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -402,6 +404,7 @@ fn stable_daemon_exe(current: &Path) -> PathBuf {
     current.to_path_buf()
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn daemon_path_env(exe: &Path) -> String {
     let mut parts = Vec::new();
     if let Some(dir) = exe.parent() {

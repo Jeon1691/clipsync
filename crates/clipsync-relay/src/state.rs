@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -5,7 +7,6 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use parking_lot::Mutex;
 use rand::Rng;
 use tokio::sync::mpsc;
 
@@ -397,10 +398,4 @@ impl RelayState {
             });
         }
     }
-}
-
-// silence unused mutex import if any
-#[allow(dead_code)]
-fn _mutex() -> Mutex<()> {
-    Mutex::new(())
 }

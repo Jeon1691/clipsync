@@ -1,9 +1,13 @@
+# Copyright the ClipSync contributors.
+# SPDX-License-Identifier: MIT
 [package]
 name = "clipsync-transfer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
 description = "ClipSync chunked transfer, staging, and integrity"
 
 [dependencies]
@@ -12,5 +16,4 @@ clipsync-crypto.workspace = true
 clipsync-protocol.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tracing.workspace = true
 ulid.workspace = true

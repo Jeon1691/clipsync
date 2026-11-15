@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Command;

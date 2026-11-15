@@ -1,3 +1,5 @@
+# Copyright the ClipSync contributors.
+# SPDX-License-Identifier: MIT
 [alias]
 xtask = "run --package clipsync-cli --"
 relay = "run --package clipsync-relay --"

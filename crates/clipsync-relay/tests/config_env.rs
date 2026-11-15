@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use std::process::{Command, Output};
 
 use clipsync_relay::RelayConfig;

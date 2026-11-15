@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use snow::{Builder, TransportState};
 use x25519_dalek::{PublicKey, StaticSecret};
 

@@ -1,3 +1,5 @@
+# Copyright the ClipSync contributors.
+# SPDX-License-Identifier: MIT
 [package]
 name = "clipsync-fuzz"
 version = "0.0.0"
@@ -10,10 +12,18 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 clipsync-protocol = { path = "../crates/clipsync-protocol" }
+clipsync-crypto = { path = "../crates/clipsync-crypto" }
 
 [[bin]]
 name = "protocol"
 path = "fuzz_targets/protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crypto_aead"
+path = "fuzz_targets/crypto_aead.rs"
 test = false
 doc = false
 bench = false

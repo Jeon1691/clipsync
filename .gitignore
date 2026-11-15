@@ -14,3 +14,7 @@ coverage/
 .omc/
 clipsync-*.tar.gz
 clipsync-*.zip
+
+# Python verification artifacts
+__pycache__/
+*.py[cod]

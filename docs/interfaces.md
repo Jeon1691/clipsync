@@ -357,3 +357,14 @@ On incoming file items only the first file is handled: an image MIME type is
 sent to `write_image_png`; other files trigger a notification. There is no
 exported file-read callback or file-save result. Callback writes return no
 error value, so host clipboard failures cannot be returned through this API.
+
+## Credential redaction and local storage migration
+
+Current `room list` / `room join` JSON omits `device_token`, and configuration
+JSON omits webhook `secret`. This is intentional credential redaction. Rust
+callers still receive the in-memory fields where authentication is required.
+Loading legacy state/config writes separate private credentials before replacing
+metadata; initialization propagates migration/parse failures and preserves the
+original configuration. Back up the complete private data directory before
+upgrading. Older binaries cannot read the migrated layout: update both peers and
+re-pair instead of downgrading migrated state. See [security](security.md).

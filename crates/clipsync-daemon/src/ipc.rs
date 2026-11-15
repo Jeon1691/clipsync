@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 #[cfg(unix)]
 use std::path::PathBuf;
 

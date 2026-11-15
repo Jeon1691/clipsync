@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use std::time::Duration;
 
 use clipsync_protocol::{DEBOUNCE_MS, WATCH_POLL_MS};

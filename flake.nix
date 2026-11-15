@@ -1,3 +1,5 @@
+# Copyright the ClipSync contributors.
+# SPDX-License-Identifier: MIT
 {
   description = "ClipSync CLI and relay";
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

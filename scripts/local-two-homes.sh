@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright the ClipSync contributors.
+# SPDX-License-Identifier: MIT
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 A="$ROOT/tmp/home-a"

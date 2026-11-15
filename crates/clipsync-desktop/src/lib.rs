@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 //! Desktop pairing and daemon control shared by the window.
 
 use clipsync_core::{begin_create_room, join_room, App};

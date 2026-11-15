@@ -53,9 +53,52 @@ forwarded only while the peer is online and are never assembled or written to
 disk.
 
 Webhooks carry metadata only: opaque IDs, item kind, encrypted size, timestamp,
-status. Private addresses are blocked.
+status. Destination checks must include DNS results, IPv4/IPv6 special ranges,
+redirect behavior and the address actually used for the connection; see the
+assurance case for current evidence and scope.
 
 ## Local storage
 
-macOS Keychain / Linux Secret Service first. File fallback is mode `0600`.
-Received files land in a `0700` inbox; names are basenames only.
+For identity and room/epoch keys, the current implementation reads private files first and mirrors them to
+macOS Keychain / Windows Credential Manager when available. Linux currently
+uses private files; a Secret Service backend is not enabled. Secret files have
+mode `0600` on Unix. Unix data/inbox directories use `0700`; Windows relies on
+the user's profile-directory access controls rather than POSIX modes.
+Received filenames are sanitized to basenames.
+
+Device tokens are stored separately as `device-token-<hex-room-id>.secret`;
+webhook credentials use `webhook.secret`. These credentials use canonical private files without OS-keychain fallback; missing or empty files are errors. New `state.json` and `config.toml`
+serialization omits these values. Loading a legacy inline credential writes
+the separate private secret successfully before atomically replacing metadata.
+A failed migration retains the original file. Missing secrets fail the load
+rather than silently inventing a credential. Back up the complete private data
+directory before migration; old binaries cannot read the new token layout.
+Update clients together, and re-pair rather than downgrading migrated state.
+The writes are individually atomic and ordered, rather than a general
+multi-file transaction. Unix parent-directory syncing improves rename
+durability; Windows power-loss durability is not established by these tests.
+
+To replace client credentials, stop the daemon and re-pair to replace device and
+room keys/tokens; no recompilation is needed. The webhook secret can be replaced
+in its separate private file while stopped. Restart consumers after rotation.
+Relay signing and webhook secrets are supplied separately through runtime
+environment variables; rotate them and restart the relay, then re-pair affected
+clients. Do not put production values in the checked-in example or logs.
+
+## Security expectations and limits
+
+The intended requirements are confidentiality and integrity of clipboard
+payloads against the relay/network, pairing authorization, rejection of stale
+or invalid transfers, bounded resource use, confined received paths, and private
+local credentials. The [assurance case](assurance-case.md) connects these claims
+to implementations and tests and records unresolved limits.
+
+A compromised or unlocked authorized endpoint can read clipboard contents and
+keys. Same-user local malware and administrators are outside the confidentiality
+guarantee. Pairing codes must be shared through an authenticated separate
+channel. Use HTTPS/WSS with trusted certificates for public deployments; the
+relay's HTTP listener requires TLS termination and network restrictions.
+Metadata and traffic timing remain visible to the relay. Denial of service,
+delivery by a malicious relay, secure erasure of old copies/backups, and payload
+forward secrecy are not guaranteed. Native libraries, OS trust stores and
+platform services remain part of the trusted environment.

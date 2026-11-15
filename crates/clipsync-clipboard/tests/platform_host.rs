@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 //! Host-OS clipboard contract. CI runs this on Linux (Xvfb + xclip), macOS, and Windows.
 
 use clipsync_clipboard::{ClipboardItem, SystemClipboard};
@@ -5,18 +7,18 @@ use clipsync_clipboard::{ClipboardItem, SystemClipboard};
 fn expect_adapter(name: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
-        return matches!(name, "macos-nspasteboard" | "macos-pbpaste");
+        matches!(name, "macos-nspasteboard" | "macos-pbpaste")
     }
     #[cfg(target_os = "linux")]
     {
-        return matches!(
+        matches!(
             name,
             "wayland-wl-clipboard" | "x11-xclip" | "x11-xsel" | "headless"
-        );
+        )
     }
     #[cfg(target_os = "windows")]
     {
-        return matches!(name, "windows-clipboard" | "arboard");
+        matches!(name, "windows-clipboard" | "arboard")
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {

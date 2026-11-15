@@ -1,2 +1,4 @@
+# Copyright the ClipSync contributors.
+# SPDX-License-Identifier: MIT
 newline_style = "Unix"
 edition = "2021"

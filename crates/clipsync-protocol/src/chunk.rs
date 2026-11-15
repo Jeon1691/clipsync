@@ -1,3 +1,5 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 use crate::ids::TransferId;
 use crate::{ProtocolError, Result, FRAME_HARD_CAP};
 

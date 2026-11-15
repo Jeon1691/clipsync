@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright the ClipSync contributors.
+# SPDX-License-Identifier: MIT
 # Generate Formula/clipsync.rb from GitHub release checksums and push to the tap.
 set -euo pipefail
 

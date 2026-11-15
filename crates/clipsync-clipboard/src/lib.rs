@@ -1,9 +1,13 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
 //! OS clipboard adapters with capability detection and fallbacks.
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod command;
 mod detect;
 mod item;
 mod mock;
+#[cfg(target_os = "macos")]
 mod stage;
 mod watch;
 
