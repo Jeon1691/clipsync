@@ -1,7 +1,7 @@
 # Testing and coverage
 
 The [CI workflow](../.github/workflows/ci.yml) tests the Rust workspace on Linux,
-macOS, and Windows, checks the Rust 1.88 minimum, and runs formatting, compiler
+macOS, and Windows, checks the Rust 1.95 minimum, and runs formatting, compiler
 warnings, Clippy, stability, platform, relay, and format checks. Run the workspace
 tests locally with:
 
@@ -9,10 +9,14 @@ tests locally with:
 cargo test --workspace --locked -- --test-threads=1
 ```
 
-Clipboard tests write to the system clipboard. On Linux, install `xclip`, `xvfb`,
-`libgtk-3-dev`, `libxkbcommon-dev`, `libwayland-dev`, and `libxkbcommon-x11-dev`, and
-run that command through `xvfb-run -a`. Native clipboard behavior still needs the
-three-platform CI matrix and manual platform testing.
+The real host clipboard roundtrip requires `CLIPSYNC_TEST_HOST_CLIPBOARD=1`;
+enable it only in a disposable test session. Ordinary local tests use private
+named pasteboards or isolated adapters. Full foreground CLI completion on macOS
+also requires `CLIPSYNC_TEST_DISPOSABLE_HOST=1`; local validation leaves that flag
+unset. Hosted CI supplies both flags. On Linux, install `xclip`, `xvfb`,
+`libgtk-3-dev`, `libxkbcommon-dev`, `libwayland-dev`, `libxkbcommon-x11-dev`,
+`libfontconfig1-dev` and `libfreetype6-dev`, then run through `xvfb-run -a`.
+Native behavior still needs the three-platform CI matrix and manual testing.
 
 ## Measuring coverage
 
@@ -24,7 +28,7 @@ filters omit dependency sources, generated build output, and standalone test,
 example, and benchmark directories. It runs on pull requests, default branch
 pushes, weekly, and on manual dispatch.
 
-The `workspace-coverage` artifact contains `lcov.info`, an HTML report in
+The `workspace-coverage-linux` and `workspace-coverage-macos` artifacts contain `lcov.info`, an HTML report in
 `html/index.html`, `summary.json`, and `summary.txt`. The Actions job summary also
 shows per-file and total line, region, function, and branch results. Coverage
 reports reuse the same test run; exporting each format does not rerun tests.
@@ -34,7 +38,7 @@ records remain in LCOV; the other reports retain function metrics.
 
 The workflow pins [cargo-llvm-cov 0.9.1](https://github.com/taiki-e/cargo-llvm-cov/releases/tag/v0.9.1)
 and a nightly compiler because [branch instrumentation is unstable](https://github.com/taiki-e/cargo-llvm-cov#usage).
-Production continues to support Rust 1.88; nightly is a measurement toolchain.
+Production continues to support Rust 1.95; nightly is a measurement toolchain.
 To reproduce the measurement from the repository root:
 
 ```sh
@@ -62,7 +66,7 @@ crates, duplicate/non-product files and inconsistent totals, and retains the
 full HTML/JSON reports even when the threshold fails.
 
 Coverage is specific to the compiler, host, active `cfg` paths, and tests. The
-Linux workflow does not measure Windows or macOS implementations, iOS/Android
+Linux and macOS jobs measure their own active implementations separately. They do not measure Windows paths, iOS/Android
 device behavior, Swift/Kotlin apps, or C/C++/OS libraries. Documentation tests are
 not instrumented by this command. The HTML report keeps uncovered desktop and
 mobile Rust paths visible; compiling those crates does not demonstrate their
@@ -177,7 +181,7 @@ dynamic-analysis coverage.
 ## Regression policy and remaining higher-tier work
 
 The [full audit](regression-audit.md) and [machine-readable ledger](regressions.json)
-now register **46/86 (53.49%)** distinct corrected defects, exceeding the 50%
+now register **57/98 (58.16%)** distinct corrected defects, exceeding the 50%
 Silver regression requirement. The checker validates real test references and
 the full denominator in all three CI platform jobs; future fixes must update
 the ledger and cannot silently delete uncovered cases. This fraction is separate

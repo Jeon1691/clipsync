@@ -1,6 +1,6 @@
 # Six-month regression-test audit — 2026-11-15
 
-The complete ledger now registers **53 of 94 distinct corrected defects (56.38%)**,
+The complete ledger now registers **57 of 98 distinct corrected defects (58.16%)**,
 meeting the Silver requirement of at least 50%. [The machine-readable ledger](regressions.json)
 and [CI checker](../scripts/check-regressions.py) preserve the full denominator
 and derive credit from concrete test references, not a manually entered Boolean.
@@ -39,9 +39,9 @@ that an assertion reproduces a historical defect.
 
 | Scope | Registered defects | Complete defects | Fraction |
 | --- | ---: | ---: | ---: |
-| Broad ledger | 53 | 94 | 56.38% |
-| Project runtime/security | 43 | 56 | 76.79% |
-| All project-authored corrections | 53 | 82 | 64.63% |
+| Broad ledger | 57 | 98 | 58.16% |
+| Project runtime/security | 46 | 59 | 77.97% |
+| All project-authored corrections | 57 | 86 | 66.28% |
 
 The original baseline increased from **24/84 (28.57%)** to **44/84 (52.38%)** without
 removing defects or treating test variants as extra bugs. The newly covered rows
@@ -95,6 +95,22 @@ can pass intermittently and no deterministic focused RED/GREEN regression has
 been established. This is a test-fixture defect, not a newly claimed mobile
 product failure. Including it in the denominator yields the current
 **53/94 (56.38%)**, rather than increasing credit from nearby passing tests.
+
+The next additions are Linux backend metadata (F95), native clipboard FIFO
+opening (F96), and coverage source-path classification (F97). Isolated Linux
+backend fixtures fail the old unconditional metadata; both native FIFO readers
+hit a five-second deadline before nonblocking descriptor validation. Adversarial
+coverage reports expose test-path aliases and duplicate build roots accepted by
+the old validator. The corrected real report retains identical totals. These
+three distinct failures produce **56/97 (57.73%)**. FIFO variants and path aliases
+are not counted as additional defects.
+
+F98 records the actual early-joiner pairing failure discovered during coverage
+work. A real protocol fence and a delayed create-response fixture reproduce lost
+presence/SPAKE delivery. Both public Core clients now complete and persist the
+same keys. Session authentication, bounded pending storage, replacement and
+disconnect/expiry contracts protect the correction. One ordering/session-lifecycle
+defect brings the complete ledger to **57/98 (58.16%)**.
 
 The scope table is derived from the ledger: runtime/security includes the
 `Runtime` and `Runtime-PR16` rows; project-authored corrections include every
@@ -236,6 +252,11 @@ whether the assertion meaningfully protects the stated behavior.
 | F92 | Build/CI | [c5ad280](https://github.com/Jeon1691/clipsync/commit/c5ad280e8cacff1dc3d598b8f25ac1dbff2648d3) | Failed reconstruction rerun mixed a new source identity with earlier success evidence | **Registered** — [failed-rerun and build/comparison fixtures](../scripts/tests/test_build_reconstruction.py) preserve old reports and prevent current success markers; synthetic orchestration, Linux/macOS. |
 | F93 | Build/CI | [c5ad280](https://github.com/Jeon1691/clipsync/commit/c5ad280e8cacff1dc3d598b8f25ac1dbff2648d3) | Reconstruction target architecture remained host-selected and unrecorded | **Registered** — [default amd64 and explicit arm64 fixtures](../scripts/tests/test_build_reconstruction.py) check both builds/runs and the platform record; no cross-architecture build-result claim, Linux/macOS. |
 | F94 | Build/CI | [2e42f06](https://github.com/Jeon1691/clipsync/commit/2e42f06061a636a5f58b3aaf96a40d48fd75e00c) | Mobile fixture checked pairing completion before sync configuration persistence | **Uncredited** — intermittent old-fixture behavior has no deterministic focused regression; a current targeted pass is not historical proof. |
+| F95 | Runtime | [a0022e6](https://github.com/Jeon1691/clipsync/commit/a0022e65146742d61bfe45fb6e3a91218db0dbe7) | Linux backend metadata always identified xclip | **Registered** — [isolated backend/session contracts](../crates/clipsync-clipboard/src/detect.rs) reproduce old metadata errors on Linux. |
+| F96 | Runtime | [a0022e6](https://github.com/Jeon1691/clipsync/commit/a0022e65146742d61bfe45fb6e3a91218db0dbe7) | Native clipboard file reads blocked on writer-less FIFOs | **Registered** — [arboard file reader](../crates/clipsync-clipboard/src/detect.rs) and [AppKit reader](../crates/clipsync-clipboard/src/macos.rs) have bounded real FIFO regressions, macOS. |
+| F97 | Build/CI | [8488848](https://github.com/Jeon1691/clipsync/commit/8488848b10d6cdcdf2b99391b0507fddbbb6472e) | Coverage source classification accepted noncanonical aliases and duplicate build roots | **Registered** — [adversarial report fixtures](../scripts/tests/test_product_coverage.py) reject test aliases and duplicate product files without changing valid real totals, Linux/macOS. |
+
+| F98 | Runtime | [4cca45c](https://github.com/Jeon1691/clipsync/commit/4cca45c6937226657d32b484f0d2b8e0c3a72e65) | Early joiner socket lost creator presence and its first SPAKE message | **Registered** — [actual WebSocket ordering](../crates/clipsync-relay/tests/pairing_order.rs) and [full Core exchange/persisted keys](../crates/clipsync-relay/src/ws_tests.rs) use deterministic fences and private credentials, all three CI platforms. |
 
 The [official Silver criterion](https://www.bestpractices.dev/en/criteria/1#regression_tests_added50)
 defines the badge requirement. This ledger's defect taxonomy and conservative

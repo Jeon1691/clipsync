@@ -10,7 +10,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 Contributions must fix new diagnostics or justify a narrow exception at its
 source. The project does not disable warning groups or raise lint thresholds
 to obtain a clean result. The separate minimum-Rust job continues to check the
-workspace with Rust 1.88.
+workspace with Rust 1.95.
 
 On 2026-11-15, the command above passed locally on macOS with Rust/Clippy
 1.100.0 across the whole workspace and all targets. It produced no compiler,

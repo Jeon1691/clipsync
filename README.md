@@ -84,7 +84,7 @@ See [docs/mobile.md](docs/mobile.md).
 
 ### From source
 
-Requires Rust 1.88 or newer. The repository selects the stable toolchain;
+Requires Rust 1.95 or newer. The repository selects the stable toolchain;
 run `rustup update stable` before building if your installed version is older.
 
 ```bash

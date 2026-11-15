@@ -1930,6 +1930,122 @@
       "description": "The mobile integration fixture treated the room-file write as completion before background pairing had persisted its sync configuration",
       "checks": [],
       "notes": "This intermittent test-readiness race was observed during the workspace suite; the fixture now waits for the persisted sync-enabled boundary before checking daemon behavior. It is a fixture correction, not a newly claimed mobile product defect. The targeted current test passes, but the old fixture can also pass intermittently and no deterministic focused regression has been established. Nearby passing coverage receives no credit."
+    },
+    {
+      "id": "F95",
+      "kind": "Runtime",
+      "fixes": [
+        "a0022e65146742d61bfe45fb6e3a91218db0dbe7"
+      ],
+      "description": "Linux clipboard capability metadata reported xclip even when another backend or no backend was selected",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-clipboard/src/detect.rs",
+          "package": "clipsync-clipboard",
+          "target": "lib:clipsync_clipboard",
+          "test": "detect::environment_tests::linux_detection_prioritizes_sessions_tools_and_real_capabilities",
+          "platforms": [
+            "linux"
+          ]
+        }
+      ],
+      "notes": "Eight isolated PATH/display-session fixtures check selected backend names and capabilities. Replaying the previous unconditional xclip metadata fails the live Linux contract; the correction preserves the actual detection priority."
+    },
+    {
+      "id": "F96",
+      "kind": "Runtime",
+      "fixes": [
+        "a0022e65146742d61bfe45fb6e3a91218db0dbe7"
+      ],
+      "description": "Native clipboard file loading could block forever while opening a writer-less FIFO",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-clipboard/src/detect.rs",
+          "package": "clipsync-clipboard",
+          "target": "lib:clipsync_clipboard",
+          "test": "detect::native_tests::native_file_loader_rejects_private_fifo_without_blocking",
+          "platforms": [
+            "macos"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-clipboard/src/macos.rs",
+          "package": "clipsync-clipboard",
+          "target": "lib:clipsync_clipboard",
+          "test": "macos::behavior_tests::native_file_loader_rejects_private_fifo_without_blocking",
+          "platforms": [
+            "macos"
+          ]
+        }
+      ],
+      "notes": "Both real Unix FIFO fixtures reached their five-second deadline before the fix and return promptly after nonblocking, no-follow descriptor validation. Existing regular-file, symlink and 64 MiB restrictions remain. One failure across two native clipboard loaders; it is distinct from relay credential opening F89. These native loaders are not compiled on Linux; Windows does not expose Unix FIFOs."
+    },
+    {
+      "id": "F97",
+      "kind": "Build/CI",
+      "fixes": [
+        "8488848b10d6cdcdf2b99391b0507fddbbb6472e"
+      ],
+      "description": "Coverage validation classified noncanonical source paths before resolving parent aliases and could double-count one product source from different build roots",
+      "checks": [
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_product_coverage.py",
+          "test": "test_product_coverage.ProductCoverageTests.test_parent_path_alias_cannot_hide_counted_test_code_as_product",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        },
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_product_coverage.py",
+          "test": "test_product_coverage.ProductCoverageTests.test_same_product_file_from_two_build_roots_is_not_counted_twice",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        }
+      ],
+      "notes": "Two adversarial report fixtures are accepted by the old validator and rejected after canonicalizing paths and identifying product files by logical package/source path. Counted test aliases and duplicate build roots are variants of one source-classification defect. Unmodified real report totals remain unchanged."
+    },
+    {
+      "id": "F98",
+      "kind": "Runtime",
+      "fixes": [
+        "4cca45c6937226657d32b484f0d2b8e0c3a72e65"
+      ],
+      "description": "A joiner WebSocket admitted before its creator could lose peer presence and its first SPAKE message, preventing supported pairing from completing",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/pairing_order.rs",
+          "package": "clipsync-relay",
+          "target": "test:pairing_order",
+          "test": "regression_f98_joiner_websocket_before_creator_delivers_presence_and_typed_frames",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/ws_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "ws::tests::regression_f98_late_creator_completes_real_core_pairing_and_persists_matching_keys",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "A deterministic Ping/Pong fence confirms the joiner sent its first actual SPAKE message while the creator socket is absent. Old behavior loses the message and fails; authenticated session-local routing and one bounded pending public SPAKE per direction complete the exchange. A second fixture delays the real create HTTP response, runs both public Core pairing APIs with child-local memory keyring, and compares persisted root/epoch keys and roles. Related role/session, replacement, disconnect and expiry contracts remain separate test variants of this ordering/session-lifecycle correction. No room key or authentication confirmation is buffered."
     }
   ]
 }
