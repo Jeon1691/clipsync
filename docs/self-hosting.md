@@ -50,9 +50,38 @@ location / {
 | --- | --- |
 | `CLIPSYNC_RELAY_BIND` | Listen address, default `0.0.0.0:7600` |
 | `CLIPSYNC_RELAY_PUBLIC_URL` | URL clients should use |
-| `CLIPSYNC_RELAY_TOKEN_SECRET` | HMAC secret for device tokens |
+| `CLIPSYNC_RELAY_TOKEN_SECRET` | HMAC token key; at least 32 bytes when explicitly set. Unset, empty, or whitespace-only generates a fresh random 32-byte key. |
 | `CLIPSYNC_RELAY_WEBHOOK_URL` | Optional metadata webhook |
 | `CLIPSYNC_RELAY_WEBHOOK_SECRET` | HMAC key for webhook signatures |
+
+## Token keys and rotation
+
+The relay generates its default token key from the operating system's secure
+random generator. Docker Compose forwards an optional
+`CLIPSYNC_RELAY_TOKEN_SECRET` from the shell or project `.env`; it has no shared
+default key. Empty and whitespace-only values also select random generation.
+An explicit nonblank value shorter than 32 bytes prevents startup. Valid values
+are used as their UTF-8 bytes without trimming or hex decoding.
+
+To supply a persistent key, generate it once and retain it in your private
+deployment environment:
+
+```bash
+export CLIPSYNC_RELAY_TOKEN_SECRET="$(openssl rand -hex 32)"
+docker compose up --build
+```
+
+Use an independently generated value for `CLIPSYNC_RELAY_WEBHOOK_SECRET` if
+enabling webhooks. Avoid publishing either key or resolved Compose output that
+contains them.
+
+With no explicit key, each process start creates a new key and invalidates old
+tokens. Retaining a key does **not** retain rooms: the relay stores rooms,
+pairing sessions, and queued text only in memory. Every relay restart loses that
+state, so clients must pair again, including after a key rotation. To rotate,
+replace the deployment key with a newly generated value, restart the relay,
+then leave the old room on both clients (`clipsync room leave --yes`) and run
+`room create` / `room join CODE` again.
 
 ## Client
 

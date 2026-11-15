@@ -6,5 +6,5 @@ services:
     environment:
       CLIPSYNC_RELAY_BIND: 0.0.0.0:7600
       CLIPSYNC_RELAY_PUBLIC_URL: http://127.0.0.1:7600
-      CLIPSYNC_RELAY_TOKEN_SECRET: change-me-in-production
+      CLIPSYNC_RELAY_TOKEN_SECRET: "${CLIPSYNC_RELAY_TOKEN_SECRET:-}"
     restart: unless-stopped

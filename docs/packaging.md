@@ -47,7 +47,7 @@ gh attestation verify clipsync-x86_64-unknown-linux-gnu.tar.gz \
   --bundle clipsync-x86_64-unknown-linux-gnu.sigstore.json \
   --repo Jeon1691/clipsync \
   --signer-workflow Jeon1691/clipsync/.github/workflows/release.yml \
-  --source-ref refs/tags/v0.1.15 \
+  --source-ref refs/tags/v0.1.16 \
   --deny-self-hosted-runners
 ```
 

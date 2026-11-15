@@ -43,8 +43,16 @@ impl RelayConfig {
         let public_url = std::env::var("CLIPSYNC_RELAY_PUBLIC_URL")
             .unwrap_or_else(|_| format!("http://127.0.0.1:{}", bind.port()));
         let token_secret = std::env::var("CLIPSYNC_RELAY_TOKEN_SECRET")
-            .map(|s| s.into_bytes())
-            .unwrap_or_else(|_| {
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| {
+                assert!(
+                    s.len() >= 32,
+                    "CLIPSYNC_RELAY_TOKEN_SECRET must contain at least 32 bytes; leave it unset to generate a random key"
+                );
+                s.into_bytes()
+            })
+            .unwrap_or_else(|| {
                 let mut s = [0u8; 32];
                 rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut s);
                 s.to_vec()

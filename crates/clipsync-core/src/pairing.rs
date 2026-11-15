@@ -333,7 +333,7 @@ async fn run_pairing(
                         role: our_role,
                     };
                     let pt = serde_json::to_vec(&plain)?;
-                    let nonce = clipsync_crypto::derive_nonce(&k.pairing_wrap_key, 1)?;
+                    let nonce = device_bind_nonce(&k.pairing_wrap_key, role)?;
                     let ct = seal(
                         &k.pairing_wrap_key,
                         &nonce,
@@ -408,6 +408,18 @@ async fn run_pairing(
     }
 }
 
+fn device_bind_nonce(
+    key: &[u8; clipsync_crypto::KEY_LEN],
+    role: PairingRole,
+) -> clipsync_crypto::Result<[u8; 12]> {
+    // Reserve 0 and 1; legacy v1 peers use index 1 for both pairing roles.
+    let index = match role {
+        PairingRole::A => 2,
+        PairingRole::B => 3,
+    };
+    clipsync_crypto::derive_nonce(key, index)
+}
+
 async fn connect_relay_ws(ws: &str) -> Result<RelayConnection, CoreError> {
     match RelayConnection::connect(ws).await {
         Ok(conn) => Ok(conn),
@@ -445,4 +457,118 @@ fn b64_decode(s: &str) -> Result<Vec<u8>, CoreError> {
     base64::engine::general_purpose::STANDARD
         .decode(s)
         .map_err(|e| CoreError::Pairing(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clipsync_crypto::{derive_nonce, PairingKeys};
+
+    fn paired_keys() -> (PairingSessionId, PairingKeys, PairingKeys) {
+        let session = PairingSessionId::new();
+        let a = DeviceId::from("dev-a");
+        let b = DeviceId::from("dev-b");
+        let state_a = start_pairing_a("482913", session.clone(), a.clone(), b.clone()).unwrap();
+        let state_b = start_pairing_b("482913", session.clone(), a, b).unwrap();
+        let message_a = state_a.outbound.clone();
+        let message_b = state_b.outbound.clone();
+        let keys_a = finish_pairing(state_a, &message_b).unwrap();
+        let keys_b = finish_pairing(state_b, &message_a).unwrap();
+        assert_eq!(keys_a.pairing_wrap_key, keys_b.pairing_wrap_key);
+        (session, keys_a, keys_b)
+    }
+
+    fn assert_bind_exchange(
+        session: &PairingSessionId,
+        keys_a: &PairingKeys,
+        keys_b: &PairingKeys,
+        nonce_a: [u8; 12],
+        nonce_b: [u8; 12],
+    ) {
+        assert_ne!(
+            nonce_a, nonce_b,
+            "new and legacy peers must not reuse a nonce"
+        );
+        for (sender, receiver, nonce, role) in [
+            (keys_a, keys_b, nonce_a, DeviceRole::Owner),
+            (keys_b, keys_a, nonce_b, DeviceRole::Member),
+        ] {
+            let plain = BindPlain {
+                device_id: DeviceId::from(if role == DeviceRole::Owner {
+                    "dev-a"
+                } else {
+                    "dev-b"
+                }),
+                static_public: hex::encode([7; 32]),
+                device_name: "compatibility fixture".into(),
+                os: "test".into(),
+                fingerprint: "fixture fingerprint".into(),
+                epoch: 1,
+                epoch_key: hex::encode(initial_epoch_key(&sender.room_root_key).unwrap()),
+                role,
+            };
+            let ciphertext = seal(
+                &sender.pairing_wrap_key,
+                &nonce,
+                session.as_str().as_bytes(),
+                &serde_json::to_vec(&plain).unwrap(),
+            )
+            .unwrap();
+            let wire = ControlMessage::DeviceBind {
+                pairing_session_id: session.clone(),
+                nonce: hex::encode(nonce),
+                ciphertext: hex::encode(ciphertext),
+            }
+            .encode()
+            .unwrap();
+            let ControlMessage::DeviceBind {
+                nonce, ciphertext, ..
+            } = ControlMessage::decode(&wire).unwrap()
+            else {
+                panic!("expected a v1 DeviceBind frame");
+            };
+            // Both legacy and new receivers decrypt with the nonce sent on the wire.
+            let received_nonce: [u8; 12] = hex::decode(nonce).unwrap().try_into().unwrap();
+            let received = open(
+                &receiver.pairing_wrap_key,
+                &received_nonce,
+                session.as_str().as_bytes(),
+                &hex::decode(ciphertext).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<BindPlain>(&received).unwrap(),
+                plain
+            );
+        }
+    }
+
+    #[test]
+    fn device_bind_nonces_separate_roles_and_legacy_indices() {
+        let (_, keys_a, keys_b) = paired_keys();
+        let nonce_a = device_bind_nonce(&keys_a.pairing_wrap_key, PairingRole::A).unwrap();
+        let nonce_b = device_bind_nonce(&keys_b.pairing_wrap_key, PairingRole::B).unwrap();
+        assert_ne!(nonce_a, nonce_b, "pairing roles must use different nonces");
+        for reserved_index in [0, 1] {
+            let reserved = derive_nonce(&keys_a.pairing_wrap_key, reserved_index).unwrap();
+            assert_ne!(nonce_a, reserved, "role A reused a reserved nonce");
+            assert_ne!(nonce_b, reserved, "role B reused a reserved nonce");
+        }
+    }
+
+    #[test]
+    fn device_bind_new_a_and_legacy_b_interoperate() {
+        let (session, keys_a, keys_b) = paired_keys();
+        let nonce_a = device_bind_nonce(&keys_a.pairing_wrap_key, PairingRole::A).unwrap();
+        let nonce_b = derive_nonce(&keys_b.pairing_wrap_key, 1).unwrap();
+        assert_bind_exchange(&session, &keys_a, &keys_b, nonce_a, nonce_b);
+    }
+
+    #[test]
+    fn device_bind_legacy_a_and_new_b_interoperate() {
+        let (session, keys_a, keys_b) = paired_keys();
+        let nonce_a = derive_nonce(&keys_a.pairing_wrap_key, 1).unwrap();
+        let nonce_b = device_bind_nonce(&keys_b.pairing_wrap_key, PairingRole::B).unwrap();
+        assert_bind_exchange(&session, &keys_a, &keys_b, nonce_a, nonce_b);
+    }
 }
