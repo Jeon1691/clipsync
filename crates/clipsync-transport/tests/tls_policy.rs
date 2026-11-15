@@ -88,7 +88,10 @@ async fn private_server(websocket: bool) -> (u16, tempfile::TempDir, tokio::task
                                 ))
                                 .await
                                 .unwrap();
-                                break;
+                                // Keep the positive TLS endpoint alive until
+                                // the client has observed Pong and sends Close.
+                                // Dropping TLS here races buffered delivery on
+                                // Windows and tests truncation rather than trust.
                             }
                         }
                     }

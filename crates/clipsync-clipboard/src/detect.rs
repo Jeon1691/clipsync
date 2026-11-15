@@ -526,6 +526,177 @@ mod native_tests {
     }
 
     #[tokio::test]
+    async fn platform_host_arboard_roundtrip_preserves_text_pixels_and_private_files() {
+        // The general clipboard belongs to the user on development machines.
+        // Only disposable hosted desktop sessions explicitly opt into this test.
+        if std::env::var("CLIPSYNC_TEST_HOST_CLIPBOARD").as_deref() != Ok("1") {
+            return;
+        }
+        let root = Scratch::new();
+        let clipboard = ArboardClipboard::new().expect("host Arboard adapter");
+        assert_eq!(clipboard.name(), "arboard");
+        let caps = clipboard.capabilities();
+        assert!(caps.text && caps.image && caps.files && caps.watch);
+
+        let text = format!("clipsync-arboard-{}: π🙂\nsecond line", std::process::id());
+        clipboard
+            .write(&ClipboardItem::Text { text: text.clone() })
+            .await
+            .unwrap();
+        crate::test_support::assert_text(clipboard.read().await.unwrap(), &text);
+        let text_signature = clipboard.signature().await.unwrap();
+        assert_eq!(
+            text_signature,
+            format!("{:x}", hash_item(&ClipboardItem::Text { text }))
+        );
+        clipboard
+            .write(&ClipboardItem::Text {
+                text: "changed host fixture".into(),
+            })
+            .await
+            .unwrap();
+        assert_ne!(clipboard.signature().await.unwrap(), text_signature);
+
+        clipboard
+            .write(&ClipboardItem::Image {
+                mime: ImageMime::Png,
+                bytes: png(),
+                width: Some(2),
+                height: Some(1),
+            })
+            .await
+            .unwrap();
+        let image = clipboard.read().await.unwrap().expect("host image");
+        let ClipboardItem::Image {
+            mime,
+            bytes,
+            width,
+            height,
+        } = &image
+        else {
+            panic!("host image became {image:?}");
+        };
+        assert_eq!(*mime, ImageMime::Png);
+        assert_eq!((*width, *height), (Some(2), Some(1)));
+        assert_eq!(
+            decode_image_rgba(bytes).unwrap(),
+            (2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255])
+        );
+        let image_signature = clipboard.signature().await.unwrap();
+        assert_eq!(image_signature, format!("{:x}", hash_item(&image)));
+        assert_ne!(image_signature, text_signature);
+
+        assert!(clipboard
+            .write(&ClipboardItem::Image {
+                mime: ImageMime::Png,
+                bytes: b"corrupt host image fixture".to_vec(),
+                width: None,
+                height: None,
+            })
+            .await
+            .is_err());
+        for files in [
+            vec![],
+            vec![FileRef {
+                name: "unstaged.txt".into(),
+                bytes: b"unstaged".to_vec(),
+                mime: None,
+                staged_path: None,
+            }],
+        ] {
+            assert!(matches!(
+                clipboard.write(&ClipboardItem::Files { files }).await,
+                Err(ClipboardError::Unsupported("files"))
+            ));
+        }
+        assert_eq!(
+            clipboard.signature().await.unwrap(),
+            image_signature,
+            "rejected input must not replace the host image"
+        );
+
+        let image_bytes = png();
+        let text_path = root.file("first payload π.txt", b"private file payload");
+        let image_path = root.file("second image.png", &image_bytes);
+        let files = vec![
+            FileRef {
+                name: "first payload π.txt".into(),
+                bytes: b"private file payload".to_vec(),
+                mime: None,
+                staged_path: Some(text_path.clone()),
+            },
+            FileRef {
+                name: "second image.png".into(),
+                bytes: image_bytes.clone(),
+                mime: Some("image/png".into()),
+                staged_path: Some(image_path.clone()),
+            },
+        ];
+        clipboard
+            .write(&ClipboardItem::Files { files })
+            .await
+            .unwrap();
+        let item = clipboard.read().await.unwrap().expect("host file list");
+        item.validate().unwrap();
+        let ClipboardItem::Files { files } = &item else {
+            panic!("host file list became {item:?}");
+        };
+        assert_eq!(files.len(), 2);
+        for (name, expected_path, expected_bytes, expected_mime) in [
+            (
+                "first payload π.txt",
+                text_path,
+                b"private file payload".to_vec(),
+                None,
+            ),
+            (
+                "second image.png",
+                image_path,
+                image_bytes,
+                Some("image/png"),
+            ),
+        ] {
+            let file = files
+                .iter()
+                .find(|file| file.name == name)
+                .expect("each staged filename must survive");
+            assert_eq!(file.bytes, expected_bytes);
+            assert_eq!(file.mime.as_deref(), expected_mime);
+            assert_eq!(
+                file.staged_path.as_ref().unwrap().canonicalize().unwrap(),
+                expected_path.canonicalize().unwrap()
+            );
+        }
+        assert_eq!(
+            clipboard.signature().await.unwrap(),
+            format!("{:x}", hash_item(&item))
+        );
+
+        #[cfg(target_os = "macos")]
+        {
+            // Arboard rejects an all-missing URL list on macOS. This exercises
+            // the real native error mapping without depending on OS failures.
+            assert!(matches!(
+                clipboard
+                    .write(&ClipboardItem::Files {
+                        files: vec![FileRef {
+                            name: "missing.txt".into(),
+                            bytes: vec![],
+                            mime: None,
+                            staged_path: Some(root.0.join("missing.txt")),
+                        }]
+                    })
+                    .await,
+                Err(ClipboardError::Message(_))
+            ));
+        }
+        // Leave no references to the fixture files when their directory drops.
+        arboard::Clipboard::new().unwrap().clear().unwrap();
+        assert!(clipboard.read().await.unwrap().is_none());
+        assert_eq!(clipboard.signature().await.unwrap(), "empty");
+    }
+
+    #[tokio::test]
     async fn native_reader_selects_files_before_pixels_and_pixels_before_text() {
         let root = Scratch::new();
         let path = root.file("file.txt", b"file payload");

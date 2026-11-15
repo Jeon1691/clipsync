@@ -24,11 +24,22 @@ env:
   RUSTUP_TOOLCHAIN: nightly-2026-11-11
   # Hosted runners provide disposable clipboard sessions for the host contract.
   CLIPSYNC_TEST_HOST_CLIPBOARD: '1'
+  CLIPSYNC_TEST_DISPOSABLE_HOST: '1'
 
 jobs:
   coverage:
-    name: Workspace line and branch coverage
-    runs-on: ubuntu-latest
+    name: ${{ matrix.check }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            check: Workspace line and branch coverage
+          - os: macos-15
+            platform: macos
+            check: macOS product coverage
     timeout-minutes: 30
     env:
       CARGO_LLVM_COV_TARGET_DIR: target/coverage
@@ -45,15 +56,22 @@ jobs:
         with:
           key: llvm-cov-0.9.1
       - name: Linux desktop and clipboard dependencies
+        if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y xclip xvfb libgtk-3-dev libxkbcommon-dev libwayland-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev
       - name: Install coverage tool
         run: cargo install cargo-llvm-cov --version 0.9.1 --locked
       - name: Measure every workspace package and target
+        shell: bash
         run: |
+          set -euo pipefail
           cargo llvm-cov clean --workspace
-          xvfb-run -a cargo llvm-cov --workspace --all-features --all-targets --branch --locked --no-report -- --test-threads=1
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            xvfb-run -a cargo llvm-cov --workspace --all-features --all-targets --branch --locked --no-report -- --test-threads=1
+          else
+            cargo llvm-cov --workspace --all-features --all-targets --branch --locked --no-report -- --test-threads=1
+          fi
       - name: Export coverage reports
         run: |
           mkdir -p coverage
@@ -79,7 +97,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: workspace-coverage
+          name: workspace-coverage-${{ matrix.platform }}
           path: coverage/
           if-no-files-found: error
           retention-days: 30

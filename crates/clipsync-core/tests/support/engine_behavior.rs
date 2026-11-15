@@ -2101,6 +2101,272 @@ async fn text_pull_writes_exact_utf8_output_and_propagates_output_path_failures(
     assert_eq!(std::fs::read(blocked).unwrap(), b"preserve me");
 }
 
+#[tokio::test]
+async fn pull_reports_output_file_failures_for_each_item_kind_without_overwriting_directories() {
+    let root = TempDir::new().unwrap();
+    for (name, item) in [
+        (
+            "clipboard.txt",
+            ClipboardItem::Text {
+                text: "private text".into(),
+            },
+        ),
+        (
+            "clipboard.png",
+            ClipboardItem::Image {
+                mime: ImageMime::Png,
+                bytes: PNG.to_vec(),
+                width: None,
+                height: None,
+            },
+        ),
+        (
+            "report.txt",
+            ClipboardItem::Files {
+                files: vec![FileRef {
+                    name: "report.txt".into(),
+                    bytes: b"private file".to_vec(),
+                    mime: None,
+                    staged_path: None,
+                }],
+            },
+        ),
+    ] {
+        let output = root.path().join(name);
+        std::fs::create_dir(&output).unwrap();
+        let blocked = output.join(name);
+        std::fs::create_dir(&blocked).unwrap();
+        assert!(matches!(
+            finish_pull(item, false, Some(output)).await,
+            Err(CoreError::Io(_))
+        ));
+        assert!(blocked.is_dir());
+        assert_eq!(std::fs::read_dir(blocked).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn manifest_rejection_distinguishes_encoding_authentication_and_authenticated_json_errors() {
+    let routing = text_routing();
+    let nonce = [6; 12];
+    assert!(matches!(
+        open_manifest(&EPOCH, &routing, &hex::encode(nonce), "!"),
+        Err(CoreError::Message(_))
+    ));
+    assert!(matches!(
+        open_manifest(&EPOCH, &routing, &hex::encode(nonce), "00"),
+        Err(CoreError::Crypto(_))
+    ));
+    let key = derive_content_key(&EPOCH, routing.transfer_id.as_str()).unwrap();
+    let ciphertext = seal(
+        &key,
+        &nonce,
+        format!("{}:manifest", routing.transfer_id).as_bytes(),
+        b"not JSON",
+    )
+    .unwrap();
+    assert!(matches!(
+        open_manifest(
+            &EPOCH,
+            &routing,
+            &hex::encode(nonce),
+            &hex::encode(ciphertext)
+        ),
+        Err(CoreError::Json(_))
+    ));
+}
+
+#[tokio::test]
+async fn closed_relay_senders_report_failure_for_text_images_and_file_transfers() {
+    use crate::test_relay::Server;
+    let mut server = Server::websocket(|mut socket| async move {
+        socket
+            .send(axum::extract::ws::Message::Close(None))
+            .await
+            .unwrap();
+    })
+    .await;
+    let peer = scripted_peer(&server.url, RoomId::new());
+    let mut connection = RelayConnection::connect(&join_ws(&server.url, "/v1/ws"))
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), connection.incoming.recv())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let room = peer.app.store.current_room().unwrap();
+    for item in [
+        ClipboardItem::Text {
+            text: "must not silently succeed".into(),
+        },
+        ClipboardItem::Image {
+            mime: ImageMime::Png,
+            bytes: PNG.to_vec(),
+            width: None,
+            height: None,
+        },
+        ClipboardItem::Files {
+            files: vec![FileRef {
+                name: "report.txt".into(),
+                bytes: b"private file".to_vec(),
+                mime: None,
+                staged_path: None,
+            }],
+        },
+    ] {
+        assert!(matches!(
+            send_item(&connection, &peer.identity, &room, &EPOCH, 1, &item).await,
+            Err(CoreError::Transport(
+                clipsync_transport::TransportError::Closed
+            ))
+        ));
+    }
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn session_setup_propagates_rejected_hello_and_inbox_failures_without_clipboard_mutation() {
+    use crate::test_relay::{receive, send, Server};
+    for mode in [
+        "push-rejected",
+        "session-rejected",
+        "session-inbox",
+        "pull-inbox",
+    ] {
+        let room = RoomId::new();
+        let room_id = room.clone();
+        let (consumed, release) = tokio::sync::oneshot::channel();
+        let mut server = Server::websocket(move |mut socket| async move {
+            assert!(matches!(
+                receive(&mut socket).await,
+                ControlMessage::Hello {
+                    role: ClientRole::Member,
+                    ..
+                }
+            ));
+            send(
+                &mut socket,
+                if mode.ends_with("rejected") {
+                    ControlMessage::Error {
+                        code: "revoked".into(),
+                        message: "device revoked".into(),
+                    }
+                } else {
+                    hello(&room)
+                },
+            )
+            .await;
+            let _ = release.await;
+        })
+        .await;
+        let peer = scripted_peer(&server.url, room_id);
+        if mode.ends_with("inbox") {
+            std::fs::remove_dir(&peer.app.store.paths.inbox_dir).unwrap();
+            std::fs::write(&peer.app.store.paths.inbox_dir, b"preserve inbox marker").unwrap();
+        }
+        let clipboard = MockClipboard::new();
+        let handle = sync_handle();
+        let (_, mut shutdown) = watch::channel(false);
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            match mode {
+                "push-rejected" => {
+                    oneshot_push(
+                        &peer.app.store,
+                        ClipboardItem::Text {
+                            text: "must not send".into(),
+                        },
+                    )
+                    .await
+                }
+                "pull-inbox" => oneshot_pull(&peer.app.store, false, true, None)
+                    .await
+                    .map(|_| ()),
+                _ => {
+                    run_session(
+                        &peer.app.store,
+                        &SystemClipboard::mock(clipboard.clone()),
+                        &handle,
+                        &mut shutdown,
+                    )
+                    .await
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let _ = consumed.send(());
+        server.finish().await;
+        let error = result.unwrap_err();
+        if mode.ends_with("rejected") {
+            assert!(error.to_string().contains("relay revoked: device revoked"));
+        } else {
+            assert!(matches!(error, CoreError::Io(_)));
+            assert_eq!(
+                std::fs::read(&peer.app.store.paths.inbox_dir).unwrap(),
+                b"preserve inbox marker"
+            );
+        }
+        assert!(clipboard.get().is_none());
+        assert!(!handle.connected.load(Ordering::Relaxed));
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn daemon_start_facade_uses_isolated_service_managers_and_propagates_installer_errors() {
+    const NAME: &str = "engine::behavior_tests::daemon_start_facade_uses_isolated_service_managers_and_propagates_installer_errors";
+    if !in_worker(NAME) {
+        use std::os::unix::fs::PermissionsExt;
+        for blocked in [false, true] {
+            let root = TempDir::new().unwrap();
+            let home = root.path().join("home");
+            if blocked {
+                std::fs::write(&home, b"preserve home marker").unwrap();
+            } else {
+                std::fs::create_dir(&home).unwrap();
+            }
+            let tools = root.path().join("tools");
+            std::fs::create_dir(&tools).unwrap();
+            for name in ["launchctl", "systemctl"] {
+                let path = tools.join(name);
+                std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            worker(
+                NAME,
+                b"",
+                &[
+                    ("HOME", home.to_str().unwrap()),
+                    ("USERPROFILE", home.to_str().unwrap()),
+                    ("PATH", tools.to_str().unwrap()),
+                    ("CLIPSYNC_NO_DAEMON", "0"),
+                    (
+                        "CLIPSYNC_CORE_SERVICE_BLOCKED",
+                        if blocked { "1" } else { "0" },
+                    ),
+                ],
+            );
+            if blocked {
+                assert_eq!(std::fs::read(home).unwrap(), b"preserve home marker");
+            }
+        }
+        return;
+    }
+    let peer = Peer::new("http://127.0.0.1:1", "daemon-facade", 58);
+    let result = crate::maybe_start_daemon(&peer.app.store);
+    if std::env::var("CLIPSYNC_CORE_SERVICE_BLOCKED").as_deref() == Ok("1") {
+        assert!(matches!(result, Err(CoreError::Daemon(_))));
+    } else {
+        result.unwrap();
+        assert!(clipsync_daemon::is_service_installed());
+        assert!(String::from_utf8(product_logs().lock().clone())
+            .unwrap()
+            .contains("daemon start requested"));
+    }
+}
+
 struct ControlledClipboard {
     value: Arc<Mutex<Option<ClipboardItem>>>,
     write_fails: bool,

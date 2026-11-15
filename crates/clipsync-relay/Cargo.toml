@@ -49,6 +49,7 @@ url.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
+keyring.workspace = true
 rcgen = "0.13"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 reqwest.workspace = true
