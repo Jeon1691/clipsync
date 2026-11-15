@@ -5,6 +5,11 @@ on:
     tags:
       - "v*.*.*"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish release assets (select a v* tag; otherwise build and verify only)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -18,15 +23,19 @@ env:
 
 jobs:
   build:
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             optional: false
-          - os: macos-14
+          - os: macos-15
             target: x86_64-apple-darwin
             optional: false
           - os: ubuntu-22.04
@@ -41,7 +50,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.optional }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -78,13 +87,45 @@ jobs:
             tar -C dist -czf "dist/${stage}.tar.gz" "$stage"
             (cd dist && shasum -a 256 "${stage}.tar.gz" > "${stage}.sha256")
           fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Attest release archives
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+          create-storage-record: false
+      - name: Preserve and verify attestation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ATTESTATION_BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          bundle="dist/clipsync-${TARGET}.sigstore.json"
+          cp "$ATTESTATION_BUNDLE" "$bundle"
+          shopt -s nullglob
+          archives=(dist/*.tar.gz dist/*.zip)
+          if [[ ${#archives[@]} -ne 1 ]]; then
+            echo "expected exactly one release archive" >&2
+            exit 1
+          fi
+          gh attestation verify "${archives[0]}" \
+            --bundle "$bundle" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-ref "$GITHUB_REF" \
+            --source-digest "$GITHUB_SHA" \
+            --deny-self-hosted-runners
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: clipsync-${{ matrix.target }}
           path: |
             dist/*.tar.gz
             dist/*.zip
             dist/*.sha256
+            dist/*.sigstore.json
           if-no-files-found: error
 
   smoke:
@@ -92,13 +133,22 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: clipsync-x86_64-unknown-linux-gnu
           path: dist
       - name: Run packaged Linux binary
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          gh attestation verify dist/clipsync-x86_64-unknown-linux-gnu.tar.gz \
+            --bundle dist/clipsync-x86_64-unknown-linux-gnu.sigstore.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-ref "$GITHUB_REF" \
+            --source-digest "$GITHUB_SHA" \
+            --deny-self-hosted-runners
           tar -xzf dist/clipsync-x86_64-unknown-linux-gnu.tar.gz
           bin="$(find . -type f -name clipsync | head -1)"
           chmod +x "$bin"
@@ -109,13 +159,13 @@ jobs:
     permissions:
       contents: write
     needs: [build, smoke]
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.publish)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
           merge-multiple: true
@@ -127,8 +177,13 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
+          notes="docs/releases/${tag}.md"
+          if [[ ! -s "$notes" ]]; then
+            echo "write a release summary and upgrade impact in $notes before publishing" >&2
+            exit 1
+          fi
           shopt -s nullglob
-          assets=(artifacts/*.tar.gz artifacts/*.zip artifacts/*.sha256)
+          assets=(artifacts/*.tar.gz artifacts/*.zip artifacts/*.sha256 artifacts/*.sigstore.json)
           if [[ ${#assets[@]} -eq 0 ]]; then
             echo "no release assets" >&2
             exit 1
@@ -138,7 +193,7 @@ jobs:
           else
             gh release create "$tag" "${assets[@]}" \
               --title "$tag" \
-              --generate-notes \
+              --notes-file "$notes" \
               --verify-tag
           fi
       - name: Update Homebrew tap

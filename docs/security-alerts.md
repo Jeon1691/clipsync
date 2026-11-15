@@ -27,9 +27,10 @@ warnings remain visible; they are not suppressed with an advisory ignore list.
 ## Remaining maintenance advisories
 
 These are informational unmaintained-package findings, not patched-version
-vulnerability findings. They still contribute to Scorecard alert #25. Replacing
-them requires changes in upstream native GUI/accessibility or binding-generation
-dependencies. Review again by **2026-12-11** and check weekly Dependabot PRs.
+vulnerability findings. They still contribute to Scorecard alert #25. The
+2026-11-15 review found no released, compatible upgrade that removes all six while
+preserving the current accessibility, window decorations, and mobile bindings.
+Review again by **2026-12-11** and check weekly Dependabot PRs.
 
 | Advisory | Dependency | Current dependency path |
 | --- | --- | --- |
@@ -40,16 +41,52 @@ dependencies. Review again by **2026-12-11** and check weekly Dependabot PRs.
 | [RUSTSEC-2026-0370](https://rustsec.org/advisories/RUSTSEC-2026-0370.html) | zvariant | eframe → AccessKit/AT-SPI on Linux |
 | [RUSTSEC-2026-0372](https://rustsec.org/advisories/RUSTSEC-2026-0372.html) | zvariant_derive | Linux accessibility stack's compile-time macros |
 
-The latest eframe releases require a newer compiler than the locally installed
-Rust 1.94; this change uses the smallest eframe upgrade that removes the
-vulnerable XML parser while retaining accessibility support. A UniFFI upgrade
-alone does not remove basic-toml from Askama's dependency graph.
+The follow-up checked these replacement paths against current upstream releases:
+
+- **Binding generation:** [UniFFI 0.32.2](https://github.com/mozilla/uniffi-rs/blob/v0.32.2/uniffi_bindgen/Cargo.toml)
+  still enables Askama's `config` feature. Released Askama 0.16.1 still uses
+  `basic-toml` for that feature. Upstream
+  [commit 3863808](https://github.com/askama-rs/askama/commit/3863808cf594054f7644979ed92caaafc878f378)
+  replaces the parser with maintained `toml`, but the fix is not yet published.
+  Recheck when a release containing this commit is compatible with UniFFI.
+- **Window titles and fonts:** eframe 0.37 uses Skrifa for its own font parsing,
+  but its winit 0.30 dependency still selects `sctk-adwaita` 0.10.1 with
+  `ab_glyph`, which retains `ttf-parser`. The
+  [winit 0.30.13 manifest](https://github.com/rust-windowing/winit/blob/v0.30.13/Cargo.toml)
+  cannot select the newer `sctk-adwaita` Skrifa backend. Track
+  [sctk-adwaita #99](https://github.com/PolyMeilex/sctk-adwaita/issues/99) and a
+  compatible winit release that preserves title text.
+- **Linux accessibility:** even the latest AccessKit Unix adapter, 0.24.1,
+  [requires zbus 5.19](https://docs.rs/crate/accesskit_unix/0.24.1/source/Cargo.toml).
+  The maintained replacement is zbus 6, which
+  [incorporates the former standalone wire-format crates](https://rustsec.org/advisories/RUSTSEC-2026-0370.html).
+  This needs an AccessKit/AT-SPI migration before ClipSync can adopt it.
+- **Graphics macros:** resolving eframe 0.33.3 retained `metal` 0.32 and `paste`;
+  an actual `cargo audit --json` still reported all six maintenance advisories,
+  so that ineffective upgrade was reverted. eframe 0.34.3 and later move to a
+  newer graphics stack and raise the compiler requirement; the latest
+  [eframe 0.37 requires Rust 1.95](https://docs.rs/crate/eframe/0.37.0/source/Cargo.toml).
+  A larger GUI migration solely to remove this one warning is deferred while
+  the other upstream blockers remain. Rust 1.88 remains the tested minimum.
+
+Both lockfiles remain audited without advisory ignores, package renames, or
+locally maintained dependency forks. Native accessibility, title bars, image
+formats, and mobile bindings remain enabled.
+
+## Compiler-warning backlog
+
+CI continues to run `cargo clippy --workspace --all-targets --locked` with
+warnings visible. A Rust 1.100 evaluation of `-- -D warnings` found existing
+diagnostics, including large error/enum variants and unused dependencies.
+The strict gate is not enabled: resolving these warnings requires a separate
+code review, including the public error types. No lint suppressions or service
+behavior changes were added as part of this security follow-up.
 
 ## Repository and project-history findings
 
 | Code Scanning alert | Current state / next action |
 | --- | --- |
-| #2 Branch-Protection | The active [Protect master ruleset](https://github.com/Jeon1691/clipsync/rules/27029148) already prevents deletion and force pushes, requires PRs and resolved review threads, and requires up-to-date `linux`, `macos`, and `windows` checks. The alert predates this ruleset. Re-evaluate on the next Scorecard run. |
+| #2 Branch-Protection | The active [Protect master ruleset](https://github.com/Jeon1691/clipsync/rules/27029148) prevents deletion and force pushes, requires PRs and resolved review threads, dismisses stale approvals, and has no administrator bypass. It requires up-to-date `linux`, `macos`, `windows`, `audit`, `fuzz`, and the aggregate `CodeQL` result. The code-scanning merge gate blocks CodeQL security findings at medium severity or higher and code findings at error severity. The alert predates this policy; re-evaluate on the next Scorecard run. |
 | #19 Code-Review | Scorecard found no approved changesets in its recent history. Maintainer review and future reviewed merges are needed; repository history cannot be repaired by this patch. |
 | #21 Maintained | The repository was created on 2026-09-16. Scorecard flags repositories younger than 90 days; re-evaluate after 2026-12-15 as well as maintaining normal project activity. |
 | #22 SAST | GitHub CodeQL default setup is already configured for Actions, Python, Ruby, and Rust. Scorecard needs successful analysis on merged PRs to observe its use. |
