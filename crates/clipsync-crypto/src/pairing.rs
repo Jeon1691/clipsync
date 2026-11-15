@@ -156,6 +156,7 @@ pub fn verify_confirm_mac(keys: &PairingKeys, role: PairingRole, mac: &[u8]) -> 
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

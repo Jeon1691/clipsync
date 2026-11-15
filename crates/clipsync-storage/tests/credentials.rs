@@ -164,3 +164,53 @@ fn truncated_credential_is_rejected_without_rewriting_metadata() {
     assert!(store.load_state().is_err());
     assert_eq!(std::fs::read(store.paths.state_file()).unwrap(), before);
 }
+
+#[cfg(unix)]
+#[test]
+fn partial_secret_write_does_not_destroy_the_previous_credential() {
+    const CHILD: &str = "CLIPSYNC_TEST_PARTIAL_WRITE_CHILD";
+    if let Some(root) = std::env::var_os(CHILD) {
+        let store = LocalStore::open_from(AppPaths::from_root(root.into())).unwrap();
+        let previous = std::fs::read(store.paths.data_dir.join("partial.secret")).unwrap();
+        assert!(store
+            .secrets
+            .save_named("partial", &"x".repeat(1024))
+            .is_err());
+        assert_eq!(
+            std::fs::read(store.paths.data_dir.join("partial.secret")).unwrap(),
+            previous
+        );
+        return;
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
+    std::fs::write(
+        store.paths.data_dir.join("partial.secret"),
+        "previous synthetic credential",
+    )
+    .unwrap();
+    // The OS enforces a short write in a separate process. No fault-injection
+    // hook, process-wide limit, or signal handler affects the normal test suite.
+    let output = std::process::Command::new("python3")
+        .arg("-c")
+        .arg("import os,resource,signal,sys; signal.signal(signal.SIGXFSZ,signal.SIG_IGN); resource.setrlimit(resource.RLIMIT_FSIZE,(64,64)); os.execv(sys.argv[1],sys.argv[1:])")
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", "partial_secret_write_does_not_destroy_the_previous_credential", "--nocapture"])
+        .env(CHILD, root.path())
+        // The intentional file-size limit would also truncate LLVM's exit-time
+        // profile. Discard only this fault-injection child's profile; ordinary
+        // storage tests still measure the real storage operations.
+        .env("LLVM_PROFILE_FILE", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "partial-write worker failed: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        std::fs::read_to_string(store.paths.data_dir.join("partial.secret")).unwrap(),
+        "previous synthetic credential"
+    );
+}

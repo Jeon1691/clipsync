@@ -426,6 +426,7 @@ fn daemon_path_env(exe: &Path) -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use std::fs;

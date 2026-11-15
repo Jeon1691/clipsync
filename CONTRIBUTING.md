@@ -158,3 +158,14 @@ bot/AI comments meet the two-person-review criterion.
 See [testing](docs/testing.md), [builds](docs/builds.md) and
 [the complete badge assessment](docs/best-practices-levels.md) for measurement
 commands, verification limits and outstanding work.
+
+## Regression coverage ledger
+
+For every bug fix, update [docs/regressions.json](docs/regressions.json): append
+a distinct defect, register a focused automated test with its platform scope,
+or explain why it is not yet covered. Keep the existing audit IDs and count
+related input variants as one defect. CI requires at least 50% of the complete
+ledger to have valid checks and verifies compiled non-ignored test references
+after the workspace suite. It cannot replace review of assertion quality.
+Run `python3 scripts/check-regressions.py --verify-tests` and the Python script
+unittests when changing the policy or test inventory. See the [audit](docs/regression-audit.md).

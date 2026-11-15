@@ -122,6 +122,7 @@ fn restrict_file(path: &Path) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn with_stage_root<T>(root: &Path, f: impl FnOnce() -> T) -> T {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = LOCK.lock().unwrap_or_else(|err| err.into_inner());
@@ -133,6 +134,7 @@ pub(crate) fn with_stage_root<T>(root: &Path, f: impl FnOnce() -> T) -> T {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn set_env(key: &str, value: Option<&str>) {
     match value {
         Some(value) => unsafe { std::env::set_var(key, value) },
@@ -141,6 +143,7 @@ fn set_env(key: &str, value: Option<&str>) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

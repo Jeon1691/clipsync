@@ -378,6 +378,7 @@ impl ClipboardBackend for MacClipboard {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -516,5 +517,86 @@ mod tests {
             }
         });
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Characterize actual TIFF interoperability on normal and fallback writes.
+    // AppKit can synthesize TIFF from PNG, so this is not by itself evidence
+    // that the historical explicit-TIFF-publication defect has a reproducer.
+    #[test]
+    fn png_clipboard_writes_publish_decodable_tiff_for_other_applications() {
+        let root = scratch_dir("tiff-representation");
+        let pixels = [12, 34, 56, 255, 78, 90, 123, 255];
+        let png = crate::item::encode_png_rgba(2, 1, &pixels).unwrap();
+        crate::stage::with_stage_root(&root, || {
+            for fallback in [false, true] {
+                let pb = NSPasteboard::pasteboardWithUniqueName();
+                if fallback {
+                    write_image_bytes_only(&pb, &png).unwrap();
+                } else {
+                    write_image(&pb, ImageMime::Png, &png).unwrap();
+                }
+                let tiff_type = unsafe { NSPasteboardTypeTIFF };
+                assert!(
+                    pb.types()
+                        .unwrap()
+                        .iter()
+                        .any(|kind| kind.to_string() == tiff_type.to_string()),
+                    "native applications must discover TIFF before choosing a representation"
+                );
+                let data = pb
+                    .dataForType(tiff_type)
+                    .expect("TIFF representation for native apps");
+                let bytes = data.to_vec();
+                assert_eq!(
+                    image::guess_format(&bytes).unwrap(),
+                    image::ImageFormat::Tiff
+                );
+                let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
+                assert_eq!(decoded.dimensions(), (2, 1));
+                assert_eq!(decoded.as_raw(), &pixels);
+            }
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // A real legacy filename property list must preserve all copied contents.
+    // AppKit can synthesize NSURL objects from it, so this compatibility case
+    // alone does not prove which native conversion/fallback path was used.
+    #[test]
+    #[expect(
+        deprecated,
+        reason = "Regression fixture intentionally publishes the legacy filename-only flavor."
+    )]
+    fn legacy_filename_clipboard_preserves_files_even_with_preview() {
+        let root = scratch_dir("filename-only");
+        let first = write_temp(&root, "legacy first.txt", b"legacy first");
+        let second = write_temp(&root, "second.txt", b"legacy second");
+        let names = NSArray::from_retained_slice(&[
+            NSString::from_str(first.to_str().unwrap()),
+            NSString::from_str(second.to_str().unwrap()),
+        ]);
+        let pb = NSPasteboard::pasteboardWithUniqueName();
+        pb.clearContents();
+        let filename_type = unsafe { NSFilenamesPboardType };
+        // NSArray<NSString> is the documented filename pasteboard property list.
+        assert!(unsafe { pb.setPropertyList_forType(&names, filename_type) });
+        assert!(pb
+            .types()
+            .unwrap()
+            .iter()
+            .any(|kind| kind.to_string() == filename_type.to_string()));
+        let png = crate::item::encode_png_rgba(1, 1, &[1, 2, 3, 255]).unwrap();
+        let png_type = unsafe { NSPasteboardTypePNG };
+        let _ = unsafe { pb.addTypes_owner(&NSArray::from_slice(&[png_type]), None) };
+        assert!(pb.setData_forType(Some(&NSData::with_bytes(&png)), png_type));
+        let Some(ClipboardItem::Files { files }) = read_pasteboard(&pb).unwrap() else {
+            panic!("legacy file copy was lost or replaced by its preview bitmap");
+        };
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].name, "legacy first.txt");
+        assert_eq!(files[0].bytes, b"legacy first");
+        assert_eq!(files[1].name, "second.txt");
+        assert_eq!(files[1].bytes, b"legacy second");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

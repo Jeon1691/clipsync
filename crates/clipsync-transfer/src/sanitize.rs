@@ -88,6 +88,7 @@ pub fn safe_transfer_id(id: &str) -> Result<String> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

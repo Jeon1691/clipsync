@@ -191,6 +191,7 @@ pub fn tiff_to_png(bytes: &[u8]) -> Result<Vec<u8>> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod format_tests {
     use super::ImageMime;
 
@@ -223,5 +224,37 @@ mod format_tests {
         ] {
             assert_eq!(ImageMime::detect(bytes), None, "{bytes:?}");
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod allocation_regression_tests {
+    use super::*;
+
+    // F34: removing reader.limits restores the old unbounded decode and makes
+    // this valid, small-on-the-wire PNG succeed instead of respecting the budget.
+    #[test]
+    fn compressed_image_cannot_allocate_beyond_the_decode_budget() {
+        let image = image::RgbaImage::from_pixel(3072, 3072, image::Rgba([7, 8, 9, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        assert!(
+            png.len() < 1024 * 1024,
+            "fixture must be compressed on the wire"
+        );
+        // A normal decoder proves this is valid image data, not a corrupt-input
+        // rejection. The decoded pixel buffer is 36 MiB and is dropped before
+        // exercising the bounded production path.
+        let decoded = image::load_from_memory(&png).unwrap();
+        assert_eq!(decoded.width(), 3072);
+        assert_eq!(decoded.height(), 3072);
+        drop(decoded);
+        assert!(
+            decode_image_limited(&png).is_err(),
+            "a valid compressed image must not bypass the allocation limit"
+        );
     }
 }

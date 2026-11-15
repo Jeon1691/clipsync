@@ -94,6 +94,7 @@ pub enum ExitCode {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::format_error;
 

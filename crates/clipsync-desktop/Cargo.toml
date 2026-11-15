@@ -20,3 +20,6 @@ clipsync-daemon.workspace = true
 clipsync-storage.workspace = true
 eframe.workspace = true
 tokio.workspace = true
+
+[lints]
+workspace = true

@@ -1,5 +1,6 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 //! User-level service lifecycle (launchd/systemd/Windows logon) and IPC.
 
 mod ipc;

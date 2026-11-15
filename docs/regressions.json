@@ -1,0 +1,1656 @@
+{
+  "schema_version": 1,
+  "minimum_percent": 50,
+  "baseline": {
+    "window_start": "2026-05-15",
+    "window_end": "2026-11-15",
+    "source_commit": "639000d60f1af1cc856fe20c61b60c84f9b2ab7b",
+    "stable_ids": "F01 through F84 are retained by the checker; append new independently corrected defects."
+  },
+  "evidence_policy": "Coverage means a concrete valid automated check has been registered for a distinct historical defect. Mechanical validation cannot establish assertion quality or historical reproduction; consult docs/regression-audit.md and owning CI jobs. Other-platform and release-only checks are not claimed to execute on the current host.",
+  "defects": [
+    {
+      "id": "F01",
+      "kind": "Runtime",
+      "fixes": [
+        "7fecc3a"
+      ],
+      "description": "One-shot pull --wait ignored binary manifest/chunk transfers",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/e2e.rs",
+          "package": "clipsync-relay",
+          "target": "test:e2e",
+          "test": "file_push_pull_writes_output",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/e2e.rs",
+          "package": "clipsync-relay",
+          "target": "test:e2e",
+          "test": "image_push_pull_writes_output",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Tests added later by8e39471 exercise both binary receive paths; one defect, two item types."
+    },
+    {
+      "id": "F02",
+      "kind": "Runtime",
+      "fixes": [
+        "7fecc3a"
+      ],
+      "description": "Foreground pairing code was not flushed when stdout was captured",
+      "checks": [],
+      "notes": "The new foreground capture contract is tested, but no historical counterexample was established; it remains uncredited rather than counting nearby passing behavior as a regression."
+    },
+    {
+      "id": "F03",
+      "kind": "Runtime",
+      "fixes": [
+        "8e39471"
+      ],
+      "description": "One-shot push sent content before relay acceptance",
+      "checks": [],
+      "notes": "File/text e2e tests are adjacent positive coverage; no test delays/rejects hello or asserts that sending waits for acceptance."
+    },
+    {
+      "id": "F04",
+      "kind": "Runtime",
+      "fixes": [
+        "ddcbdaf"
+      ],
+      "description": "Unix background pairing worker died on terminal hangup",
+      "checks": [],
+      "notes": "No test sends SIGHUP or closes its controlling terminal."
+    },
+    {
+      "id": "F05",
+      "kind": "Runtime",
+      "fixes": [
+        "ddcbdaf"
+      ],
+      "description": "Background-worker startup failure discarded recorded/logged error details",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/tests/background_create.rs",
+          "package": "clipsync-cli",
+          "target": "test:background_create",
+          "test": "background_failure_preserves_the_child_relay_error",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Failed worker error is observed through the actual CLI child process."
+    },
+    {
+      "id": "F06",
+      "kind": "Runtime",
+      "fixes": [
+        "ddcbdaf"
+      ],
+      "description": "A transient pairing WebSocket connection failure was not retried",
+      "checks": [],
+      "notes": "No first-connect-fails/second-connect-succeeds test."
+    },
+    {
+      "id": "F07",
+      "kind": "Runtime",
+      "fixes": [
+        "ddcbdaf"
+      ],
+      "description": "Identity loaded from OS keychain was not cached for subsequent file-based/background access",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/src/secrets.rs",
+          "package": "clipsync-storage",
+          "target": "lib:clipsync_storage",
+          "test": "secrets::regression_tests::keyring_only_identity_is_cached_for_file_based_background_clients",
+          "platforms": [
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Keyring-only identity is cached for a subsequent file-based background client; platform keyring tests run on macOS/Windows."
+    },
+    {
+      "id": "F08",
+      "kind": "Runtime",
+      "fixes": [
+        "ddcbdaf"
+      ],
+      "description": "HTTP user agent retained hardcoded0.1.0 after upgrades",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/lib.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "regression_tests::http_requests_identify_the_current_package_version",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Real local HTTP request checks the current package version in User-Agent."
+    },
+    {
+      "id": "F09",
+      "kind": "Runtime",
+      "fixes": [
+        "e9e55af",
+        "0767bb6"
+      ],
+      "description": "Corporate/private CA trust did not follow OS policy consistently for HTTPS/WSS",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transport/tests/tls_policy.rs",
+          "package": "clipsync-transport",
+          "target": "test:tls_policy",
+          "test": "private_ca_https_trust_preserves_hostname_and_issuer_checks",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transport/tests/tls_policy.rs",
+          "package": "clipsync-transport",
+          "target": "test:tls_policy",
+          "test": "private_ca_wss_trust_preserves_hostname_and_issuer_checks",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Private-CA HTTPS/WSS tests check trusted issuer success, wrong hostname and unrelated issuer rejection in isolated child processes. Omitting the configured roots (the historical failing trust behavior) fails both positive fixtures; no system trust store is modified."
+    },
+    {
+      "id": "F10",
+      "kind": "Runtime",
+      "fixes": [
+        "e9e55af"
+      ],
+      "description": "macOS system HTTP proxy configuration was ignored",
+      "checks": [],
+      "notes": "No proxy integration fixture."
+    },
+    {
+      "id": "F11",
+      "kind": "Runtime",
+      "fixes": [
+        "e9e55af"
+      ],
+      "description": "Error formatting omitted underlying network/TLS source-chain details",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/error.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "error::tests::format_error_includes_source_chain",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Added in the fix; nested error-chain text is asserted."
+    },
+    {
+      "id": "F12",
+      "kind": "Runtime",
+      "fixes": [
+        "6bc13cd"
+      ],
+      "description": "Routine launchctl unload/replacement commands polluted pairing output",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-daemon/tests/service_regressions.rs",
+          "package": "clipsync-daemon",
+          "target": "test:service_regressions",
+          "test": "successful_service_install_does_not_leak_launchctl_output",
+          "platforms": [
+            "macos"
+          ]
+        }
+      ],
+      "notes": "Generated service behavior is exercised with isolated process fixtures; historical fix-hunk reversal reproduces the defect."
+    },
+    {
+      "id": "F13",
+      "kind": "Runtime",
+      "fixes": [
+        "75194ed"
+      ],
+      "description": "Replacing a macOS LaunchAgent left it disabled at the next login",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-daemon/tests/service_regressions.rs",
+          "package": "clipsync-daemon",
+          "target": "test:service_regressions",
+          "test": "replacing_launch_agent_leaves_it_enabled_for_the_next_login",
+          "platforms": [
+            "macos"
+          ]
+        }
+      ],
+      "notes": "Generated service behavior is exercised with isolated process fixtures; historical fix-hunk reversal reproduces the defect."
+    },
+    {
+      "id": "F14",
+      "kind": "Runtime",
+      "fixes": [
+        "75194ed"
+      ],
+      "description": "Service executable retained a version-specific Homebrew Cellar path",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-daemon/src/service.rs",
+          "package": "clipsync-daemon",
+          "target": "lib:clipsync_daemon",
+          "test": "service::tests::stable_exe_rewrites_cellar_when_prefix_bin_exists",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Added with fix; asserts stable prefix executable."
+    },
+    {
+      "id": "F15",
+      "kind": "Runtime",
+      "fixes": [
+        "75194ed"
+      ],
+      "description": "Background service lost HOME/PATH/custom home/private-CA environment",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-daemon/tests/service_regressions.rs",
+          "package": "clipsync-daemon",
+          "target": "test:service_regressions",
+          "test": "launchd_install_preserves_complete_runtime_environment",
+          "platforms": [
+            "macos"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-daemon/tests/service_regressions.rs",
+          "package": "clipsync-daemon",
+          "target": "test:service_regressions",
+          "test": "systemd_install_preserves_complete_runtime_environment",
+          "platforms": [
+            "linux"
+          ]
+        }
+      ],
+      "notes": "Platform-specific tests verify the complete environment emitted by actual service installation."
+    },
+    {
+      "id": "F16",
+      "kind": "Runtime",
+      "fixes": [
+        "75194ed"
+      ],
+      "description": "Linux daemon was not restarted after a successful unexpected exit",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-daemon/tests/service_regressions.rs",
+          "package": "clipsync-daemon",
+          "target": "test:service_regressions",
+          "test": "systemd_install_restarts_the_daemon_after_successful_exit",
+          "platforms": [
+            "linux"
+          ]
+        }
+      ],
+      "notes": "Generated service behavior is exercised with isolated process fixtures; historical fix-hunk reversal reproduces the defect."
+    },
+    {
+      "id": "F17",
+      "kind": "Runtime",
+      "fixes": [
+        "559f660"
+      ],
+      "description": "Linux background service omitted graphical/session-bus environment",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-daemon/tests/service_regressions.rs",
+          "package": "clipsync-daemon",
+          "target": "test:service_regressions",
+          "test": "systemd_install_passes_the_graphical_session_to_the_daemon",
+          "platforms": [
+            "linux"
+          ]
+        }
+      ],
+      "notes": "Generated service behavior is exercised with isolated process fixtures; historical fix-hunk reversal reproduces the defect."
+    },
+    {
+      "id": "F18",
+      "kind": "Runtime",
+      "fixes": [
+        "559f660"
+      ],
+      "description": "systemd environment values were emitted without required quoting",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-daemon/src/service.rs",
+          "package": "clipsync-daemon",
+          "target": "lib:clipsync_daemon",
+          "test": "service::tests::platform_systemd_env_quotes_session_bus",
+          "platforms": [
+            "linux"
+          ]
+        }
+      ],
+      "notes": "Test added later by40b39fb asserts exact quoted Environment line."
+    },
+    {
+      "id": "F19",
+      "kind": "Runtime",
+      "fixes": [
+        "f1a1acd"
+      ],
+      "description": "macOS image clipboard lacked TIFF representation needed by receiving applications",
+      "checks": [],
+      "notes": "New native TIFF compatibility/advertisement fixtures also pass with PNG-only writes because current AppKit synthesizes TIFF. No defensible historical regression is claimed."
+    },
+    {
+      "id": "F20",
+      "kind": "Runtime",
+      "fixes": [
+        "f1a1acd"
+      ],
+      "description": "Command clipboard file URIs failed to percent-encode special characters",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-clipboard/src/command.rs",
+          "package": "clipsync-clipboard",
+          "target": "lib:clipsync_clipboard",
+          "test": "command::regression_tests::command_file_clipboard_roundtrip_preserves_uri_special_characters",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        }
+      ],
+      "notes": "Command adapter subprocess fixtures assert real file/text output; historical fix-hunk reversal reproduces the defect."
+    },
+    {
+      "id": "F21",
+      "kind": "Runtime",
+      "fixes": [
+        "f1a1acd"
+      ],
+      "description": "Daemon began sync without consuming initial relay hello/queued peer state",
+      "checks": [],
+      "notes": "No run_session/initial queued-text/initial-peer-state regression; one-shot e2e tests are a different path."
+    },
+    {
+      "id": "F22",
+      "kind": "Runtime",
+      "fixes": [
+        "f1a1acd"
+      ],
+      "description": "Failed local clipboard writes were silently treated as successful receive notifications",
+      "checks": [],
+      "notes": "No failing ClipboardBackend fixture or notification assertion."
+    },
+    {
+      "id": "F23",
+      "kind": "Runtime",
+      "fixes": [
+        "5a4b01c"
+      ],
+      "description": "Sleep/wake clock jumps left a dead relay connection in place",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transport/src/lib.rs",
+          "package": "clipsync-transport",
+          "target": "lib:clipsync_transport",
+          "test": "tests::clock_jump_after_sleep_forces_reconnect",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Added in fix; thirty-second clock jump must reconnect."
+    },
+    {
+      "id": "F24",
+      "kind": "Runtime",
+      "fixes": [
+        "5a4b01c"
+      ],
+      "description": "A silent/stale socket was retained beyond heartbeat timeout",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transport/src/lib.rs",
+          "package": "clipsync-transport",
+          "target": "lib:clipsync_transport",
+          "test": "tests::stale_socket_forces_reconnect",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Added in fix; stale receive time with fresh watchdog must reconnect."
+    },
+    {
+      "id": "F25",
+      "kind": "Runtime",
+      "fixes": [
+        "5a4b01c"
+      ],
+      "description": "Initial reconnect backoff was unnecessarily multi-second",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transport/src/lib.rs",
+          "package": "clipsync-transport",
+          "target": "lib:clipsync_transport",
+          "test": "tests::first_backoff_is_subsecond",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Added in fix; first delay is constrained below one second."
+    },
+    {
+      "id": "F26",
+      "kind": "Runtime",
+      "fixes": [
+        "5a4b01c"
+      ],
+      "description": "Send failures did not end the active sync session to reconnect",
+      "checks": [],
+      "notes": "No injected send-failure/run_session regression; timer helper tests cannot establish this behavior."
+    },
+    {
+      "id": "F27",
+      "kind": "Runtime",
+      "fixes": [
+        "b472108"
+      ],
+      "description": "Windows background child inherited captured stdout and blocked the creator",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/tests/background_create.rs",
+          "package": "clipsync-cli",
+          "target": "test:background_create",
+          "test": "room_create_background_returns_then_pairs",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Captured Command.output plus elapsed<10s assertion targets the handle-inheritance failure; CI later enabled Windows execution."
+    },
+    {
+      "id": "F28",
+      "kind": "Runtime",
+      "fixes": [
+        "22d3e56"
+      ],
+      "description": "Cellar executable normalization missed Windows backslash paths",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-daemon/src/service.rs",
+          "package": "clipsync-daemon",
+          "target": "lib:clipsync_daemon",
+          "test": "service::tests::stable_exe_rewrites_cellar_when_prefix_bin_exists",
+          "platforms": [
+            "windows"
+          ]
+        }
+      ],
+      "notes": "On Windows the fixture PathBuf renders with backslashes; later three-platform CI applies it to that target. Same test covers a second distinct platform defect, not extra test count."
+    },
+    {
+      "id": "F29",
+      "kind": "Runtime",
+      "fixes": [
+        "9c837f1"
+      ],
+      "description": "Linux non-file clipboard content caused file-URI errors instead of text fallback",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-clipboard/src/command.rs",
+          "package": "clipsync-clipboard",
+          "target": "lib:clipsync_clipboard",
+          "test": "command::regression_tests::misleading_file_mime_falls_back_to_actual_text",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-clipboard/src/command.rs",
+          "package": "clipsync-clipboard",
+          "target": "lib:clipsync_clipboard",
+          "test": "command::regression_tests::vanished_file_uri_falls_back_to_actual_text",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        }
+      ],
+      "notes": "Command adapter subprocess fixtures assert real file/text output; historical fix-hunk reversal reproduces the defect."
+    },
+    {
+      "id": "F30",
+      "kind": "Runtime",
+      "fixes": [
+        "61bbfcc"
+      ],
+      "description": "Short runtime stalls were mistaken for sleep and forced reconnects",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transport/src/lib.rs",
+          "package": "clipsync-transport",
+          "target": "lib:clipsync_transport",
+          "test": "tests::stability_short_stall_is_not_sleep",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Added in fix; three-second stall must not reconnect."
+    },
+    {
+      "id": "F31",
+      "kind": "Runtime",
+      "fixes": [
+        "61bbfcc"
+      ],
+      "description": "A long healthy session did not reset reconnection failure streak",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transport/src/lib.rs",
+          "package": "clipsync-transport",
+          "target": "lib:clipsync_transport",
+          "test": "tests::stability_long_session_resets_backoff",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transport/src/lib.rs",
+          "package": "clipsync-transport",
+          "target": "lib:clipsync_transport",
+          "test": "tests::stability_backoff_stays_bounded",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Added in fix; uptime reset and bounded repeated failures are asserted."
+    },
+    {
+      "id": "F32",
+      "kind": "Runtime",
+      "fixes": [
+        "61bbfcc"
+      ],
+      "description": "Incomplete incoming transfers were retained beyond their lifetime",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/src/staging.rs",
+          "package": "clipsync-transfer",
+          "target": "lib:clipsync_transfer",
+          "test": "staging::tests::stability_idle_transfers_are_pruned",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Added in fix; expired transfer removed and map emptied."
+    },
+    {
+      "id": "F33",
+      "kind": "Runtime",
+      "fixes": [
+        "61bbfcc"
+      ],
+      "description": "Concurrent unfinished transfer count could grow without a fixed bound",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/tests/regressions.rs",
+          "package": "clipsync-transfer",
+          "target": "test:regressions",
+          "test": "regression_f33_fresh_transfers_evict_oldest_and_preserve_newest_data",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Focused behavior assertions; historical RED/GREEN evidence retained under coverage/regression-transfer/. Multiple cases still count as one distinct defect."
+    },
+    {
+      "id": "F34",
+      "kind": "Runtime",
+      "fixes": [
+        "fc64071"
+      ],
+      "description": "Image decoding had no explicit memory allocation ceiling",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-clipboard/src/item.rs",
+          "package": "clipsync-clipboard",
+          "target": "lib:clipsync_clipboard",
+          "test": "item::allocation_regression_tests::compressed_image_cannot_allocate_beyond_the_decode_budget",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "A valid compressed 36 MiB decoded PNG exceeds the 32 MiB allocation budget; unrestricted positive decode validates the input."
+    },
+    {
+      "id": "F35",
+      "kind": "Runtime",
+      "fixes": [
+        "fc64071"
+      ],
+      "description": "Peer-provided transfer IDs could escape the inbox path",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/src/staging.rs",
+          "package": "clipsync-transfer",
+          "target": "lib:clipsync_transfer",
+          "test": "staging::tests::transfer_id_cannot_escape_inbox",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/src/sanitize.rs",
+          "package": "clipsync-transfer",
+          "target": "lib:clipsync_transfer",
+          "test": "sanitize::tests::transfer_id_must_be_ulid",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Added in fix; ../escape rejected and outside output must not exist."
+    },
+    {
+      "id": "F36",
+      "kind": "Runtime",
+      "fixes": [
+        "fc64071"
+      ],
+      "description": "File names accepted Windows reserved/device/alternate-stream and trailing-dot forms",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/src/sanitize.rs",
+          "package": "clipsync-transfer",
+          "target": "lib:clipsync_transfer",
+          "test": "sanitize::tests::rejects_traversal",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Fix extends existing test with secret.txt:ads,CON,aux.txt,file.; one filename validation defect, not one bug per string."
+    },
+    {
+      "id": "F37",
+      "kind": "Runtime",
+      "fixes": [
+        "fc64071"
+      ],
+      "description": "Duplicate names in a received file manifest could overwrite each other",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/tests/regressions.rs",
+          "package": "clipsync-transfer",
+          "target": "test:regressions",
+          "test": "regression_f37_duplicate_names_preserve_the_previous_commit",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Focused behavior assertions; historical RED/GREEN evidence retained under coverage/regression-transfer/. Multiple cases still count as one distinct defect."
+    },
+    {
+      "id": "F38",
+      "kind": "Runtime",
+      "fixes": [
+        "fc64071"
+      ],
+      "description": "Incoming chunks could exceed allowed count/size/cumulative transfer memory",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/tests/regressions.rs",
+          "package": "clipsync-transfer",
+          "target": "test:regressions",
+          "test": "regression_f38_chunk_count_above_limit_is_rejected_and_poisoned",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/tests/regressions.rs",
+          "package": "clipsync-transfer",
+          "target": "test:regressions",
+          "test": "regression_f38_oversized_chunk_cannot_be_assembled",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/tests/regressions.rs",
+          "package": "clipsync-transfer",
+          "target": "test:regressions",
+          "test": "regression_f38_cumulative_size_rejects_one_byte_over_limit",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Focused behavior assertions; historical RED/GREEN evidence retained under coverage/regression-transfer/. Multiple cases still count as one distinct defect."
+    },
+    {
+      "id": "F39",
+      "kind": "Runtime",
+      "fixes": [
+        "fc64071"
+      ],
+      "description": "File commit accepted an excessive manifest file count or total payload",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/tests/regressions.rs",
+          "package": "clipsync-transfer",
+          "target": "test:regressions",
+          "test": "regression_f39_excessive_file_count_leaves_no_output",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/tests/regressions.rs",
+          "package": "clipsync-transfer",
+          "target": "test:regressions",
+          "test": "regression_f39_excessive_payload_leaves_no_output",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Focused behavior assertions; historical RED/GREEN evidence retained under coverage/regression-transfer/. Multiple cases still count as one distinct defect."
+    },
+    {
+      "id": "F40",
+      "kind": "Runtime",
+      "fixes": [
+        "399c845"
+      ],
+      "description": "Finder file paste did not reliably target the folder with focus",
+      "checks": [],
+      "notes": "desktop_paste_lists_every_absolute_path verifies path/file data but does not perform Finder focused-folder paste or assert its destination; conservativelyNo."
+    },
+    {
+      "id": "F41",
+      "kind": "Runtime",
+      "fixes": [
+        "399c845"
+      ],
+      "description": "Filename-list-only macOS clipboard copies were not read as files",
+      "checks": [],
+      "notes": "A new filename-list-only native fixture remains useful characterization, but current AppKit synthesizes modern URLs even for the historical read path. It is not credited as a reproduced regression."
+    },
+    {
+      "id": "F42",
+      "kind": "Runtime",
+      "fixes": [
+        "399c845"
+      ],
+      "description": "Images could not be pasted as files on Finder/Desktop",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-clipboard/src/macos.rs",
+          "package": "clipsync-clipboard",
+          "target": "lib:clipsync_clipboard",
+          "test": "macos::tests::desktop_image_paste_is_a_file_and_reads_back_as_the_same_image",
+          "platforms": [
+            "macos"
+          ]
+        }
+      ],
+      "notes": "Added in fix; requires staged file list and original image readback. Sidecar echo prevention is part of this new mechanism, not an extra historical bug."
+    },
+    {
+      "id": "F43",
+      "kind": "Runtime",
+      "fixes": [
+        "399c845"
+      ],
+      "description": "JPEG bytes were exposed through a PNG pasteboard representation without transcoding",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-clipboard/src/macos.rs",
+          "package": "clipsync-clipboard",
+          "target": "lib:clipsync_clipboard",
+          "test": "macos::tests::desktop_jpeg_paste_keeps_original_bytes",
+          "platforms": [
+            "macos"
+          ]
+        }
+      ],
+      "notes": "Added in fix; requires JPEG sidecar preservation and an actual different PNG representation."
+    },
+    {
+      "id": "F44",
+      "kind": "Runtime",
+      "fixes": [
+        "8b6c6ce"
+      ],
+      "description": "Both pairing participants reused the same GCM key and nonce",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::device_bind_nonces_separate_roles_and_legacy_indices",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::device_bind_new_a_and_legacy_b_interoperate",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::device_bind_legacy_a_and_new_b_interoperate",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/e2e.rs",
+          "package": "clipsync-relay",
+          "target": "test:e2e",
+          "test": "pairing_device_bind_nonces_are_unique",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Added in fix; separate sender domains/legacy interoperability and observed live exchange."
+    },
+    {
+      "id": "F45",
+      "kind": "Runtime",
+      "fixes": [
+        "ce89c9b"
+      ],
+      "description": "Compose deployed a public shared relay token-signing key",
+      "checks": [],
+      "notes": "Env default tests do not load Docker Compose. The old unset-env path already generated fresh keys; restoring the Compose shared value would not fail them. No Compose-specific regression assertion."
+    },
+    {
+      "id": "F46",
+      "kind": "Runtime",
+      "fixes": [
+        "ce89c9b"
+      ],
+      "description": "Explicit empty/whitespace/short relay token secrets were accepted as signing keys",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/config_env.rs",
+          "package": "clipsync-relay",
+          "target": "test:config_env",
+          "test": "short_explicit_token_secrets_are_rejected_without_disclosing_them",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/config_env.rs",
+          "package": "clipsync-relay",
+          "target": "test:config_env",
+          "test": "minimum_length_token_secret_is_preserved",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Added in fix; invalid key lengths rejected without disclosure. Input examples are one validation defect."
+    },
+    {
+      "id": "F47",
+      "kind": "Runtime-PR16",
+      "fixes": [
+        "d0501a7"
+      ],
+      "description": "Webhook DNS resolution/rebinding could bypass the literal-IP SSRF policy",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/webhook.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "webhook::tests::rejects_private_or_mixed_dns_answers",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/webhook.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "webhook::tests::rejects_a_hostname_resolving_to_loopback",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/webhook.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "webhook::tests::client_pins_addresses_preserves_host_and_does_not_follow_redirects",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Includes pinned connect destinations and no implicit proxy/redirect bypass as one mediation defect."
+    },
+    {
+      "id": "F48",
+      "kind": "Runtime-PR16",
+      "fixes": [
+        "d0501a7"
+      ],
+      "description": "Non-public IPv4/IPv6 literals outside the old limited denylist were accepted by webhooks",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/webhook.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "webhook::tests::blocks_non_public_literals",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Distinct literal-address validation path; parameterized special-range fixture."
+    },
+    {
+      "id": "F49",
+      "kind": "Runtime-PR16",
+      "fixes": [
+        "d0501a7"
+      ],
+      "description": "Device bearer credentials were serialized together with ordinary room state",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/tests/credentials.rs",
+          "package": "clipsync-storage",
+          "target": "test:credentials",
+          "test": "device_tokens_are_separate_and_replaceable",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/tests/credentials.rs",
+          "package": "clipsync-storage",
+          "target": "test:credentials",
+          "test": "legacy_state_migrates_without_losing_room_or_token",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Replacement, absence from metadata, legacy migration, fail-closed missing/truncated files covered. Migration safeguards not counted as extra historical defects."
+    },
+    {
+      "id": "F50",
+      "kind": "Runtime-PR16",
+      "fixes": [
+        "d0501a7"
+      ],
+      "description": "Webhook authentication secret was serialized in ordinary configuration",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/tests/credentials.rs",
+          "package": "clipsync-storage",
+          "target": "test:credentials",
+          "test": "legacy_webhook_secret_migrates_and_is_removed_when_disabled",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/tests/credentials.rs",
+          "package": "clipsync-storage",
+          "target": "test:credentials",
+          "test": "failed_migration_preserves_legacy_secret",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Tests actual separation and preserve legacy config after failed migration."
+    },
+    {
+      "id": "F51",
+      "kind": "Runtime-PR16",
+      "fixes": [
+        "d0501a7"
+      ],
+      "description": "Secret files were created/written before private permissions were applied",
+      "checks": [],
+      "notes": "credentials_are_private asserts final0600, which old code also achieved; it does not observe the creation/write permission window."
+    },
+    {
+      "id": "F52",
+      "kind": "Runtime-PR16",
+      "fixes": [
+        "d0501a7"
+      ],
+      "description": "Overwriting a secret in place could destroy the previous credential on a failed/partial write",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/tests/credentials.rs",
+          "package": "clipsync-storage",
+          "target": "test:credentials",
+          "test": "partial_secret_write_does_not_destroy_the_previous_credential",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        }
+      ],
+      "notes": "Unix injected partial-write failure preserves the prior real credential."
+    },
+    {
+      "id": "F53",
+      "kind": "Runtime-PR16",
+      "fixes": [
+        "d0501a7"
+      ],
+      "description": "App.init silently replaced unreadable/invalid configuration with defaults",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/tests/config_migration.rs",
+          "package": "clipsync-core",
+          "target": "test:config_migration",
+          "test": "init_preserves_legacy_config_when_secret_migration_fails",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/tests/config_migration.rs",
+          "package": "clipsync-core",
+          "target": "test:config_migration",
+          "test": "init_preserves_invalid_configuration_instead_of_resetting_it",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "One destructive fallback root cause, tested for invalidTOML and failed migration."
+    },
+    {
+      "id": "F54",
+      "kind": "Build/CI",
+      "fixes": [
+        "9119714"
+      ],
+      "description": "Linux release depended on a DBus keyring unavailable on target systems",
+      "checks": [
+        {
+          "kind": "workflow",
+          "source": ".github/workflows/release.yml",
+          "job": "smoke",
+          "step": "Run verified Linux binary without desktop or DBus libraries",
+          "commands": [
+            {
+              "prefix": [
+                "docker",
+                "run"
+              ],
+              "required": [
+                "--network",
+                "none",
+                "--read-only",
+                "--entrypoint",
+                "/clipsync",
+                "gcr.io/distroless/cc-debian12:latest@sha256:e5d81ddde149641e2a9ba55be4545bc125c67de07508b03ba4c22e6eb0ded5aa",
+                "--version"
+              ]
+            }
+          ],
+          "platforms": [
+            "linux"
+          ],
+          "execution": "release-before-publish"
+        }
+      ],
+      "notes": "Added release-only automated no-DBus runtime check; release smoke must precede publication. Registration is not a claim it ran in ordinary PR CI."
+    },
+    {
+      "id": "F55",
+      "kind": "Build/CI",
+      "fixes": [
+        "23d7e01"
+      ],
+      "description": "Workspace lockfile package version lagged the0.1.1 manifest version",
+      "checks": [],
+      "notes": "Existing --locked build verifies general consistency but no new dedicated regression was added for this fix."
+    },
+    {
+      "id": "F56",
+      "kind": "Build/CI",
+      "fixes": [
+        "a667731"
+      ],
+      "description": "Windows CRLF checkout caused rustfmt CI failures",
+      "checks": [],
+      "notes": "Line-ending configuration correction; no new focused regression beyond existing fmt command."
+    },
+    {
+      "id": "F57",
+      "kind": "Build/CI",
+      "fixes": [
+        "5750bf6"
+      ],
+      "description": "Desktop lock entry retained an unused dependency and failed locked consistency",
+      "checks": [],
+      "notes": "No new focused regression; ordinary locked build already existed."
+    },
+    {
+      "id": "F58",
+      "kind": "Build/CI",
+      "fixes": [
+        "d1660a8"
+      ],
+      "description": "Checked-in winget portable installer structure/schema did not match accepted submission",
+      "checks": [],
+      "notes": "No automated winget schema-validation test; PowerShell parser check only covers syntax."
+    },
+    {
+      "id": "F59",
+      "kind": "Build/CI",
+      "fixes": [
+        "d1660a8"
+      ],
+      "description": "winget package omitted required VC++ runtime dependency",
+      "checks": [],
+      "notes": "No fresh-Windows/no-runtime install regression test."
+    },
+    {
+      "id": "F60",
+      "kind": "Build/CI",
+      "fixes": [
+        "cefdc04"
+      ],
+      "description": "File-format test attempted more files in one transfer than FILE_MAX_COUNT",
+      "checks": [],
+      "notes": "Batching fixes test data; no separate automated test of batching boundary was added. ConservativelyNo for test-harness bug."
+    },
+    {
+      "id": "F61",
+      "kind": "Build/CI",
+      "fixes": [
+        "b28a3fd"
+      ],
+      "description": "Declared Rust1.80 minimum was lower than dependency requirements",
+      "checks": [],
+      "notes": "New1.88 job validates supported compiler, but does not assert manifest minimum agrees with it. ConservativelyNo for inaccurate declaration."
+    },
+    {
+      "id": "F62",
+      "kind": "Build/CI",
+      "fixes": [
+        "b28a3fd"
+      ],
+      "description": "Fuzz invocation could silently regenerate/use a stale lockfile",
+      "checks": [
+        {
+          "kind": "workflow",
+          "source": ".github/workflows/security.yml",
+          "job": "fuzz",
+          "step": "Fuzz protocol decoders",
+          "commands": [
+            {
+              "prefix": [
+                "cargo",
+                "+nightly",
+                "metadata"
+              ],
+              "required": [
+                "--locked",
+                "--manifest-path",
+                "fuzz/Cargo.toml"
+              ]
+            }
+          ],
+          "platforms": [
+            "linux"
+          ],
+          "execution": "routine-ci"
+        }
+      ],
+      "notes": "Registration checks the job/step and required metadata command; execution belongs to the security CI job, not this checker."
+    },
+    {
+      "id": "F63",
+      "kind": "Build/CI",
+      "fixes": [
+        "682f937"
+      ],
+      "description": "Release builds selected retired macos-14 runners",
+      "checks": [],
+      "notes": "No newly added assertion against retired runners; successful workflow is repair verification, not an added regression test."
+    },
+    {
+      "id": "F64",
+      "kind": "Build/CI",
+      "fixes": [
+        "682f937"
+      ],
+      "description": "Attestation filename suffix was not recognized as standard Sigstore JSON by downstream tooling",
+      "checks": [],
+      "notes": "No suffix/asset recognition regression test; signature verification accepts an explicit filename independent of suffix."
+    },
+    {
+      "id": "F65",
+      "kind": "Build/CI",
+      "fixes": [
+        "000d515"
+      ],
+      "description": "Format-matrix sender raced receiver registration and intermittently lost online-only transfers",
+      "checks": [],
+      "notes": "Replaced sleep with metrics readiness in existing tests; no separate readiness helper failure/race regression added. ConservativelyNo."
+    },
+    {
+      "id": "F66",
+      "kind": "Build/CI",
+      "fixes": [
+        "a3c92f5"
+      ],
+      "description": "Workflow default tokens unnecessarily had write privileges outside publishing",
+      "checks": [],
+      "notes": "CodeQL/Scorecard monitoring is static policy analysis, not an added focused regression test fixture."
+    },
+    {
+      "id": "F67",
+      "kind": "Build/CI",
+      "fixes": [
+        "a3c92f5"
+      ],
+      "description": "Build actions/container references were mutable rather than content pinned",
+      "checks": [],
+      "notes": "Supply-chain correction included here for conservative completeness; no new focused pin-policy regression fixture."
+    },
+    {
+      "id": "F68",
+      "kind": "Build/CI-PR16",
+      "fixes": [
+        "d0501a7"
+      ],
+      "description": "Release packaging stripped symbols even when debug preservation was requested",
+      "checks": [
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_package_release.py",
+          "test": "test_package_release.PackageReleaseTests.test_standard_no_strip_setting_survives_the_archive",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        },
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_package_release.py",
+          "test": "test_package_release.PackageReleaseTests.test_requested_debug_information_survives_the_archive",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        },
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_package_release.py",
+          "test": "test_package_release.PackageReleaseTests.test_explicit_debug_preservation_survives_the_archive",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        }
+      ],
+      "notes": "Packaging tests inspect archived executable debug bytes and checksums, not source text."
+    },
+    {
+      "id": "F69",
+      "kind": "Build/CI-PR16",
+      "fixes": [
+        "8d1735a"
+      ],
+      "description": "Coverage branch instrumentation accidentally ran with stable rather than selected nightly",
+      "checks": [],
+      "notes": "Toolchain env fix; no dedicated toolchain-selection assertion added."
+    },
+    {
+      "id": "F70",
+      "kind": "Build/CI-PR16",
+      "fixes": [
+        "8d1735a"
+      ],
+      "description": "Repeatability container git checkout failed safe-directory ownership checks",
+      "checks": [],
+      "notes": "Container config fix; no separate ownership regression fixture."
+    },
+    {
+      "id": "F71",
+      "kind": "Build/CI-PR16",
+      "fixes": [
+        "a61aed0"
+      ],
+      "description": "Cross-target packaging failed on host strip errors after stricter packaging change",
+      "checks": [
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_package_release.py",
+          "test": "test_package_release.PackageReleaseTests.test_cross_target_archive_survives_an_unsupported_host_strip",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        }
+      ],
+      "notes": "An unsupported strip executable fails; the real packaging script must still produce the expected archive."
+    },
+    {
+      "id": "F72",
+      "kind": "Build/CI-PR16",
+      "fixes": [
+        "3faac58"
+      ],
+      "description": "Source notice checker skipped extensionless PKGBUILD/pre-commit sources",
+      "checks": [],
+      "notes": "Checker enumeration fixed and notices added; no checker self-test fixture for an unannotated extensionless file."
+    },
+    {
+      "id": "F73",
+      "kind": "Dependency",
+      "fixes": [
+        "1ab6590"
+      ],
+      "description": "RUSTSEC-2026-0194: quick-xml quadratic duplicate-attribute checking",
+      "checks": [],
+      "notes": "No added project-owned reproducer/regression. Routine cargo-audit monitoring and upstream fixes alone are not counted as project test additions."
+    },
+    {
+      "id": "F74",
+      "kind": "Dependency",
+      "fixes": [
+        "1ab6590"
+      ],
+      "description": "RUSTSEC-2026-0195: quick-xml namespace declaration allocation DoS",
+      "checks": [],
+      "notes": "No added project-owned reproducer/regression. Routine cargo-audit monitoring and upstream fixes alone are not counted as project test additions."
+    },
+    {
+      "id": "F75",
+      "kind": "Dependency",
+      "fixes": [
+        "1ab6590"
+      ],
+      "description": "RUSTSEC-2026-0346: rustls sessionDebug leaked TLS secrets",
+      "checks": [],
+      "notes": "No added project-owned reproducer/regression. Routine cargo-audit monitoring and upstream fixes alone are not counted as project test additions."
+    },
+    {
+      "id": "F76",
+      "kind": "Dependency",
+      "fixes": [
+        "1ab6590"
+      ],
+      "description": "RUSTSEC-2026-0347: rustls ECH rejection leaked buffered application data",
+      "checks": [],
+      "notes": "No added project-owned reproducer/regression. Routine cargo-audit monitoring and upstream fixes alone are not counted as project test additions."
+    },
+    {
+      "id": "F77",
+      "kind": "Dependency",
+      "fixes": [
+        "1ab6590"
+      ],
+      "description": "RUSTSEC-2026-0348: rustls Brotli certificate decompression allocated excessive memory",
+      "checks": [],
+      "notes": "No added project-owned reproducer/regression. Routine cargo-audit monitoring and upstream fixes alone are not counted as project test additions."
+    },
+    {
+      "id": "F78",
+      "kind": "Dependency",
+      "fixes": [
+        "1ab6590"
+      ],
+      "description": "RUSTSEC-2026-0349: rustls unauthenticated ServerHello poisoned later key exchange",
+      "checks": [],
+      "notes": "No added project-owned reproducer/regression. Routine cargo-audit monitoring and upstream fixes alone are not counted as project test additions."
+    },
+    {
+      "id": "F79",
+      "kind": "Dependency",
+      "fixes": [
+        "1ab6590"
+      ],
+      "description": "CVE-2026-111943: emSign distrust bypass across rustls-webpki and both root-list crates",
+      "checks": [],
+      "notes": "No added project-owned reproducer/regression. Routine cargo-audit monitoring and upstream fixes alone are not counted as project test additions."
+    },
+    {
+      "id": "F80",
+      "kind": "Dependency",
+      "fixes": [
+        "1ab6590"
+      ],
+      "description": "RUSTSEC-2026-0386: Tokio AsyncFd constructors violated I/O safety",
+      "checks": [],
+      "notes": "No added project-owned reproducer/regression. Routine cargo-audit monitoring and upstream fixes alone are not counted as project test additions."
+    },
+    {
+      "id": "F81",
+      "kind": "Dependency",
+      "fixes": [
+        "1ab6590"
+      ],
+      "description": "RUSTSEC-2026-0486: rustix xattr zero-length buffer marked unwritten bytes initialized",
+      "checks": [],
+      "notes": "No added project-owned reproducer/regression. Routine cargo-audit monitoring and upstream fixes alone are not counted as project test additions."
+    },
+    {
+      "id": "F82",
+      "kind": "Dependency",
+      "fixes": [
+        "63f23ed"
+      ],
+      "description": "RUSTSEC-2026-0523: quinn-proto MAX_STREAM_DATA bypassed stream limits",
+      "checks": [],
+      "notes": "No added project-owned reproducer/regression. Routine cargo-audit monitoring and upstream fixes alone are not counted as project test additions."
+    },
+    {
+      "id": "F83",
+      "kind": "Dependency",
+      "fixes": [
+        "63f23ed"
+      ],
+      "description": "RUSTSEC-2026-0524: quinn-proto long Retry token caused panic/exhaustion",
+      "checks": [],
+      "notes": "No added project-owned reproducer/regression. Routine cargo-audit monitoring and upstream fixes alone are not counted as project test additions."
+    },
+    {
+      "id": "F84",
+      "kind": "Dependency",
+      "fixes": [
+        "63f23ed"
+      ],
+      "description": "RUSTSEC-2026-0538: quinn-udp receive loop could spin after truncated datagram",
+      "checks": [],
+      "notes": "No added project-owned reproducer/regression. Routine cargo-audit monitoring and upstream fixes alone are not counted as project test additions."
+    }
+  ]
+}

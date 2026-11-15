@@ -1,5 +1,6 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 //! Chunked transfer, path sanitization, staging, and BLAKE3 commit.
 
 mod sanitize;
@@ -112,6 +113,7 @@ pub fn aad_bytes(transfer_id: &TransferId, chunk_index: u32) -> Vec<u8> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use clipsync_crypto::blake3_hex as hash_hex;

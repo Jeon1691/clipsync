@@ -28,3 +28,6 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uniffi = { workspace = true, features = ["cli"] }
+
+[lints]
+workspace = true

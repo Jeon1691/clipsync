@@ -32,3 +32,6 @@ tracing.workspace = true
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSArray", "NSData", "NSDictionary", "NSValue", "NSString", "NSURL"] }
 objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSImage"] }
+
+[lints]
+workspace = true

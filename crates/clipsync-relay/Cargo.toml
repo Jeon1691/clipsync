@@ -54,3 +54,6 @@ clipsync-protocol.workspace = true
 clipsync-storage.workspace = true
 clipsync-transfer.workspace = true
 image.workspace = true
+
+[lints]
+workspace = true

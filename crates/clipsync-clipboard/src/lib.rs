@@ -1,5 +1,6 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 //! OS clipboard adapters with capability detection and fallbacks.
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

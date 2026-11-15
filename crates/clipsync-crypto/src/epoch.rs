@@ -79,6 +79,7 @@ pub fn initial_epoch_key(room_root_key: &[u8; KEY_LEN]) -> Result<[u8; KEY_LEN]>
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use rand::rngs::OsRng;

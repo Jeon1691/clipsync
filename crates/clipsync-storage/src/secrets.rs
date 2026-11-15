@@ -131,3 +131,50 @@ fn delete_keyring(user: &str) -> std::result::Result<(), String> {
 fn delete_keyring(_user: &str) -> std::result::Result<(), String> {
     Ok(())
 }
+
+#[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod regression_tests {
+    use super::*;
+
+    #[test]
+    fn keyring_only_identity_is_cached_for_file_based_background_clients() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(root.path().to_path_buf());
+        paths.ensure().unwrap();
+        let store = SecretStore::new(paths.clone());
+        let identity = DeviceIdentity::generate();
+        store.save_identity(&identity).unwrap();
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = delete_keyring(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(store.account("identity"));
+        std::fs::remove_file(paths.identity_file()).unwrap();
+        let loaded = store
+            .load_identity()
+            .expect("recover the fixture's identity from the native keyring");
+        assert_eq!(loaded.device_id, identity.device_id);
+        assert!(
+            paths.identity_file().is_file(),
+            "background clients need the recovered file cache"
+        );
+        // A subsequent read must work even after the native entry is removed.
+        delete_keyring(&store.account("identity")).unwrap();
+        assert_eq!(store.load_identity().unwrap().device_id, identity.device_id);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(paths.identity_file())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+}

@@ -67,6 +67,8 @@ jobs:
             cat coverage/summary.txt
             echo '```'
             echo 'Full source report: download the coverage artifact and open html/index.html.'
+            echo 'Inline test-only modules/helpers are excluded from product metrics; all production workspace sources remain included.'
+            echo 'Historical-defect regression coverage is checked separately by the 50% ledger gate in ci.yml.'
             echo 'Silver target: 80% statement coverage. Gold targets: 90% statement and 80% branch coverage. These remain unmet until measured and reviewed; no files are excluded to improve the percentage.'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload LCOV, HTML, and line/branch summaries

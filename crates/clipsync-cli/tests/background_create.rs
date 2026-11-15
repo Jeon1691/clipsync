@@ -70,6 +70,59 @@ fn kill_pid(pid: u32) {
     let _ = pid;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn foreground_offer_is_flushed_before_a_peer_joins() {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let (relay, relay_task) = start_relay().await;
+    let home = TempDir::new().unwrap();
+    let mut child = tokio::process::Command::new(bin())
+        .args(["--json", "room", "create", "--foreground", "--no-auto-sync"])
+        .env("CLIPSYNC_HOME", home.path())
+        .env("CLIPSYNC_RELAY_URL", &relay)
+        .env("CLIPSYNC_NO_DAEMON", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(30), output.read_line(&mut line))
+        .await
+        .expect("foreground code must be visible without completing pairing")
+        .unwrap();
+    let offer: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(offer["event"], "pairing_code");
+    assert_eq!(offer["pairing_code"].as_str().unwrap().len(), 6);
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "pairing still waits for its peer"
+    );
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
+    relay_task.abort();
+}
+
+#[test]
+fn background_failure_preserves_the_child_relay_error() {
+    // Refuse connections without depending on an external host or its DNS.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let relay = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let home = TempDir::new().unwrap();
+    let output = clipsync(home.path(), &relay, &["room", "create", "--no-auto-sync"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&relay),
+        "child failure lost the affected relay: {stderr}"
+    );
+    assert!(!stderr.trim().ends_with("background pairing failed"));
+}
+
 #[cfg(unix)]
 fn libc_kill(pid: i32, sig: i32) -> i32 {
     extern "C" {

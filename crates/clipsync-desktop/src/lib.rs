@@ -1,5 +1,6 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 //! Desktop pairing and daemon control shared by the window.
 
 use clipsync_core::{begin_create_room, join_room, App};
@@ -75,6 +76,7 @@ pub async fn join_room_code(app: &App, code: &str) -> Result<String, String> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
