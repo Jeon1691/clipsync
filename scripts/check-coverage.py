@@ -10,6 +10,7 @@ Only test code is excluded by the measurement; product crates remain included.
 import argparse
 import json
 from pathlib import Path
+import posixpath
 import sys
 
 
@@ -42,13 +43,13 @@ def validate(report, packages, minimum=MINIMUM, minimum_branches=None):
     files = unit.get("files", [])
     if not isinstance(files, list) or not files:
         return ["report contains no product files"], {}
-    present, seen = set(), set()
+    present, seen, product_sources = set(), set(), set()
     sums = {name: [0, 0] for name in thresholds}
     for source in files:
         if not isinstance(source, dict) or not isinstance(source.get("filename"), str):
             errors.append("invalid source record")
             continue
-        name = source["filename"].replace("\\", "/")
+        name = posixpath.normpath(source["filename"].replace("\\", "/"))
         if name in seen:
             errors.append(f"duplicate source: {name}")
             continue
@@ -64,6 +65,11 @@ def validate(report, packages, minimum=MINIMUM, minimum_branches=None):
             if any(value[1] for value in counts.values()):
                 errors.append(f"test/non-product source included in product metrics: {name}")
             continue
+        logical_source = f"{package}/{relative}"
+        if logical_source in product_sources:
+            errors.append(f"duplicate production source across build roots: {logical_source}")
+            continue
+        product_sources.add(logical_source)
         if all(counts[key][1] > 0 for key in ["lines", "regions"]):
             present.add(package)
         for key, (covered, count) in counts.items():

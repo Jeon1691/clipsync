@@ -107,3 +107,25 @@ class ProductCoverageTests(unittest.TestCase):
     def test_invalid_thresholds_cannot_disable_the_gate(self):
         for minimum, branches in [(101, 80), (-1, 80), (90, -1), (90, 101), (True, 80)]:
             self.assertTrue(policy.validate(self.gold_report(), {"core"}, minimum, branches)[0])
+
+    def test_same_product_file_from_two_build_roots_is_not_counted_twice(self):
+        import copy
+        report = self.report()
+        duplicate = copy.deepcopy(report["data"][0]["files"][0])
+        duplicate["filename"] = "/old-build/crates/core/src/lib.rs"
+        report["data"][0]["files"].append(duplicate)
+        for metric in report["data"][0]["totals"].values():
+            metric["covered"] *= 2
+            metric["count"] *= 2
+        self.assertTrue(policy.validate(report, {"core"})[0])
+
+    def test_parent_path_alias_cannot_hide_counted_test_code_as_product(self):
+        report = self.report(lines=0, regions=0)
+        report["data"][0]["files"][0]["summary"] = {
+            key: {"covered": 0, "count": 1} for key in ["lines", "regions"]}
+        report["data"][0]["files"].append({
+            "filename": "/repo/crates/core/src/../tests/smoke.rs",
+            "summary": {key: {"covered": 99, "count": 99} for key in ["lines", "regions"]}})
+        report["data"][0]["totals"] = {
+            key: {"covered": 99, "count": 100} for key in ["lines", "regions"]}
+        self.assertTrue(policy.validate(report, {"core"})[0])
