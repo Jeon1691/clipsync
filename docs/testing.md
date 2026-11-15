@@ -152,3 +152,32 @@ clipboard and daemon paths. They do not establish complete unsafe-code, GUI,
 mobile bridge, race, or external-library coverage. Add
 targeted sanitizer/device tests for those boundaries before claiming broader
 dynamic-analysis coverage.
+
+## Higher-tier testing work
+
+The [regression audit](regression-audit.md) reviews the complete source history
+within the six-month window. Focused regression evidence covers 23/53
+project-authored runtime/security defects (43.40%); its broader conservative
+ledger covers 24/84 (28.57%). Neither supports the required 50% claim. The ledger
+names missing reproductions rather than treating a passing smoke check as
+coverage of every related bug.
+
+The hosted Linux [coverage run](https://github.com/Jeon1691/clipsync/actions/runs/43686133645)
+measured 3,489/5,897 lines (59.17%), 3,684/6,734 regions (54.71%) and 397/924
+branches (42.97%). These are separate OS/cfg-specific denominators, not a merged
+percentage with the macOS baseline. Both remain below the relevant thresholds.
+
+Useful next test areas are sustained two-peer daemon sessions and IPC, adapter
+selection and command failures, desktop pairing/error transitions, mobile
+callbacks and local service cleanup. The macOS baseline needs at least 1,450
+more existing lines covered to reach 80% lines, and roughly 1,902 more regions
+to reach 80% regions; line coverage alone is not the statement assertion. This
+requires substantive integration/platform testing, not excluding desktop/mobile
+code or adding assertions that merely repeat implementation details.
+
+Before the 0.1.17 candidate was released, local ASan/assertion-enabled campaigns
+completed 23,944,020 protocol executions and 2,747,280 AEAD executions in 601
+seconds each, with exit code 0 and no findings. Native ASan passed 12 tests.
+Candidate metadata, commands, tool versions, logs and reports were retained in
+`coverage/release-0.1.17/`; the public workflow artifacts independently retain
+routine hosted results.

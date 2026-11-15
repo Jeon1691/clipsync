@@ -28,6 +28,13 @@ public discussion and CI record; it does not itself establish independent
 approval of changes authored by the maintainer. Review requirements follow the
 [repository rules](https://github.com/Jeon1691/clipsync/rules).
 
+Commits entering `master` must be cryptographically signed and verified by
+GitHub. Register your public key as a **Signing Key** (authentication-only
+registration does not establish signature verification) and use a verified
+commit identity. See [signing and verification](docs/builds.md#source-tag-signatures);
+never submit private keys. A cryptographic signature is separate from a legal
+DCO sign-off.
+
 Contributions are made under the project's [MIT license](LICENSE-MIT).
 Project roles and decision-making are in [GOVERNANCE.md](GOVERNANCE.md).
 Follow the [code of conduct](CODE_OF_CONDUCT.md). See the

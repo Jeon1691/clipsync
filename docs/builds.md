@@ -52,23 +52,30 @@ static libraries twice in separate fresh source and target directories, retains
 environment/package versions and hashes, and fails on differing bytes. It shares
 downloaded registry sources, not compiled objects. This is a scoped Linux check;
 native packages are recorded rather than pinned, and it does not verify
-distributed archive metadata or all release platforms. Keep the badge criteria
-unmet until their full scope is demonstrated.
+distributed archive metadata or all release platforms. The first [successful run](https://github.com/Jeon1691/clipsync/actions/runs/43686133672)
+compared all six outputs byte-for-byte identical: CLI, desktop, relay, bindgen,
+mobile shared library and static library. This establishes project-controlled
+Linux repeatability (Silver). It does not yet establish Gold independent
+reconstruction: the native package set is recorded but not frozen and recreated
+from the instructions by a clean external environment.
 
 Release provenance and `Cargo.lock` establish origin and dependency integrity;
-they do not prove bit-for-bit repeatability. The current multi-platform release
-archives do not yet have a verified reproducible-build procedure. The compiler
-and hosted OS images move, archive timestamps vary, and native signing can add
-platform-specific metadata. Both Silver `build_repeatable` and Gold
-`build_reproducible` remain unmet until the produced deliverables are verified.
+they do not prove bit-for-bit repeatability. Current release archives do not yet have a verified independent
+reproducible-build procedure. Archive timestamps and native signing add further
+packaging considerations. Silver `build_repeatable` is supported by the Linux
+result above; Gold `build_reproducible` remains unmet pending a sufficiently
+specified and independently reconstructable build environment. The official
+criteria do not require every platform/archive to be verified before a scoped
+build claim, and this document does not invent that stronger requirement.
 
 For future verification, record the exact source commit, rustc/linker versions,
 target, container/SDK digest and dependency checksums. Set a fixed
 `SOURCE_DATE_EPOCH`, normalize absolute source paths with `--remap-path-prefix`,
 and normalize archive ordering, timestamps, ownership and compression. Build
 twice in fresh directories without reusing produced object files and compare
-hashes of every distributed artifact. Then have an independent party repeat the
-same procedure. Publish logs, hashes and any target-specific exceptions; a
+hashes of every distributed artifact. A fresh independently provisioned environment must be sufficiently specified
+to repeat the procedure; an outside participant can provide further corroboration.
+Publish logs, hashes and any target-specific exceptions; a
 successful cached rebuild alone is insufficient.
 
 ## Source-tag signatures
@@ -79,7 +86,9 @@ New security/important release tags must be SSH signed. The public key is
 The private key is held in the maintainer's 1Password signing setup, outside the
 public software distribution service. The repository contains only the public
 key. GitHub's Verified label depends on account key registration and is distinct
-from a valid local signature.
+from a valid local signature. On 2026-11-15 the existing public key was also
+registered as a GitHub **Signing Key** after owner reauthentication; current and
+earlier signed PR commits were confirmed `verified: true`, `reason: valid`.
 
 After independently establishing trust in that fingerprint/key, verify:
 
