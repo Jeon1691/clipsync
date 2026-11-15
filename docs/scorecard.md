@@ -25,25 +25,39 @@ remaining checks.
 
 ## Release authenticity
 
-The release workflow now generates a signed SLSA provenance attestation using
-GitHub OIDC and `actions/attest`, verifies the archive digest and workflow/tag
-identity, and publishes a matching `.sigstore.json` bundle. The signature is bound
-to the workflow that actually built the archive; no historical binary is
-retroactively described as built by this workflow. See
-[release verification](packaging.md) for consumer commands.
+The release workflow generates signed SLSA provenance using GitHub OIDC and
+`actions/attest`. It preserves the original `.sigstore.json` bundle and exports
+its actual DSSE envelope as `.intoto.jsonl` after `gh attestation verify`
+validates the archive, repository, release workflow, source ref/commit, and
+hosted-runner identity. The envelope's signed payload type, base64 payload, and
+signatures remain unchanged. Certificates and transparency evidence remain in
+the bundle. Consumers verify the original bundle and cross-check the export;
+see [release verification](packaging.md) for commands.
 
-Scorecard v5.6.0 recognizes `.sigstore.json` files as signatures and examines the
-latest five releases. Its current signature-only release credit is 8/10 per
-qualifying release, averaged over that window and rounded down. If all five
-currently unsigned releases are gradually replaced by signed releases, the
-Signed-Releases component would progress through **1, 3, 4, 6, 8**, assuming
-the same evaluator and a five-release window. This is a component estimate,
-not a promise of a particular overall score. The published score does not
-increase merely because the workflow change is merged.
+The build and Linux smoke jobs verify the evidence before executing binaries.
+Publication requires all supported mandatory targets and their sidecars, a
+source tag on the default branch's history, and a draft bound to that exact
+source commit. It refuses published releases and nonempty existing drafts,
+uploads without replacement, then downloads and verifies the complete set
+before publishing. This supports GitHub's draft-first immutable-release flow;
+repository immutability must be enabled separately.
 
-The bundle contains genuine signed build provenance, in the original Sigstore
-JSON format accepted by GitHub CLI. Scorecard's filename detection does not
-replace cryptographic verification.
+Scorecard v5.6.0 examines the latest five releases and recognizes
+`.sigstore.json` as signatures and `.intoto.jsonl` as provenance. Its
+[release scoring](https://github.com/ossf/scorecard/blob/v5.6.0/checks/evaluation/signed_releases.go)
+assigns 8 points to a signature-only release or 10 to a release with detected
+provenance, averages the window, and rounds down. At the 2026-11-15 inspection,
+v0.1.15, v0.1.16, and v0.1.17 have authentic original bundles, giving three of
+five releases signature credit and a **4/10** component. Adding verified DSSE
+exports to those three would give **6/10** with the same window and evaluator.
+These are component measurements/estimates, not an overall-score promise; a
+merged workflow alone does not change published release assets.
+
+Existing authentic bundles may be exported without changing any old binary,
+tag, signed payload, or signature. This is another representation of original
+build evidence. Releases without original attestations cannot be given
+retroactive build provenance. Scorecard's filename detection does not replace
+cryptographic verification, and renaming a Sigstore bundle is not a DSSE export.
 
 ## Review and branch policy
 
@@ -100,5 +114,6 @@ versions explicitly rather than treating a version change as a security fix.
 
 References: [Scorecard checks](https://github.com/ossf/scorecard/blob/v5.6.0/docs/checks.md),
 [signature detection](https://github.com/ossf/scorecard/blob/v5.6.0/probes/releasesAreSigned/impl.go),
+[provenance detection](https://github.com/ossf/scorecard/blob/v5.6.0/probes/releasesHaveProvenance/impl.go),
 [release scoring](https://github.com/ossf/scorecard/blob/v5.6.0/checks/evaluation/signed_releases.go),
 and [GitHub artifact attestations](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations).
