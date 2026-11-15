@@ -205,7 +205,7 @@ def validate_check(check, root, platform, rust_tests, python_tests, workflow_loa
         if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*(?:::[A-Za-z_][A-Za-z_0-9]*)*", name):
             raise PolicyError("Rust test must be a qualified test name")
         leaf = re.escape(name.split("::")[-1])
-        if not re.search(rf"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+{leaf}\s*\(", path.read_text()):
+        if not re.search(rf"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+{leaf}\s*\(", path.read_text(encoding="utf-8")):
             raise PolicyError(f"Rust test function missing in source: {name}")
         if applies and rust_tests is not None:
             if name not in rust_tests.get((package, target), set()):
@@ -218,7 +218,7 @@ def validate_check(check, root, platform, rust_tests, python_tests, workflow_loa
         module, class_name, method = name.split(".")
         if module != path.stem or not check["source"].startswith("scripts/tests/"):
             raise PolicyError("Python source must identify its scripts/tests module")
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         if not any(isinstance(node, ast.ClassDef) and node.name == class_name
                    and any(isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == method
                            for child in node.body) for node in tree.body):
@@ -321,7 +321,7 @@ def main(argv=None):
     try:
         if args.verify_tests and args.platform != current_platform():
             raise PolicyError("--verify-tests must use the actual host platform; other scopes support static registration checks only")
-        document = json.loads(source_path(root, args.manifest).read_text())
+        document = json.loads(source_path(root, args.manifest).read_text(encoding="utf-8"))
         if not isinstance(document, dict) or not isinstance(document.get("defects"), list):
             raise PolicyError("manifest must contain an object with a defects list")
         rust_tests = discover_rust_tests(root) if args.verify_tests else None
