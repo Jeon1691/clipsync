@@ -80,7 +80,7 @@ pub fn detect_adapter() -> Result<(Box<dyn ClipboardBackend>, AdapterInfo)> {
         if std::env::var_os("WAYLAND_DISPLAY").is_some() {
             if let Some(wl) = CommandClipboard::wayland_tools() {
                 let info = AdapterInfo {
-                    name: "wayland-wl-clipboard",
+                    name: wl.name(),
                     source: "command",
                     capabilities: wl.capabilities(),
                     fallback_reason: None,
@@ -91,7 +91,7 @@ pub fn detect_adapter() -> Result<(Box<dyn ClipboardBackend>, AdapterInfo)> {
         if std::env::var_os("DISPLAY").is_some() {
             if let Some(x11) = CommandClipboard::x11_tools() {
                 let info = AdapterInfo {
-                    name: "x11-xclip",
+                    name: x11.name(),
                     source: "command",
                     capabilities: x11.capabilities(),
                     fallback_reason: None,
@@ -99,13 +99,14 @@ pub fn detect_adapter() -> Result<(Box<dyn ClipboardBackend>, AdapterInfo)> {
                 return Ok((Box::new(x11), info));
             }
         }
+        let headless = CommandClipboard::headless();
         let info = AdapterInfo {
-            name: "headless",
+            name: headless.name(),
             source: "stdin-stdout",
-            capabilities: Capabilities::text_only(),
+            capabilities: headless.capabilities(),
             fallback_reason: Some("no graphical clipboard adapter".into()),
         };
-        Ok((Box::new(CommandClipboard::headless()), info))
+        Ok((Box::new(headless), info))
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
@@ -346,6 +347,9 @@ fn load_file_refs(paths: &[std::path::PathBuf]) -> Result<Option<Vec<FileRef>>> 
         let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
+        #[cfg(unix)]
+        let bytes = read_regular_file(path)?;
+        #[cfg(not(unix))]
         let bytes = std::fs::read(path)?;
         files.push(FileRef {
             mime: infer::get(&bytes).map(|k| k.mime_type().to_string()),
@@ -359,6 +363,44 @@ fn load_file_refs(paths: &[std::path::PathBuf]) -> Result<Option<Vec<FileRef>>> 
     } else {
         Ok(Some(files))
     }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+pub(crate) fn read_regular_file(path: &std::path::Path) -> Result<Vec<u8>> {
+    use clipsync_protocol::FILE_MAX_BYTES;
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // A file URL may refer to a FIFO, or change after the path metadata check.
+    // Open without waiting for a writer, reject symlink substitutions, and
+    // validate the opened descriptor before attempting to read any contents.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "clipboard file is not a regular file",
+        )
+        .into());
+    }
+    if metadata.len() > FILE_MAX_BYTES {
+        return Err(ClipboardError::Message(format!(
+            "clipboard file exceeds {FILE_MAX_BYTES} bytes"
+        )));
+    }
+    let mut bytes = Vec::new();
+    // The descriptor can grow after metadata inspection. Read at most one
+    // byte beyond the existing protocol limit so oversized input is rejected.
+    file.take(FILE_MAX_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > FILE_MAX_BYTES {
+        return Err(ClipboardError::Message(format!(
+            "clipboard file exceeds {FILE_MAX_BYTES} bytes"
+        )));
+    }
+    Ok(bytes)
 }
 
 pub fn hash_item(item: &ClipboardItem) -> u64 {
@@ -668,6 +710,94 @@ mod native_tests {
             .is_err());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_file_read_failures_do_not_silently_fall_back_to_text() {
+        let root = Scratch::new();
+        let path = root.0.join("not-a-readable-file");
+        let _socket = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let clipboard = backend(Arc::new(Mutex::new(State {
+            files: Some(vec![path.clone()]),
+            text: Some("must not replace an unreadable file".into()),
+            ..Default::default()
+        })));
+        assert!(matches!(
+            load_file_refs(&[path]),
+            Err(ClipboardError::Io(_))
+        ));
+        assert!(matches!(clipboard.read().await, Err(ClipboardError::Io(_))));
+        assert!(matches!(
+            clipboard.signature().await,
+            Err(ClipboardError::Io(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_file_loader_rejects_private_fifo_without_blocking() {
+        const CHILD: &str = "CLIPSYNC_DETECT_FIFO_CHILD";
+        let Ok(path) = std::env::var(CHILD) else {
+            let root = Scratch::new();
+            let path = root.0.join("clipboard-fifo");
+            assert!(std::process::Command::new("/usr/bin/mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success());
+            let output = super::environment_tests::run_child_with_timeout(
+                root.child("detect::native_tests::native_file_loader_rejects_private_fifo_without_blocking")
+                    .env(CHILD, &path),
+                std::time::Duration::from_secs(5),
+            );
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        let clipboard = backend(Arc::new(Mutex::new(State {
+            files: Some(vec![path.into()]),
+            text: Some("must not hide a rejected special file".into()),
+            ..Default::default()
+        })));
+        assert!(matches!(clipboard.read().await, Err(ClipboardError::Io(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_loader_reads_regular_files_and_rejects_symlink_substitution() {
+        let root = Scratch::new();
+        let file = root.file("regular", b"unchanged regular-file bytes");
+        assert_eq!(
+            read_regular_file(&file).unwrap(),
+            b"unchanged regular-file bytes"
+        );
+        let link = root.0.join("substituted-link");
+        std::os::unix::fs::symlink(file, &link).unwrap();
+        assert!(matches!(
+            read_regular_file(&link),
+            Err(ClipboardError::Io(_))
+        ));
+        // Path-level policy still skips links instead of following their target.
+        assert!(load_file_refs(&[link]).unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_loader_rejects_files_over_the_existing_protocol_limit() {
+        let root = Scratch::new();
+        let file = root.0.join("oversized-sparse-file");
+        std::fs::File::create(&file)
+            .unwrap()
+            .set_len(clipsync_protocol::FILE_MAX_BYTES + 1)
+            .unwrap();
+        assert!(
+            matches!(read_regular_file(&file), Err(ClipboardError::Message(message)) if message.contains("exceeds"))
+        );
+    }
+
     #[tokio::test]
     async fn worker_panics_are_reported_instead_of_escaping_the_backend() {
         let crash = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -715,6 +845,21 @@ mod native_tests {
             assert!(load_file_refs(&[link, invalid]).unwrap().is_none());
         }
     }
+
+    #[test]
+    fn native_file_loader_preserves_bytes_names_and_detected_mime() {
+        let root = Scratch::new();
+        let bytes = png();
+        let path = root.file("clipboard image.png", &bytes);
+        let files = load_file_refs(std::slice::from_ref(&path))
+            .unwrap()
+            .unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "clipboard image.png");
+        assert_eq!(files[0].mime.as_deref(), Some("image/png"));
+        assert_eq!(files[0].bytes, bytes);
+        assert_eq!(files[0].staged_path.as_ref(), Some(&path));
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -734,7 +879,10 @@ mod detector_tests {
             || panic!("generic fallback should stay idle"),
         )
         .unwrap();
+        assert_eq!(info.name, "macos-nspasteboard");
         assert_eq!(info.source, "native");
+        let caps = info.capabilities;
+        assert!(caps.text && caps.image && caps.files && caps.watch);
         assert!(info.fallback_reason.is_none());
         crate::test_support::assert_text(backend.read().await.unwrap(), "native");
         let (backend, info) = detect_macos_adapter(
@@ -755,6 +903,9 @@ mod detector_tests {
         .unwrap();
         assert_eq!(info.name, "arboard");
         assert_eq!(info.source, "library");
+        assert_eq!(info.fallback_reason.as_deref(), Some("generic fallback"));
+        let caps = info.capabilities;
+        assert!(caps.text && caps.image && caps.files && caps.watch);
         crate::test_support::assert_text(backend.read().await.unwrap(), "generic");
         assert!(detect_macos_adapter(
             || Err(ClipboardError::Unavailable("native denied".into())),
@@ -763,6 +914,96 @@ mod detector_tests {
         )
         .is_err());
     }
+
+    #[tokio::test]
+    async fn command_fallback_reports_text_only_and_uses_only_fixture_tools() {
+        const CHILD: &str = "CLIPSYNC_DETECT_MAC_COMMAND_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let root = crate::test_support::Scratch::new();
+            root.executable("pbpaste", "#!/bin/sh\nprintf 'fixture clipboard text'\n");
+            root.executable(
+                "pbcopy",
+                "#!/bin/sh\n/bin/cat > \"$CLIPSYNC_DETECT_WRITTEN\"\n",
+            );
+            let written = root.0.join("written");
+            let output = super::environment_tests::run_child(
+                root.child("detect::detector_tests::command_fallback_reports_text_only_and_uses_only_fixture_tools")
+                    .env(CHILD, "1")
+                    .env("CLIPSYNC_DETECT_WRITTEN", &written),
+            );
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(std::fs::read_to_string(written).unwrap(), "fixture write");
+            return;
+        }
+        let (backend, info) = detect_macos_adapter(
+            || Err(ClipboardError::Unavailable("native fixture denial".into())),
+            || {
+                CommandClipboard::macos_tools()
+                    .map(|backend| Box::new(backend) as Box<dyn ClipboardBackend>)
+            },
+            || panic!("the complete command pair must win over generic fallback"),
+        )
+        .unwrap();
+        assert_eq!(info.name, backend.name());
+        assert_eq!(info.source, "command");
+        assert!(info
+            .fallback_reason
+            .unwrap()
+            .contains("native fixture denial"));
+        let caps = info.capabilities;
+        assert!(caps.text && !caps.image && !caps.files && caps.watch);
+        crate::test_support::assert_text(backend.read().await.unwrap(), "fixture clipboard text");
+        backend
+            .write(&ClipboardItem::Text {
+                text: "fixture write".into(),
+            })
+            .await
+            .unwrap();
+    }
+}
+
+#[cfg(all(test, unix))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) mod environment_tests {
+    use super::*;
+
+    pub(super) fn run_child(command: &mut std::process::Command) -> std::process::Output {
+        run_child_with_timeout(command, std::time::Duration::from_secs(10))
+    }
+
+    pub(crate) fn run_child_with_timeout(
+        command: &mut std::process::Command,
+        timeout: std::time::Duration,
+    ) -> std::process::Output {
+        let mut child = command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                return child.wait_with_output().unwrap();
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "detector fixture exceeded {} seconds: {} {}",
+                    timeout.as_secs(),
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn doctor_probe_child() {
         let Ok(root) = std::env::var("CLIPSYNC_DOCTOR_FIXTURE") else {
@@ -774,6 +1015,7 @@ mod detector_tests {
         );
         assert!(tool_exists("pbcopy"));
         assert!(!tool_exists("pbpaste"));
+        assert!(!tool_exists("powershell"));
         let tools = collect_doctor_tools();
         assert_eq!(tools.len(), 10);
         assert_eq!(
@@ -790,17 +1032,188 @@ mod detector_tests {
         let root = crate::test_support::Scratch::new();
         root.executable("pbcopy", "#!/bin/sh\nexit 0\n");
         root.executable("xclip", "#!/bin/sh\nexit 0\n");
-        let out = root
-            .child("detect::detector_tests::doctor_probe_child")
-            .env("CLIPSYNC_DOCTOR_FIXTURE", &root.0)
-            .output()
-            .unwrap();
+        root.file("pbpaste", b"not executable");
+        root.dir("powershell");
+        let out = run_child(
+            root.child("detect::environment_tests::doctor_probe_child")
+                .env("CLIPSYNC_DOCTOR_FIXTURE", &root.0),
+        );
         assert!(
             out.status.success(),
             "doctor fixture failed: {} {}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn linux_detection_prioritizes_sessions_tools_and_real_capabilities() {
+        struct Case {
+            wayland: bool,
+            x11: bool,
+            tools: &'static [&'static str],
+            name: &'static str,
+            rich_formats: bool,
+        }
+        let cases = [
+            Case {
+                wayland: true,
+                x11: true,
+                tools: &["wl-copy", "wl-paste", "xclip", "xsel"],
+                name: "wayland-wl-clipboard",
+                rich_formats: true,
+            },
+            Case {
+                wayland: false,
+                x11: true,
+                tools: &["xclip", "xsel"],
+                name: "x11-xclip",
+                rich_formats: true,
+            },
+            Case {
+                wayland: false,
+                x11: true,
+                tools: &["xsel"],
+                name: "x11-xsel",
+                rich_formats: false,
+            },
+            Case {
+                wayland: true,
+                x11: true,
+                tools: &["wl-copy", "xclip"],
+                name: "x11-xclip",
+                rich_formats: true,
+            },
+            Case {
+                wayland: true,
+                x11: false,
+                tools: &["wl-copy"],
+                name: "headless",
+                rich_formats: false,
+            },
+            Case {
+                wayland: true,
+                x11: false,
+                tools: &["wl-paste"],
+                name: "headless",
+                rich_formats: false,
+            },
+            Case {
+                wayland: true,
+                x11: true,
+                tools: &[],
+                name: "headless",
+                rich_formats: false,
+            },
+            Case {
+                wayland: false,
+                x11: false,
+                tools: &["wl-copy", "wl-paste", "xclip", "xsel"],
+                name: "headless",
+                rich_formats: false,
+            },
+        ];
+        const CHILD: &str = "CLIPSYNC_DETECT_LINUX_CASE";
+        let Ok(index) = std::env::var(CHILD) else {
+            for (index, case) in cases.iter().enumerate() {
+                let root = crate::test_support::Scratch::new();
+                for name in case.tools {
+                    root.executable(name, "#!/bin/sh\nprintf '%s\\n' \"$0 $*\" >> \"$CLIPSYNC_DETECT_LOG\"\ncase \"$*\" in *image/png*|*text/uri-list*) exit 1;; esac\nprintf 'selected fixture text'\n");
+                }
+                let log = root.0.join("tool-calls");
+                let mut command = root.child("detect::environment_tests::linux_detection_prioritizes_sessions_tools_and_real_capabilities");
+                command
+                    .env(CHILD, index.to_string())
+                    .env("CLIPSYNC_DETECT_LOG", &log);
+                if case.wayland {
+                    command.env("WAYLAND_DISPLAY", "clipsync-fixture-wayland");
+                }
+                if case.x11 {
+                    command.env("DISPLAY", "clipsync-fixture:999");
+                }
+                let output = run_child(&mut command);
+                assert!(
+                    output.status.success(),
+                    "case {index}: {} {}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                if case.name == "headless" {
+                    assert!(
+                        !log.exists(),
+                        "headless detection must not invoke clipboard tools"
+                    );
+                } else {
+                    let calls = std::fs::read_to_string(log).unwrap();
+                    let executable = match case.name {
+                        "wayland-wl-clipboard" => "wl-paste",
+                        "x11-xsel" => "xsel",
+                        _ => "xclip",
+                    };
+                    assert!(calls
+                        .lines()
+                        .all(|line| line.starts_with(root.0.join(executable).to_str().unwrap())));
+                }
+            }
+            return;
+        };
+        let case = &cases[index.parse::<usize>().unwrap()];
+        let (backend, info) = detect_adapter().unwrap();
+        assert_eq!(backend.name(), case.name);
+        assert_eq!(
+            info.name, case.name,
+            "adapter metadata must identify the selected executable"
+        );
+        assert_eq!(
+            info.source,
+            if case.name == "headless" {
+                "stdin-stdout"
+            } else {
+                "command"
+            }
+        );
+        let caps = info.capabilities;
+        assert_eq!(caps.text, case.name != "headless");
+        assert_eq!(
+            (caps.image, caps.files, caps.watch),
+            (
+                case.rich_formats,
+                case.rich_formats,
+                case.name != "headless"
+            )
+        );
+        let backend_caps = backend.capabilities();
+        assert_eq!(
+            (caps.text, caps.image, caps.files, caps.watch),
+            (
+                backend_caps.text,
+                backend_caps.image,
+                backend_caps.files,
+                backend_caps.watch
+            )
+        );
+        if case.name == "headless" {
+            assert_eq!(
+                info.fallback_reason.as_deref(),
+                Some("no graphical clipboard adapter")
+            );
+            assert!(backend.read().await.unwrap().is_none());
+            assert!(matches!(
+                backend
+                    .write(&ClipboardItem::Text {
+                        text: "no graphical destination".into()
+                    })
+                    .await,
+                Err(crate::ClipboardError::Unsupported("text"))
+            ));
+        } else {
+            assert!(info.fallback_reason.is_none());
+            crate::test_support::assert_text(
+                backend.read().await.unwrap(),
+                "selected fixture text",
+            );
+        }
     }
 }
 
