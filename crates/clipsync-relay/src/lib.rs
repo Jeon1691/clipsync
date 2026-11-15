@@ -5,6 +5,7 @@
 
 mod auth;
 mod state;
+mod transport;
 mod webhook;
 mod ws;
 
@@ -16,7 +17,6 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use tokio::net::TcpListener;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -27,6 +27,7 @@ use clipsync_protocol::{
 };
 
 pub use state::RelayState;
+pub use transport::RelayTransportConfig;
 
 #[derive(Clone, Debug)]
 pub struct RelayConfig {
@@ -44,22 +45,8 @@ impl RelayConfig {
             .parse()
             .expect("CLIPSYNC_RELAY_BIND");
         let public_url = std::env::var("CLIPSYNC_RELAY_PUBLIC_URL")
-            .unwrap_or_else(|_| format!("http://127.0.0.1:{}", bind.port()));
-        let token_secret = std::env::var("CLIPSYNC_RELAY_TOKEN_SECRET")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| {
-                assert!(
-                    s.len() >= 32,
-                    "CLIPSYNC_RELAY_TOKEN_SECRET must contain at least 32 bytes; leave it unset to generate a random key"
-                );
-                s.into_bytes()
-            })
-            .unwrap_or_else(|| {
-                let mut s = [0u8; 32];
-                rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut s);
-                s.to_vec()
-            });
+            .unwrap_or_else(|_| format!("https://127.0.0.1:{}", bind.port()));
+        let token_secret = token_secret_from_env().expect("relay token key configuration");
         Self {
             bind,
             public_url,
@@ -70,16 +57,66 @@ impl RelayConfig {
     }
 }
 
+fn token_secret_from_env() -> anyhow::Result<Vec<u8>> {
+    let value = std::env::var_os("CLIPSYNC_RELAY_TOKEN_SECRET");
+    let file = std::env::var_os("CLIPSYNC_RELAY_TOKEN_SECRET_FILE");
+    if value.is_some() && file.is_some() {
+        anyhow::bail!("configure only one of CLIPSYNC_RELAY_TOKEN_SECRET and CLIPSYNC_RELAY_TOKEN_SECRET_FILE");
+    }
+    let secret = if let Some(file) = file {
+        Some(
+            transport::read_config_file(std::path::Path::new(&file), true)
+                .map_err(|error| anyhow::anyhow!("CLIPSYNC_RELAY_TOKEN_SECRET_FILE: {error:#}"))?,
+        )
+    } else if let Some(value) = value {
+        let value = value
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("CLIPSYNC_RELAY_TOKEN_SECRET must be UTF-8"))?;
+        if value.trim().is_empty() {
+            None
+        } else {
+            Some(value.into_bytes())
+        }
+    } else {
+        None
+    };
+    if let Some(secret) = secret {
+        if secret.len() < 32 {
+            anyhow::bail!("CLIPSYNC_RELAY_TOKEN_SECRET or CLIPSYNC_RELAY_TOKEN_SECRET_FILE must contain at least 32 bytes; leave them unset to generate a random key");
+        }
+        Ok(secret)
+    } else {
+        let mut secret = vec![0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut secret);
+        Ok(secret)
+    }
+}
+
+/// Serve with environment-selected TLS, failing before binding unless TLS is
+/// configured or plaintext HTTP is explicitly enabled.
 pub async fn serve(config: RelayConfig) -> anyhow::Result<()> {
-    let addr = config.bind;
-    let app = router(config);
-    let listener = TcpListener::bind(addr).await?;
-    info!(%addr, "clipsync-relay listening");
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await?;
+    serve_with_transport(config, RelayTransportConfig::from_env()?).await
+}
+
+pub async fn serve_with_transport(
+    config: RelayConfig,
+    transport: RelayTransportConfig,
+) -> anyhow::Result<()> {
+    let tls = transport.tls_config(&config.public_url)?;
+    let listener = std::net::TcpListener::bind(config.bind)?;
+    let addr = listener.local_addr()?;
+    let app = router(config).into_make_service_with_connect_info::<SocketAddr>();
+    let server = axum_server::from_tcp(listener)?.first_request_timeout(Duration::from_secs(10));
+    if let Some(tls) = tls {
+        info!(%addr, "clipsync-relay listening with TLS 1.2/1.3");
+        server
+            .acceptor(transport::LimitedTlsAcceptor::new(tls))
+            .serve(app)
+            .await?;
+    } else {
+        info!(%addr, "clipsync-relay listening with explicitly enabled plaintext HTTP");
+        server.serve(app).await?;
+    }
     Ok(())
 }
 

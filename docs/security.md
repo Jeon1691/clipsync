@@ -97,7 +97,9 @@ A compromised or unlocked authorized endpoint can read clipboard contents and
 keys. Same-user local malware and administrators are outside the confidentiality
 guarantee. Pairing codes must be shared through an authenticated separate
 channel. Use HTTPS/WSS with trusted certificates for public deployments; the
-relay's HTTP listener requires TLS termination and network restrictions.
+relay requires a TLS certificate/key pair by default and permits only TLS
+1.2/1.3. Its explicit HTTP opt-in requires TLS termination and network
+restrictions for public deployments; see [self-hosting](self-hosting.md).
 Metadata and traffic timing remain visible to the relay. Denial of service,
 delivery by a malicious relay, secure erasure of old copies/backups, and payload
 forward secrecy are not guaranteed. Native libraries, OS trust stores and

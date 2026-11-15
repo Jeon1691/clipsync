@@ -44,9 +44,13 @@ administrators can access local clipboard contents and keys.
 - **Fail-safe defaults:** missing/invalid credentials fail; pairing confirmation
   failures do not establish room credentials; an absent relay signing secret is
   generated from OsRng, while an explicitly weak secret is rejected. Production
-  clients default to HTTPS. Self-hosted relay HTTP must remain behind correctly
-  configured TLS termination and firewall rules; the default listener does not
-  itself establish a Gold secure-network-default claim.
+  clients default to HTTPS. The relay refuses to bind without a matching TLS
+  certificate/key pair unless HTTP is explicitly enabled for a TLS proxy or
+  local development. Direct TLS permits only TLS 1.2/1.3, limits incomplete
+  handshakes to 128 and five seconds each, and retains real TCP peer metadata.
+  Verified HTTPS/WSS tests reject unrelated issuers and wrong hostnames; private
+  credential files reject unsafe Unix permissions. Explicit plaintext origins
+  still require correctly configured public TLS termination and firewall rules.
 - **Complete mediation:** token signature/expiry, current membership, sender
   role, frame constraints and destination checks occur on the corresponding
   access/routing paths. Webhook connection addresses are pinned to the validated

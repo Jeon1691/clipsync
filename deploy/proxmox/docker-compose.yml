@@ -13,6 +13,8 @@ services:
     env_file:
       - .env
     environment:
+      # The origin is local; the production proxy terminates public TLS.
+      CLIPSYNC_RELAY_ALLOW_HTTP: "true"
       CLIPSYNC_RELAY_BIND: 0.0.0.0:7600
       CLIPSYNC_RELAY_PUBLIC_URL: https://clipsync.develicit.dev
     read_only: true

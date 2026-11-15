@@ -10,6 +10,7 @@ async fn relay_binary_honors_bind_and_serves_health_before_shutdown() {
     drop(reserved);
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_clipsync-relay"))
         .args([
+            "--allow-http",
             "--bind",
             &address.to_string(),
             "--public-url",
@@ -20,6 +21,9 @@ async fn relay_binary_honors_bind_and_serves_health_before_shutdown() {
             "synthetic-relay-binary-test-secret-32bytes",
         )
         .env("CLIPSYNC_RELAY_BIND", "127.0.0.1:0")
+        .env_remove("CLIPSYNC_RELAY_TLS_CERT_FILE")
+        .env_remove("CLIPSYNC_RELAY_TLS_KEY_FILE")
+        .env_remove("CLIPSYNC_RELAY_TOKEN_SECRET_FILE")
         .env_remove("CLIPSYNC_RELAY_WEBHOOK_URL")
         .env_remove("CLIPSYNC_RELAY_WEBHOOK_SECRET")
         .stdin(Stdio::null())
