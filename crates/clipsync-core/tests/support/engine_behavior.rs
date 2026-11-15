@@ -1121,6 +1121,7 @@ async fn pull_reports_empty_closed_and_live_text_states_and_recovers_from_corrup
     for case in ["empty", "closed", "text", "binary"] {
         let room_id = RoomId::new();
         let room = room_id.clone();
+        let (consumed, release) = tokio::sync::oneshot::channel();
         let mut server = Server::websocket(move |mut socket| async move {
             assert!(matches!(
                 receive(&mut socket).await,
@@ -1131,10 +1132,12 @@ async fn pull_reports_empty_closed_and_live_text_states_and_recovers_from_corrup
             }
             send(&mut socket, hello(&room)).await;
             if case == "empty" {
+                let _ = release.await;
                 return;
             }
             if case == "text" {
                 send(&mut socket, encrypted_text(text_routing(), "live pull")).await;
+                let _ = release.await;
                 return;
             }
             send(
@@ -1171,6 +1174,9 @@ async fn pull_reports_empty_closed_and_live_text_states_and_recovers_from_corrup
                     .await
                     .unwrap();
             }
+            // Delivery is complete only when the application has consumed it.
+            // Closing immediately can race the transport's heartbeat writer.
+            let _ = release.await;
         })
         .await;
         let peer = scripted_peer(&server.url, room_id);
@@ -1180,6 +1186,7 @@ async fn pull_reports_empty_closed_and_live_text_states_and_recovers_from_corrup
         )
         .await
         .unwrap();
+        let _ = consumed.send(());
         server.finish().await;
         match case {
             "empty" => assert!(result.unwrap_err().to_string().contains("no queued item")),
@@ -1196,6 +1203,7 @@ async fn hello_wait_rejects_relay_errors_and_disconnects_and_skips_unrelated_fra
     use crate::test_relay::{send, Server};
     for case in ["error", "closed", "success"] {
         let room = RoomId::new();
+        let (consumed, release) = tokio::sync::oneshot::channel();
         let mut server = Server::websocket(move |mut socket| async move {
             send(&mut socket, ControlMessage::Pong { ts: 1 }).await;
             if case == "error" {
@@ -1210,6 +1218,9 @@ async fn hello_wait_rejects_relay_errors_and_disconnects_and_skips_unrelated_fra
             } else if case == "success" {
                 send(&mut socket, hello(&room)).await;
             }
+            if case != "closed" {
+                let _ = release.await;
+            }
         })
         .await;
         let mut connection = RelayConnection::connect(&join_ws(&server.url, "/v1/ws"))
@@ -1218,6 +1229,7 @@ async fn hello_wait_rejects_relay_errors_and_disconnects_and_skips_unrelated_fra
         let result = tokio::time::timeout(Duration::from_secs(5), wait_hello_ok(&mut connection))
             .await
             .unwrap();
+        let _ = consumed.send(());
         server.finish().await;
         match case {
             "error" => assert!(result
@@ -1371,6 +1383,7 @@ async fn create_failure_retains_the_offer_and_error_for_background_status() {
     use axum::{routing::post, Json, Router};
     let room = RoomId::new();
     let id = room.clone();
+    let (consumed, release) = tokio::sync::oneshot::channel();
     let mut server = Server::websocket_routes(
         Router::new().route(
             "/v1/pairing/create",
@@ -1387,7 +1400,7 @@ async fn create_failure_retains_the_offer_and_error_for_background_status() {
                 }
             }),
         ),
-        |mut socket| async move {
+        move |mut socket| async move {
             assert!(matches!(
                 receive(&mut socket).await,
                 ControlMessage::Hello {
@@ -1403,6 +1416,7 @@ async fn create_failure_retains_the_offer_and_error_for_background_status() {
                 },
             )
             .await;
+            let _ = release.await;
         },
     )
     .await;
@@ -1417,6 +1431,7 @@ async fn create_failure_retains_the_offer_and_error_for_background_status() {
         .await
         .err()
         .unwrap();
+    let _ = consumed.send(());
     server.finish().await;
     assert!(error
         .to_string()

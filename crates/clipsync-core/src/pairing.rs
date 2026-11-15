@@ -708,6 +708,7 @@ mod tests {
     async fn interrupted_or_rejected_pairing_never_creates_local_room_state() {
         use crate::test_relay::{send, Server};
         for rejected in [false, true] {
+            let (consumed, release) = tokio::sync::oneshot::channel();
             let mut server = Server::websocket(move |mut socket| async move {
                 if rejected {
                     send(
@@ -718,6 +719,8 @@ mod tests {
                         },
                     )
                     .await;
+                    let _ = release.await;
+                    return;
                 }
                 socket
                     .send(axum::extract::ws::Message::Close(None))
@@ -746,6 +749,7 @@ mod tests {
             )
             .await
             .unwrap_err();
+            let _ = consumed.send(());
             server.finish().await;
             assert!(error.to_string().contains(if rejected {
                 "expired: pairing session expired"
@@ -776,6 +780,7 @@ mod tests {
             let session = sid.clone();
             let local = identity.device_id.clone();
             let peer_id = peer.clone();
+            let (consumed, release) = tokio::sync::oneshot::channel();
             let mut server = Server::websocket(move |mut socket| async move {
                 send(
                     &mut socket,
@@ -805,6 +810,7 @@ mod tests {
                     if attack == "spake" {
                         assert!(matches!(receive(&mut socket).await, ControlMessage::Error { code, .. } if code == "pairing_failed"));
                     }
+                    let _ = release.await;
                     return;
                 }
                 let state = start_pairing_b("123456", session.clone(), local, peer_id).unwrap();
@@ -832,6 +838,7 @@ mod tests {
                     )
                     .await;
                     assert!(matches!(receive(&mut socket).await, ControlMessage::Error { code, .. } if code == "confirm_failed"));
+                    let _ = release.await;
                     return;
                 }
                 send(
@@ -847,6 +854,7 @@ mod tests {
                     },
                 )
                 .await;
+                let _ = release.await;
             })
             .await;
             let connection = RelayConnection::connect(&join_ws(&server.url, "/v1/ws"))
@@ -870,6 +878,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap_err();
+            let _ = consumed.send(());
             server.finish().await;
             assert!(matches!(error, CoreError::Pairing(_)), "{attack}: {error}");
             if attack == "nonce_size" {
