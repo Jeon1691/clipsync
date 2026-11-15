@@ -90,3 +90,135 @@ fn load_extra_cas() -> Result<Vec<CertificateDer<'static>>, TransportError> {
     }
     Ok(certs)
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    const CHILD: &str = "CLIPSYNC_CA_CONFIG_CHILD";
+
+    fn child(case: &str, path: Option<&std::path::Path>, valid: &std::path::Path) {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "tls::tests::configured_ca_child", "--nocapture"])
+            .env(CHILD, case)
+            .env("CLIPSYNC_TEST_VALID_CA", valid);
+        if let Some(path) = path {
+            command.env(CA_FILE_ENV, path);
+        } else {
+            command.env_remove(CA_FILE_ENV);
+        }
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "isolated CA case {case}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    #[test]
+    fn isolated_ca_files_reject_missing_empty_malformed_and_invalid_certificates() {
+        let directory = tempfile::tempdir().unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let certificate = params.self_signed(&key).unwrap();
+        let valid = directory.path().join("valid.pem");
+        std::fs::write(&valid, certificate.pem()).unwrap();
+        child("default", None, &valid);
+        child("default", Some(std::path::Path::new("")), &valid);
+        child("io", Some(&directory.path().join("missing.pem")), &valid);
+        child("io", Some(directory.path()), &valid);
+        let empty = directory.path().join("empty.pem");
+        std::fs::write(&empty, "no certificates here").unwrap();
+        child("empty", Some(&empty), &valid);
+        let malformed = directory.path().join("malformed.pem");
+        std::fs::write(
+            &malformed,
+            "-----BEGIN CERTIFICATE-----\n%%%\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        child("pem", Some(&malformed), &valid);
+        let invalid_der = directory.path().join("invalid-der.pem");
+        std::fs::write(
+            &invalid_der,
+            "-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        child("der", Some(&invalid_der), &valid);
+        let bundle = directory.path().join("bundle.pem");
+        std::fs::write(&bundle, certificate.pem().repeat(2)).unwrap();
+        child("bundle", Some(&bundle), &valid);
+        child("recover", Some(&empty), &valid);
+    }
+
+    #[test]
+    fn configured_ca_child() {
+        let Ok(case) = std::env::var(CHILD) else {
+            return;
+        };
+        match case.as_str() {
+            "default" => {
+                assert!(ca_file_path().is_none());
+                assert!(load_extra_cas().unwrap().is_empty());
+                let first = client_config().unwrap();
+                assert!(Arc::ptr_eq(&first, &client_config().unwrap()));
+                configure_reqwest(reqwest::Client::builder().no_proxy())
+                    .unwrap()
+                    .build()
+                    .unwrap();
+            }
+            "bundle" => {
+                assert_eq!(load_extra_cas().unwrap().len(), 2);
+                assert!(client_config().is_ok());
+            }
+            "der" => {
+                assert_eq!(load_extra_cas().unwrap().len(), 1);
+                let error = match client_config() {
+                    Err(error) => error,
+                    Ok(_) => panic!("invalid DER must not become trusted"),
+                };
+                assert!(
+                    matches!(error, TransportError::Protocol(ref text) if text.contains("tls extra roots"))
+                );
+            }
+            "recover" => {
+                assert!(client_config().is_err());
+                let path = ca_file_path().unwrap();
+                std::fs::copy(std::env::var("CLIPSYNC_TEST_VALID_CA").unwrap(), &path).unwrap();
+                let first = client_config().unwrap();
+                std::fs::write(path, "invalid after successful initialization").unwrap();
+                assert!(
+                    Arc::ptr_eq(&first, &client_config().unwrap()),
+                    "successful configuration is immutable for this process"
+                );
+            }
+            "io" | "empty" | "pem" => {
+                let expected = match case.as_str() {
+                    "empty" => "contained no certificates",
+                    "pem" => "parse:",
+                    _ => CA_FILE_ENV,
+                };
+                assert!(
+                    matches!(load_extra_cas(), Err(TransportError::Protocol(text)) if text.contains(expected))
+                );
+                assert!(client_config().is_err());
+                assert!(configure_reqwest(reqwest::Client::builder().no_proxy()).is_err());
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                assert!(
+                    matches!(
+                        runtime.block_on(crate::RelayConnection::connect("ws://127.0.0.1:0/v1/ws")),
+                        Err(TransportError::Protocol(_))
+                    ),
+                    "a bad CA configuration must fail before any connection attempt"
+                );
+            }
+            _ => panic!("unknown isolated CA fixture"),
+        }
+    }
+}
