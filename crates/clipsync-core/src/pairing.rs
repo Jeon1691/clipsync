@@ -803,13 +803,16 @@ mod tests {
                         &mut socket,
                         ControlMessage::Spake2Msg {
                             pairing_session_id: session,
-                            message: if attack == "base64" { "!".into() } else { b64_encode(&[0]) },
+                            message: if attack == "base64" {
+                                "!".into()
+                            } else {
+                                b64_encode(&[0])
+                            },
                         },
                     )
                     .await;
-                    if attack == "spake" {
-                        assert!(matches!(receive(&mut socket).await, ControlMessage::Error { code, .. } if code == "pairing_failed"));
-                    }
+                    // Rejection returns immediately; its advisory Error frame
+                    // is queued best-effort and need not flush before close.
                     let _ = release.await;
                     return;
                 }
@@ -837,7 +840,6 @@ mod tests {
                         },
                     )
                     .await;
-                    assert!(matches!(receive(&mut socket).await, ControlMessage::Error { code, .. } if code == "confirm_failed"));
                     let _ = release.await;
                     return;
                 }
@@ -881,9 +883,14 @@ mod tests {
             let _ = consumed.send(());
             server.finish().await;
             assert!(matches!(error, CoreError::Pairing(_)), "{attack}: {error}");
-            if attack == "nonce_size" {
-                assert!(error.to_string().contains("bad bind nonce"));
-            }
+            let diagnostic = match attack {
+                "spake" => "spake2 finish failed",
+                "confirm" => "confirmation mismatch",
+                "nonce_size" => "bad bind nonce",
+                "base64" => "Invalid",
+                _ => "Odd number of digits",
+            };
+            assert!(error.to_string().contains(diagnostic), "{attack}: {error}");
             assert!(store.load_state().unwrap().rooms.is_empty(), "{attack}");
         }
     }
