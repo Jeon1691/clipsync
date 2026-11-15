@@ -59,8 +59,20 @@ To reproduce a chosen committed checkout on a Docker host:
 
 ```sh
 git checkout --detach <source-commit>
+# Defaults to the linux/amd64 reference platform used by CI.
 bash scripts/reproduce-linux-build.sh target/reproducibility-report
+# Explicitly select the separate arm64 scope when that is the intended target.
+CLIPSYNC_REPRO_PLATFORM=linux/arm64 bash scripts/reproduce-linux-build.sh target/reproducibility-report
 ```
+
+Each invocation creates and prints a fresh `run.XXXXXXXX` directory beneath the
+requested report parent. Earlier reports keep their original source identity;
+a failed run cannot reuse their success markers. Each run records `platform.txt`
+alongside its source commit and builder recipe. The selected platform is passed
+to both Docker environment builds and both build containers. The amd64 default
+is stable across Docker hosts; arm64 requires the explicit setting above. Hosts
+must support the selected platform natively or through Docker's configured
+emulation. Hashes from different platforms are not compared.
 
 The wrapper exports committed source in a Git bundle, without local settings or
 uncommitted changes. It builds the CLI, desktop, relay, bindgen, and mobile shared
@@ -71,9 +83,10 @@ fetching checksummed sources, a fixed source timestamp, normalized source paths,
 and disabled compiler caches. Native package manifests and all six output hashes
 must match. Reports retain the source commit, complete builder recipe, image
 metadata, native package versions, toolchain/linker versions, fetch/build logs,
-hashes and comparison result. A failure does not constitute reproducibility
-evidence. The source and recipe identify a fixed native platform; comparing
-different CPU architectures is outside this procedure's scope.
+hashes and comparison result. `comparison.txt` and `reproduced.sha256` are created
+only after both environments and both comparisons succeed. A failure does not
+constitute reproducibility evidence. The source, recipe, and recorded platform
+together identify this procedure's native platform scope.
 
 The first [repeatability run](https://github.com/Jeon1691/clipsync/actions/runs/43686133672)
 already compared all six Linux outputs byte-for-byte in one environment. The
