@@ -1,0 +1,102 @@
+# Copyright the ClipSync contributors.
+# SPDX-License-Identifier: MIT
+"""Require 80% executable-source line and region coverage across all Rust products.
+
+LLVM executable regions provide the statement-coverage evidence used by this
+project. Requiring both source lines and regions avoids accepting a high line
+percentage caused by several unexecuted expressions on the same source line.
+Only test code is excluded by the measurement; product crates remain included.
+"""
+import argparse
+import json
+from pathlib import Path
+import sys
+
+
+MINIMUM = 80
+
+
+def counter(metric):
+    if not isinstance(metric, dict):
+        return None
+    covered, count = metric.get("covered"), metric.get("count")
+    if (isinstance(covered, bool) or isinstance(count, bool)
+            or not isinstance(covered, int) or not isinstance(count, int)
+            or not 0 <= covered <= count):
+        return None
+    return covered, count
+
+
+def validate(report, packages):
+    errors = []
+    data = report.get("data", []) if isinstance(report, dict) else []
+    if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
+        return ["expected one LLVM workspace report"], {}
+    unit = data[0]
+    files = unit.get("files", [])
+    if not isinstance(files, list) or not files:
+        return ["report contains no product files"], {}
+    present, seen = set(), set()
+    sums = {name: [0, 0] for name in ["lines", "regions"]}
+    for source in files:
+        if not isinstance(source, dict) or not isinstance(source.get("filename"), str):
+            errors.append("invalid source record")
+            continue
+        name = source["filename"].replace("\\", "/")
+        if name in seen:
+            errors.append(f"duplicate source: {name}")
+            continue
+        seen.add(name)
+        summary = source.get("summary", {})
+        counts = {key: counter(summary.get(key)) for key in sums} if isinstance(summary, dict) else {}
+        if any(counts.get(key) is None for key in sums):
+            errors.append(f"invalid source counters: {name}")
+            continue
+        package, _, relative = name.rpartition("/crates/")[2].partition("/")
+        product = package in packages and relative.startswith("src/")
+        if not product:
+            if any(value[1] for value in counts.values()):
+                errors.append(f"test/non-product source included in product metrics: {name}")
+            continue
+        if all(value[1] > 0 for value in counts.values()):
+            present.add(package)
+        for key, (covered, count) in counts.items():
+            sums[key][0] += covered
+            sums[key][1] += count
+    missing = packages - present
+    if missing:
+        errors.append("missing production crates: " + ", ".join(sorted(missing)))
+    totals = unit.get("totals", {})
+    metrics = {}
+    for name, (covered, count) in sums.items():
+        declared = counter(totals.get(name)) if isinstance(totals, dict) else None
+        if declared != (covered, count):
+            errors.append(f"{name} totals disagree with validated production files")
+        if count <= 0:
+            errors.append(f"empty product {name} totals")
+            continue
+        metrics[name] = {"covered": covered, "count": count, "percent": 100 * covered / count}
+        if covered * 100 < MINIMUM * count:
+            errors.append(f"{name} coverage {metrics[name]['percent']:.2f}% is below {MINIMUM}%")
+    return errors, metrics
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("summary", type=Path)
+    args = parser.parse_args(argv)
+    root = Path(__file__).resolve().parents[1]
+    packages = {path.parent.name for path in (root / "crates").glob("*/Cargo.toml")}
+    try:
+        errors, metrics = validate(json.loads(args.summary.read_text()), packages)
+    except (OSError, ValueError, TypeError, AttributeError) as error:
+        errors, metrics = [str(error)], {}
+    for name, metric in metrics.items():
+        print(f"Product {name}: {metric['covered']}/{metric['count']} ({metric['percent']:.2f}%; required {MINIMUM}%)")
+    for error in errors:
+        print(f"error: {error}", file=sys.stderr)
+    return int(bool(errors))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -21,5 +21,12 @@ clipsync-storage.workspace = true
 eframe.workspace = true
 tokio.workspace = true
 
+[dev-dependencies]
+clipsync-crypto.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+axum.workspace = true
+clipsync-relay = { path = "../clipsync-relay" }
+
 [lints]
 workspace = true

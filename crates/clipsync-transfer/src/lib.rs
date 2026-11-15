@@ -1,6 +1,6 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 //! Chunked transfer, path sanitization, staging, and BLAKE3 commit.
 
 mod sanitize;

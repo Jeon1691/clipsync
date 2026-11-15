@@ -178,3 +178,115 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod coverage_tests {
+    use super::*;
+    use crate::test_support::Scratch;
+
+    #[test]
+    fn staged_images_are_private_and_cleanup_does_not_remove_other_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = Scratch::new();
+        let dir = root.dir("stage");
+        for (mime, name) in [
+            (ImageMime::Png, "clipboard.png"),
+            (ImageMime::Jpeg, "clipboard.jpg"),
+            (ImageMime::Webp, "clipboard.webp"),
+        ] {
+            let path = stage_image_in(&dir, mime, b"original bytes").unwrap();
+            assert_eq!(path.file_name().unwrap(), name);
+            assert_eq!(std::fs::read(&path).unwrap(), b"original bytes");
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let keep = dir.join("clipboard.png");
+        std::fs::write(dir.join(".clipboard.old.partial"), b"old temporary").unwrap();
+        std::fs::write(dir.join("unrelated.txt"), b"must stay").unwrap();
+        sweep_other_clipboard_files(&dir, &keep);
+        assert!(keep.exists());
+        assert!(!dir.join("clipboard.jpg").exists());
+        assert!(!dir.join("clipboard.webp").exists());
+        assert!(!dir.join(".clipboard.old.partial").exists());
+        assert_eq!(
+            std::fs::read(dir.join("unrelated.txt")).unwrap(),
+            b"must stay"
+        );
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        sweep_other_clipboard_files(&root.0.join("missing"), &keep);
+        let blocked = root.file("not-a-directory", b"unchanged");
+        assert!(stage_image_in(&blocked, ImageMime::Png, b"data").is_err());
+        assert_eq!(std::fs::read(blocked).unwrap(), b"unchanged");
+        let rename = root.dir("rename-blocked");
+        std::fs::create_dir(rename.join("clipboard.png")).unwrap();
+        assert!(stage_image_in(&rename, ImageMime::Png, b"data").is_err());
+        assert!(rename.join("clipboard.png").is_dir());
+    }
+    #[test]
+    fn path_choice_child() {
+        let Ok(case) = std::env::var("CLIPSYNC_STAGE_CASE") else {
+            return;
+        };
+        let expected = PathBuf::from(std::env::var_os("CLIPSYNC_STAGE_EXPECTED").unwrap());
+        if case == "default" {
+            assert!(pasteboard_dir().ends_with("pasteboard"));
+            return;
+        }
+        assert_eq!(pasteboard_dir(), expected);
+        if case == "home" {
+            let path = stage_image(ImageMime::Png, b"image data").unwrap();
+            assert!(paths_are_image_sidecars(std::slice::from_ref(&path)));
+            assert!(!paths_are_image_sidecars(&[]));
+            assert!(!paths_are_image_sidecars(&[path.clone(), path.clone()]));
+            assert!(!paths_are_image_sidecars(&[path
+                .parent()
+                .unwrap()
+                .to_path_buf()]));
+            let outside = expected.parent().unwrap().join("clipboard.png");
+            std::fs::write(&outside, b"outside").unwrap();
+            assert!(!paths_are_image_sidecars(std::slice::from_ref(&outside)));
+            std::fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(&outside, &path).unwrap();
+            assert!(!paths_are_image_sidecars(&[path]));
+        }
+    }
+    #[test]
+    fn staging_paths_respect_environment_precedence_and_reject_external_sidecars() {
+        for case in ["home", "data", "default"] {
+            let root = Scratch::new();
+            let home = root.0.join("app");
+            let data = root.dir("custom-data");
+            let expected = if case == "home" {
+                home.join("data/pasteboard")
+            } else {
+                data.join("pasteboard")
+            };
+            let mut child = root.child("stage::coverage_tests::path_choice_child");
+            child
+                .env("CLIPSYNC_STAGE_CASE", case)
+                .env("CLIPSYNC_STAGE_EXPECTED", &expected);
+            if case != "home" {
+                child.env("CLIPSYNC_HOME", "");
+            }
+            if case == "data" {
+                child.env("CLIPSYNC_DATA_DIR", &data);
+            }
+            if case == "default" {
+                child.env("CLIPSYNC_DATA_DIR", "");
+            }
+            let out = child.output().unwrap();
+            assert!(
+                out.status.success(),
+                "stage path {case} failed: {} {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+}

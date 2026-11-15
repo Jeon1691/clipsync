@@ -1,0 +1,244 @@
+// Copyright the ClipSync contributors.
+// SPDX-License-Identifier: MIT
+use std::process::{Command, Output};
+
+fn cli(root: &std::path::Path, json: bool, args: &[&str]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_clipsync"));
+    command
+        .env("HOME", root)
+        .env("USERPROFILE", root)
+        .env("APPDATA", root.join("appdata"))
+        .env("LOCALAPPDATA", root.join("local-appdata"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let tools = root.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        for name in ["systemctl", "launchctl"] {
+            let path = tools.join(name);
+            std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut paths = vec![tools];
+        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        command.env("PATH", std::env::join_paths(paths).unwrap());
+    }
+    command
+        .env("RUST_LOG", "error")
+        .env("CLIPSYNC_HOME", root)
+        .env("CLIPSYNC_NO_DAEMON", "1")
+        .env("CLIPSYNC_RELAY_URL", "http://127.0.0.1:1")
+        .env_remove("CLIPSYNC_LISTEN");
+    if json {
+        command.arg("--json");
+    }
+    command.args(args).output().unwrap()
+}
+
+#[test]
+fn local_cli_configuration_and_confirmation_contracts() {
+    let root = tempfile::tempdir().unwrap();
+    for json in [false, true] {
+        for args in [
+            vec!["config", "get"],
+            vec!["config", "get", "sync.enabled"],
+            vec!["config", "set", "notify.preview", "true"],
+            vec!["status"],
+            vec!["room", "list"],
+            vec!["sync", "pause"],
+            vec!["sync", "resume"],
+            vec!["doctor"],
+        ] {
+            let output = cli(root.path(), json, &args);
+            assert!(
+                output.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if json {
+                serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+            }
+            if args == ["config", "set", "notify.preview", "true"] {
+                let readback = cli(root.path(), true, &["config", "get", "notify.preview"]);
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&readback.stdout).unwrap()
+                        ["notify.preview"],
+                    "true"
+                );
+            }
+            if args == ["sync", "pause"] || args == ["sync", "resume"] {
+                let status = cli(root.path(), true, &["status"]);
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&status.stdout).unwrap()["paused"],
+                    args[1] == "pause"
+                );
+            }
+        }
+    }
+    let rejected = cli(root.path(), true, &["room", "leave"]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("confirmation required"));
+    for args in [
+        vec!["room", "leave", "--yes"],
+        vec!["--non-interactive", "room", "leave"],
+        vec!["--yes", "room", "leave"],
+    ] {
+        assert!(cli(root.path(), true, &args).status.success());
+    }
+    assert!(!cli(root.path(), true, &["devices"]).status.success());
+    assert!(
+        !cli(root.path(), true, &["config", "set", "invalid.key", "x"])
+            .status
+            .success()
+    );
+    let unknown = cli(root.path(), true, &["config", "get", "invalid.key"]);
+    assert!(unknown.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&unknown.stdout).unwrap(),
+        serde_json::json!({"invalid.key": null})
+    );
+}
+
+#[test]
+fn logs_report_absence_then_preserve_saved_text() {
+    let root = tempfile::tempdir().unwrap();
+    let output = cli(root.path(), true, &["logs"]);
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("no logs yet")
+            || String::from_utf8_lossy(&output.stderr).contains("no logs yet")
+    );
+    let paths = clipsync_storage::AppPaths::from_root(root.path().to_path_buf());
+    std::fs::write(paths.log_file(), "saved log\nsecond line\n").unwrap();
+    let output = cli(root.path(), false, &["logs"]);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"saved log\nsecond line\n");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cli_push_and_pull_preserve_daemon_payloads_in_json_and_human_output() {
+    const CHILD: &str = "CLIPSYNC_TEST_CLI_IPC";
+    if std::env::var_os(CHILD).is_none() {
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "cli_push_and_pull_preserve_daemon_payloads_in_json_and_human_output",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env_remove(clipsync_daemon::LISTEN_ENV)
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(std::time::Duration::from_secs(20), command.output())
+            .await
+            .expect("isolated IPC exchange exceeded its deadline")
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    use clipsync_daemon::{
+        read_request, write_response, IpcRequest, IpcResponse, IpcServer, PullPayload,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let paths = clipsync_storage::AppPaths::from_root(root.path().to_path_buf());
+    paths.ensure().unwrap();
+    let server = IpcServer::bind(&paths).await.unwrap();
+    let responder = tokio::spawn(async move {
+        for _ in 0..2 {
+            for payload in [
+                None,
+                Some("received text"),
+                Some("received text\n"),
+                Some(""),
+            ] {
+                let mut stream = server.accept().await.unwrap();
+                let request = read_request(&mut stream).await.unwrap().unwrap();
+                let pull = if let Some(text) = payload {
+                    assert!(matches!(request, IpcRequest::Pull));
+                    Some(PullPayload {
+                        kind: if text.is_empty() { "image" } else { "text" }.into(),
+                        text: if text.is_empty() {
+                            None
+                        } else {
+                            Some(text.into())
+                        },
+                        summary: "received item".into(),
+                    })
+                } else {
+                    assert!(
+                        matches!(request, IpcRequest::PushText { text } if text == "stdin payload")
+                    );
+                    None
+                };
+                write_response(
+                    &mut stream,
+                    &IpcResponse {
+                        ok: true,
+                        error: None,
+                        status: None,
+                        pull,
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        }
+    });
+    for json in [false, true] {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut push = Command::new(env!("CARGO_BIN_EXE_clipsync"));
+        if json {
+            push.arg("--json");
+        }
+        let mut push = push
+            .args(["push", "--type", "text"])
+            .env("RUST_LOG", "error")
+            .env("CLIPSYNC_HOME", root.path())
+            .env_remove(clipsync_daemon::LISTEN_ENV)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        push.stdin
+            .take()
+            .unwrap()
+            .write_all(b"stdin payload")
+            .unwrap();
+        let output = push.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if json {
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["ok"],
+                true
+            );
+        }
+        for expected in ["received text\n", "received text\n", "received item\n"] {
+            let output = cli(root.path(), json, &["pull"]);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if json {
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["summary"],
+                    "received item"
+                );
+            } else {
+                assert_eq!(output.stdout, expected.as_bytes());
+            }
+        }
+    }
+    responder.await.unwrap();
+}

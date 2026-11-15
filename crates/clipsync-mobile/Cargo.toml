@@ -29,5 +29,13 @@ tokio.workspace = true
 tracing.workspace = true
 uniffi = { workspace = true, features = ["cli"] }
 
+[dev-dependencies]
+clipsync-crypto.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+axum.workspace = true
+chrono.workspace = true
+clipsync-relay = { path = "../clipsync-relay" }
+
 [lints]
 workspace = true

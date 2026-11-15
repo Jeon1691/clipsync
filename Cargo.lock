@@ -1017,6 +1017,7 @@ dependencies = [
  "clap",
  "clipsync-clipboard",
  "clipsync-core",
+ "clipsync-crypto",
  "clipsync-daemon",
  "clipsync-protocol",
  "clipsync-relay",
@@ -1053,6 +1054,8 @@ dependencies = [
 name = "clipsync-core"
 version = "0.1.17"
 dependencies = [
+ "async-trait",
+ "axum",
  "base64",
  "blake3",
  "chrono",
@@ -1060,6 +1063,7 @@ dependencies = [
  "clipsync-crypto",
  "clipsync-daemon",
  "clipsync-protocol",
+ "clipsync-relay",
  "clipsync-storage",
  "clipsync-transfer",
  "clipsync-transport",
@@ -1120,10 +1124,15 @@ dependencies = [
 name = "clipsync-desktop"
 version = "0.1.17"
 dependencies = [
+ "axum",
  "clipsync-core",
+ "clipsync-crypto",
  "clipsync-daemon",
+ "clipsync-relay",
  "clipsync-storage",
  "eframe",
+ "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -1132,10 +1141,16 @@ name = "clipsync-mobile"
 version = "0.1.17"
 dependencies = [
  "async-trait",
+ "axum",
+ "chrono",
  "clipsync-clipboard",
  "clipsync-core",
+ "clipsync-crypto",
  "clipsync-protocol",
+ "clipsync-relay",
  "clipsync-storage",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tracing",

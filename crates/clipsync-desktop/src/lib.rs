@@ -1,6 +1,6 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 //! Desktop pairing and daemon control shared by the window.
 
 use clipsync_core::{begin_create_room, join_room, App};
@@ -85,5 +85,112 @@ mod tests {
         assert_eq!(normalize_join_code("48 29-13").as_deref(), Some("482913"));
         assert!(normalize_join_code("12345").is_none());
         assert!(normalize_join_code("1234567").is_none());
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod command_tests {
+    use super::*;
+    use clipsync_crypto::DeviceIdentity;
+    use clipsync_storage::{AppConfig, AppPaths};
+
+    fn fixture() -> (tempfile::TempDir, App) {
+        let root = tempfile::tempdir().unwrap();
+        let app = App::open_from(AppPaths::from_root(root.path().to_path_buf())).unwrap();
+        let id = DeviceIdentity::from_bytes("desktop-command-device".into(), [9; 32]);
+        std::fs::write(
+            app.store.paths.identity_file(),
+            serde_json::to_vec(&id.to_stored()).unwrap(),
+        )
+        .unwrap();
+        app.store
+            .save_config(&AppConfig {
+                relay_url: "http://127.0.0.1:0".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        (root, app)
+    }
+
+    #[test]
+    fn local_status_reports_identity_and_selected_room() {
+        let (_root, app) = fixture();
+        let status = local_status(&app).unwrap();
+        assert_eq!(status.device_id, "desktop-command-device");
+        assert!(status.room_id.is_none() && !status.daemon && !status.connected);
+        let room = serde_json::from_value(serde_json::json!({
+            "room_id":"desktop-room", "epoch":1, "role":"owner",
+            "created_at":"2026-11-15T00:00:00Z", "device_token":"synthetic",
+            "peers":[]
+        }))
+        .unwrap();
+        app.store.upsert_room(room).unwrap();
+        assert_eq!(
+            local_status(&app).unwrap().room_id.as_deref(),
+            Some("desktop-room")
+        );
+        std::fs::write(app.store.paths.config_file(), "broken = [").unwrap();
+        assert!(local_status(&app).unwrap_err().contains("toml"));
+    }
+
+    #[tokio::test]
+    async fn commands_reject_invalid_codes_and_unavailable_relay_without_launching_services() {
+        let (_root, app) = fixture();
+        assert_eq!(
+            join_room_code(&app, "123").await.unwrap_err(),
+            "enter a 6-digit code"
+        );
+        assert!(join_room_code(&app, "482913")
+            .await
+            .unwrap_err()
+            .contains("relay join"));
+        assert!(create_room(app.store.clone())
+            .await
+            .unwrap_err()
+            .contains("relay create"));
+        std::fs::write(app.store.paths.config_file(), "broken = [").unwrap();
+        assert!(create_room(app.store.clone())
+            .await
+            .unwrap_err()
+            .contains("toml"));
+        assert!(join_room_code(&app, "482913")
+            .await
+            .unwrap_err()
+            .contains("toml"));
+    }
+
+    #[tokio::test]
+    async fn create_returns_live_relay_offer_before_the_other_device_joins() {
+        let (_root, app) = fixture();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let config = clipsync_relay::RelayConfig {
+            bind: address,
+            public_url: format!("http://{address}"),
+            token_secret: vec![3; 32],
+            webhook_url: None,
+            webhook_secret: None,
+        };
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                clipsync_relay::router(config)
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let mut cfg = app.store.load_config().unwrap();
+        cfg.relay_url = format!("http://{address}");
+        app.store.save_config(&cfg).unwrap();
+        let code = create_room(app.store.clone()).await.unwrap();
+        assert_eq!(code.len(), 6);
+        assert!(code.bytes().all(|byte| byte.is_ascii_digit()));
+        assert!(
+            app.store.current_room().is_err(),
+            "an offer must not imply completed pairing"
+        );
+        server.abort();
     }
 }

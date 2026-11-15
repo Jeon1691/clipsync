@@ -399,3 +399,8 @@ impl RelayState {
         }
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "state_tests.rs"]
+mod tests;

@@ -135,7 +135,7 @@ jobs:
       - name: Scripts compile
         if: matrix.platform != 'windows'
         run: |
-          python3 -m py_compile scripts/e2e-brew.py scripts/check-regressions.py
+          python3 -m py_compile scripts/e2e-brew.py scripts/check-regressions.py scripts/check-coverage.py
           bash -n scripts/update-homebrew-formula.sh
       - name: Script regression tests
         if: matrix.platform != 'windows'

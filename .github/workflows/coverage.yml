@@ -69,8 +69,10 @@ jobs:
             echo 'Full source report: download the coverage artifact and open html/index.html.'
             echo 'Inline test-only modules/helpers are excluded from product metrics; all production workspace sources remain included.'
             echo 'Historical-defect regression coverage is checked separately by the 50% ledger gate in ci.yml.'
-            echo 'Silver target: 80% statement coverage. Gold targets: 90% statement and 80% branch coverage. These remain unmet until measured and reviewed; no files are excluded to improve the percentage.'
+            echo 'Silver gate: at least 80% product lines and executable regions. Gold targets: 90% statements and 80% branches. Product sources remain included; report the measured results.'
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Require Silver product coverage
+        run: python3 scripts/check-coverage.py coverage/summary.json
       - name: Upload LCOV, HTML, and line/branch summaries
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -116,7 +118,7 @@ jobs:
           retention-days: 30
 
   native-asan:
-    name: macOS clipboard and daemon AddressSanitizer
+    name: macOS clipboard, daemon, and mobile AddressSanitizer
     # This standard runner is Apple Silicon; the test binaries run natively.
     runs-on: macos-15
     timeout-minutes: 30
@@ -140,7 +142,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p coverage
-          cargo test --target aarch64-apple-darwin -p clipsync-clipboard -p clipsync-daemon --all-targets --locked -- --test-threads=1 2>&1 | tee coverage/native-asan.txt
+          cargo test --target aarch64-apple-darwin -p clipsync-clipboard -p clipsync-daemon -p clipsync-mobile --all-targets --locked -- --test-threads=1 2>&1 | tee coverage/native-asan.txt
       - name: Upload native sanitizer log
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

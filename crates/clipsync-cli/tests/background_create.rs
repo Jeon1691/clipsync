@@ -9,6 +9,17 @@ use clipsync_relay::{router, RelayConfig};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 
+fn seed_identity_file(home: &Path) {
+    let paths = clipsync_storage::AppPaths::from_root(home.to_path_buf());
+    paths.ensure().unwrap();
+    let identity = clipsync_crypto::DeviceIdentity::generate();
+    std::fs::write(
+        paths.identity_file(),
+        serde_json::to_vec(&identity.to_stored()).unwrap(),
+    )
+    .unwrap();
+}
+
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_clipsync")
 }
@@ -77,6 +88,7 @@ async fn foreground_offer_is_flushed_before_a_peer_joins() {
 
     let (relay, relay_task) = start_relay().await;
     let home = TempDir::new().unwrap();
+    seed_identity_file(home.path());
     let mut child = tokio::process::Command::new(bin())
         .args(["--json", "room", "create", "--foreground", "--no-auto-sync"])
         .env("RUST_LOG", "error")
@@ -114,6 +126,7 @@ fn background_failure_preserves_the_child_relay_error() {
     let relay = format!("http://{}", listener.local_addr().unwrap());
     drop(listener);
     let home = TempDir::new().unwrap();
+    seed_identity_file(home.path());
     let output = clipsync(home.path(), &relay, &["room", "create", "--no-auto-sync"]);
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);

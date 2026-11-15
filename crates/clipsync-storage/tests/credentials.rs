@@ -214,3 +214,55 @@ fn partial_secret_write_does_not_destroy_the_previous_credential() {
         "previous synthetic credential"
     );
 }
+
+#[test]
+fn missing_credentials_fail_without_overwriting_saved_metadata() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
+    let previous = store.load_config().unwrap();
+    store.save_config(&previous).unwrap();
+    let original = std::fs::read(store.paths.config_file()).unwrap();
+    let mut value = serde_json::to_value(previous).unwrap();
+    value["webhook"] = serde_json::json!({"url": "https://example.test/hook", "secret": ""});
+    let invalid: AppConfig = serde_json::from_value(value).unwrap();
+    assert!(store.save_config(&invalid).is_err());
+    assert_eq!(std::fs::read(store.paths.config_file()).unwrap(), original);
+    let mut invalid_room = room();
+    invalid_room.device_token.clear();
+    assert!(store
+        .save_state(&StateFile {
+            rooms: vec![invalid_room],
+            ..StateFile::default()
+        })
+        .is_err());
+    assert!(!store.paths.state_file().exists());
+}
+
+#[test]
+fn room_root_and_epoch_keys_are_replaceable_and_malformed_keys_are_rejected() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
+    let room = RoomId::new();
+    let root_key = [17; 32];
+    let epoch_key = [19; 32];
+    store
+        .save_room_keys(&room, &hex::encode(root_key), &hex::encode(epoch_key))
+        .unwrap();
+    assert_eq!(store.load_room_root(&room).unwrap(), root_key);
+    assert_eq!(store.load_epoch_key(&room).unwrap(), epoch_key);
+    let rotated = [23; 32];
+    store.save_epoch_key(&room, &rotated).unwrap();
+    assert_eq!(store.load_epoch_key(&room).unwrap(), rotated);
+    assert_eq!(store.load_room_root(&room).unwrap(), root_key);
+    std::fs::write(
+        store.paths.data_dir.join(format!("epoch-{room}.secret")),
+        "00",
+    )
+    .unwrap();
+    assert!(store.load_epoch_key(&room).is_err());
+    store.secrets.delete_named(&format!("room-{room}")).unwrap();
+    store
+        .secrets
+        .delete_named(&format!("epoch-{room}"))
+        .unwrap();
+}

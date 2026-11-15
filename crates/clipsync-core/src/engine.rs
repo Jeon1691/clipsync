@@ -997,3 +997,8 @@ async fn finish_pull(
 pub fn _unused_ws(url: &str) -> String {
     http_to_ws(url)
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../tests/support/engine_behavior.rs"]
+mod behavior_tests;

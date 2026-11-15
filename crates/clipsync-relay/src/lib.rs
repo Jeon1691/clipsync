@@ -1,6 +1,6 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 //! Zero-knowledge ClipSync relay: pairing rendezvous and encrypted frame routing.
 
 mod auth;
@@ -187,3 +187,8 @@ pub enum JoinError {
 
 pub use auth::{issue_token, verify_token, TokenClaims};
 pub use ws::WsOut;
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "http_tests.rs"]
+mod http_tests;

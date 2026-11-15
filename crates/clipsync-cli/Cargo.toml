@@ -30,6 +30,7 @@ tokio.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+clipsync-crypto.workspace = true
 axum.workspace = true
 clipsync-relay = { path = "../clipsync-relay" }
 serde_json.workspace = true

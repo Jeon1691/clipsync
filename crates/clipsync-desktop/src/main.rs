@@ -1,5 +1,6 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 //! ClipSync window for macOS, Windows, and Linux.
 
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -122,8 +123,8 @@ impl DesktopApp {
     }
 }
 
-impl eframe::App for DesktopApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl DesktopApp {
+    fn update_ui(&mut self, ctx: &egui::Context) {
         self.drain();
         ctx.request_repaint_after(Duration::from_secs(1));
         if ctx.input(|i| i.time).fract() < 0.05 {
@@ -213,6 +214,12 @@ impl eframe::App for DesktopApp {
     }
 }
 
+impl eframe::App for DesktopApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.update_ui(ctx);
+    }
+}
+
 fn main() -> eframe::Result {
     let app = match DesktopApp::new() {
         Ok(app) => app,
@@ -229,4 +236,255 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native("ClipSync", options, Box::new(|_cc| Ok(Box::new(app))))
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use clipsync_crypto::DeviceIdentity;
+    use clipsync_daemon::{
+        read_request, write_response, IpcRequest, IpcResponse, IpcServer, StatusPayload,
+    };
+    use clipsync_storage::{AppConfig, AppPaths};
+
+    fn fixture() -> (tempfile::TempDir, DesktopApp) {
+        let root = tempfile::tempdir().unwrap();
+        let core = App::open_from(AppPaths::from_root(root.path().to_path_buf())).unwrap();
+        let id = DeviceIdentity::from_bytes("desktop-test-device".into(), [7; 32]);
+        std::fs::write(
+            core.store.paths.identity_file(),
+            serde_json::to_vec(&id.to_stored()).unwrap(),
+        )
+        .unwrap();
+        let cfg = AppConfig {
+            relay_url: "http://127.0.0.1:0".into(),
+            ..Default::default()
+        };
+        core.store.save_config(&cfg).unwrap();
+        let status = local_status(&core).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let app = DesktopApp {
+            core,
+            rt: tokio::runtime::Runtime::new().unwrap(),
+            tx,
+            rx,
+            status,
+            pairing_code: None,
+            join_code: String::new(),
+            error: None,
+            busy: false,
+        };
+        (root, app)
+    }
+
+    fn frame(app: &mut DesktopApp) -> String {
+        let ctx = egui::Context::default();
+        let output = ctx.run(
+            egui::RawInput {
+                time: Some(0.5),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(440.0, 560.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| app.update_ui(ctx),
+        );
+        output
+            .shapes
+            .iter()
+            .filter_map(|shape| {
+                if let egui::Shape::Text(text) = &shape.shape {
+                    Some(text.galley.text().to_owned())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn headless_window_shows_pairing_and_connection_states() {
+        let (_root, mut app) = fixture();
+        let text = frame(&mut app);
+        assert!(text.contains("Not paired"));
+        assert!(text.contains("Create room"));
+        assert!(text.contains("Join"));
+        assert!(text.contains("device desktop-test"));
+        app.pairing_code = Some("482913".into());
+        app.busy = true;
+        app.error = Some("synthetic relay failure".into());
+        let text = frame(&mut app);
+        assert!(text.contains("PAIRING CODE") && text.contains("482913"));
+        assert!(text.contains("synthetic relay failure"));
+        app.status.room_id = Some("01J00000000000000000000000".into());
+        app.status.connected = true;
+        let text = frame(&mut app);
+        assert!(text.contains("relay connected"));
+        assert!(!text.contains("PAIRING CODE"));
+        app.status.connected = false;
+        app.status.daemon = true;
+        assert!(frame(&mut app).contains("daemon up"));
+        app.status.daemon = false;
+        let text = frame(&mut app);
+        assert!(text.contains("daemon off"));
+        assert!(text.contains("Start background sync"));
+    }
+
+    #[test]
+    fn worker_results_clear_busy_and_replace_pairing_or_room_state() {
+        let (_root, mut app) = fixture();
+        app.busy = true;
+        app.error = Some("previous error".into());
+        app.tx.send(Work::Created(Ok("482913".into()))).unwrap();
+        app.drain();
+        assert!(!app.busy && app.error.is_none());
+        assert_eq!(app.pairing_code.as_deref(), Some("482913"));
+        app.tx
+            .send(Work::Created(Err("create rejected".into())))
+            .unwrap();
+        app.drain();
+        assert_eq!(app.error.as_deref(), Some("create rejected"));
+        app.tx
+            .send(Work::Joined(Err("join rejected".into())))
+            .unwrap();
+        app.drain();
+        assert_eq!(app.error.as_deref(), Some("join rejected"));
+        app.tx.send(Work::Joined(Ok("paired-room".into()))).unwrap();
+        app.drain();
+        assert_eq!(app.status.room_id.as_deref(), Some("paired-room"));
+        assert!(app.pairing_code.is_none() && app.error.is_none());
+    }
+
+    #[test]
+    fn invalid_join_and_broken_configuration_surface_background_errors() {
+        let (_root, mut app) = fixture();
+        app.join_code = "12".into();
+        app.error = Some("old error".into());
+        app.start_join();
+        assert!(app.busy && app.error.is_none());
+        let work = app.rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        app.tx.send(work).unwrap();
+        app.drain();
+        assert_eq!(app.error.as_deref(), Some("enter a 6-digit code"));
+        std::fs::write(app.core.store.paths.config_file(), "broken = [").unwrap();
+        app.start_create();
+        assert!(app.busy && app.error.is_none());
+        let work = app.rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        app.tx.send(work).unwrap();
+        app.drain();
+        assert!(!app.busy);
+        assert!(app.error.as_deref().unwrap().contains("toml"));
+    }
+
+    #[test]
+    fn refresh_uses_ipc_status_and_resets_disconnected_daemon() {
+        // Endpoint overrides belong to the embedding process. Clear them only
+        // in an isolated child, so this fixture can never unlink a user socket.
+        const CHILD: &str = "CLIPSYNC_TEST_DESKTOP_IPC_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::refresh_uses_ipc_status_and_resets_disconnected_daemon",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env_remove(clipsync_daemon::LISTEN_ENV)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let (_root, mut app) = fixture();
+        let server = app
+            .rt
+            .block_on(IpcServer::bind(&app.core.store.paths))
+            .unwrap();
+        let worker = app.rt.spawn(async move {
+            let mut conn = server.accept().await.unwrap();
+            assert!(matches!(
+                read_request(&mut conn).await.unwrap(),
+                Some(IpcRequest::Status)
+            ));
+            write_response(
+                &mut conn,
+                &IpcResponse {
+                    ok: true,
+                    error: None,
+                    pull: None,
+                    status: Some(StatusPayload {
+                        daemon: true,
+                        paused: false,
+                        connected: true,
+                        peer_online: true,
+                        room_id: Some("daemon-room".into()),
+                        device_id: None,
+                        device_name: None,
+                        relay_url: None,
+                        last_item_kind: None,
+                        last_sync_at: None,
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        });
+        app.refresh();
+        app.rt.block_on(worker).unwrap();
+        assert!(app.status.daemon && app.status.connected);
+        assert_eq!(app.status.room_id.as_deref(), Some("daemon-room"));
+        assert_eq!(app.status.relay_url, "http://127.0.0.1:0");
+        app.refresh();
+        assert!(!app.status.daemon && !app.status.connected);
+        assert!(app.status.room_id.is_none());
+    }
+
+    #[test]
+    fn constructor_respects_selected_home_and_reports_configuration_errors() {
+        let (root, _app) = fixture();
+        for invalid in [false, true] {
+            if invalid {
+                std::fs::write(root.path().join("config/config.toml"), "broken = [").unwrap();
+            }
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::constructor_child", "--nocapture"])
+                .env(
+                    "CLIPSYNC_TEST_DESKTOP_CASE",
+                    if invalid { "invalid" } else { "valid" },
+                )
+                .env("CLIPSYNC_HOME", root.path())
+                .env("CLIPSYNC_RELAY_URL", "http://127.0.0.1:19")
+                .env_remove("CLIPSYNC_LISTEN")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn constructor_child() {
+        let Ok(case) = std::env::var("CLIPSYNC_TEST_DESKTOP_CASE") else {
+            return;
+        };
+        if case == "invalid" {
+            assert!(DesktopApp::new().err().unwrap().contains("toml"));
+        } else {
+            let app = DesktopApp::new().unwrap();
+            assert_eq!(app.status.device_id, "desktop-test-device");
+            assert_eq!(app.status.relay_url, "http://127.0.0.1:19");
+            assert!(app.status.room_id.is_none());
+        }
+    }
 }
