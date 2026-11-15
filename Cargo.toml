@@ -90,7 +90,7 @@ ulid = { version = "1", features = ["serde"] }
 uniffi = "0.32.2"
 url = "2"
 which = "7"
-x25519-dalek = { version = "2", features = ["static_secrets", "getrandom", "zeroize"] }
+x25519-dalek = { version = "3", features = ["static_secrets", "getrandom", "zeroize"] }
 zeroize = { version = "1", features = ["zeroize_derive"] }
 
 clipsync-protocol = { path = "crates/clipsync-protocol" }
