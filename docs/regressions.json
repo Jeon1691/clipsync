@@ -1725,6 +1725,41 @@
         }
       ],
       "notes": "The actual publication shell runs against an isolated GitHub fixture. A changed uploaded evidence file must leave the release unpublished; a valid complete set is verified before the public transition. Windows skips the Ubuntu publication-shell fixture rather than claiming local execution."
+    },
+    {
+      "id": "F88",
+      "kind": "Runtime",
+      "fixes": [
+        "7eb0c5c2a2e8603b621efeb3676d25a8e91abd63"
+      ],
+      "description": "Revocation removed a device routing entry before sending Close, leaving its authenticated socket open; rejected member handshakes could also register before validation",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/ws_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "ws::tests::regression_f88_revocation_closes_the_registered_socket_before_discarding_its_sender",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/ws_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "ws::tests::regression_f88_revoked_network_peer_is_closed_cannot_send_and_cannot_reauthenticate",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "The old source times out waiting for Close. The fixed handler captures the sender before removing routing state and validates member authorization before registration. Actual websocket regression checks Close, post-close send rejection, preserved owner Ping, revoked state/epoch and rejected reconnect. RED/GREEN was observed on macOS; each platform registration still requires its CI execution."
     }
   ]
 }

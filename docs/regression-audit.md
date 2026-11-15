@@ -1,6 +1,6 @@
 # Six-month regression-test audit — 2026-11-15
 
-The complete ledger now registers **47 of 87 distinct corrected defects (54.02%)**,
+The complete ledger now registers **48 of 88 distinct corrected defects (54.55%)**,
 meeting the Silver requirement of at least 50%. [The machine-readable ledger](regressions.json)
 and [CI checker](../scripts/check-regressions.py) preserve the full denominator
 and derive credit from concrete test references, not a manually entered Boolean.
@@ -34,9 +34,9 @@ that an assertion reproduces a historical defect.
 
 | Scope | Registered defects | Complete defects | Fraction |
 | --- | ---: | ---: | ---: |
-| Broad ledger | 47 | 87 | 54.02% |
-| Project runtime/security | 41 | 54 | 75.93% |
-| All project-authored corrections | 47 | 75 | 62.67% |
+| Broad ledger | 48 | 88 | 54.55% |
+| Project runtime/security | 42 | 55 | 76.36% |
+| All project-authored corrections | 48 | 76 | 63.16% |
 
 The original baseline increased from **24/84 (28.57%)** to **44/84 (52.38%)** without
 removing defects or treating test variants as extra bugs. The newly covered rows
@@ -186,3 +186,5 @@ imposed by OpenSSF. See [testing](testing.md) for the separate production-source
 line/region/branch measurements; a regression-defect fraction is not statement coverage.
 
 | F87 | Build/CI | [d9ec242](https://github.com/Jeon1691/clipsync/commit/d9ec24225f22128a1fa2ef3df5c12b02d782b394) | Public release exposed before complete uploaded asset verification | **Registered** — actual publication shell rejects changed uploaded evidence and verifies a complete draft before public transition; Linux/macOS fixture, Ubuntu publisher. |
+
+| F88 | Runtime | [7eb0c5c](https://github.com/Jeon1691/clipsync/commit/7eb0c5c2a2e8603b621efeb3676d25a8e91abd63) | Revoked relay device retained its authenticated socket; rejected Hello registered before membership validation | **Registered** — direct sender and real-WebSocket RED/GREEN regressions verify Close, blocked sends/reconnect, owner liveness and persisted revocation. |

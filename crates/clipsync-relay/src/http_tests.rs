@@ -3,6 +3,7 @@
 use super::*;
 use axum::extract::ConnectInfo;
 use clipsync_protocol::{DeviceId, PairingSessionId, PROTOCOL_VERSION};
+use tokio::net::TcpListener;
 
 #[tokio::test]
 async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses() {
