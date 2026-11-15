@@ -193,13 +193,41 @@ fn tiny_webp() -> Vec<u8> {
     bytes
 }
 
+/// Wait for this test's relay to observe connection setup or teardown.
+async fn wait_for_connection_count(relay: &str, expected: usize) {
+    let client = reqwest::Client::new();
+    let target = format!("clipsync_ws_connections {expected}");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let metrics = client
+                .get(format!("{relay}/metrics"))
+                .send()
+                .await
+                .expect("relay metrics request")
+                .error_for_status()
+                .expect("relay metrics status")
+                .text()
+                .await
+                .expect("relay metrics body");
+            if metrics.lines().any(|line| line == target.as_str()) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("relay did not reach {expected} connections"));
+}
+
 async fn transfer_item(a: &TempDir, b: &TempDir, item: ClipboardItem, out: &std::path::Path) {
     let store_b = store_in(b);
+    let relay = store_b.load_config().unwrap().relay_url;
+    wait_for_connection_count(&relay, 0).await;
     let out_owned = out.to_path_buf();
     let pull = tokio::spawn(async move {
         clipsync_core::engine_oneshot_pull(&store_b, false, true, Some(out_owned)).await
     });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_for_connection_count(&relay, 1).await;
     clipsync_core::engine_oneshot_push(&store_in(a), item)
         .await
         .expect("push");
