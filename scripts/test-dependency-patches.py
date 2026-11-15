@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 """Run upstream parser/wire/XML tests from disposable copies of our source patches."""
 import argparse
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -21,8 +22,11 @@ def main():
     # CARGO_MANIFEST_DIR snapshots consistent across repeated upstream test runs.
     work = target / "source-tests"
     work.mkdir(exist_ok=True)
-    packages = sorted(p.name for p in (ROOT / "vendor").iterdir()
-                      if (p / "Cargo.toml").is_file())
+    packages = sorted(source["name"] for source in
+                      json.loads((ROOT / "vendor/sources.json").read_text())["sources"])
+    actual = {p.name for p in (ROOT / "vendor").iterdir() if (p / "Cargo.toml").is_file()}
+    if actual != set(packages) or len(packages) != len(actual):
+        raise SystemExit("Every vendored test package must appear exactly once in sources.json")
     for name in packages:
         if (work / name).exists():
             shutil.rmtree(work / name)
@@ -32,8 +36,11 @@ def main():
     (work / "Cargo.toml").write_text(
         f'[workspace]\nresolver = "2"\nmembers = [{members}]\n[patch.crates-io]\n{patches}'
     )
+    # Freeze upstream dev-dependencies separately from ClipSync's product lock.
+    # Copy on every invocation; a stale disposable lock cannot affect the run.
+    shutil.copyfile(ROOT / "vendor/test-workspace.Cargo.lock", work / "Cargo.lock")
     command = ["cargo"] + ([f"+{args.toolchain}"] if args.toolchain else [])
-    command += ["test", "--manifest-path", str(work / "Cargo.toml"), "--lib"]
+    command += ["test", "--locked", "--manifest-path", str(work / "Cargo.toml"), "--lib"]
     for name in ["askama_derive", "atspi-common", "zbus-lockstep", "zbus-lockstep-macros"]:
         command += ["-p", name]
     env = dict(os.environ, CARGO_TARGET_DIR=str(target / "patch-tests"))

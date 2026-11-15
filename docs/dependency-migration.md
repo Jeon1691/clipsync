@@ -96,3 +96,40 @@ Local validation on 2026-11-15 used Rust 1.100.0, with an actual Rust 1.95.0 che
 Hosted Windows/macOS/Linux checks and the final release/reproducible-build
 verification remain release gates. The local checks above do not substitute for
 those results.
+
+## Automated compatibility checks
+
+[The dependency patch workflow](../.github/workflows/dependency-patches.yml)
+runs on every pull request, default-branch push, weekly schedule and manual
+request. `Dependency source and upstream tests` verifies every original source
+archive against the catalog checksum, applies its full recorded patch, and
+compares every resulting source file with the vendored copy. It then executes
+the existing upstream parser, AT-SPI wire/schema, XML and macro tests from
+disposable copies. These checks fail the job on errors; no validator or
+accessibility interface is disabled to obtain a pass.
+
+The independent `vendor/test-workspace.Cargo.lock` freezes the disposable
+workspace's upstream development dependencies. The test script copies that
+committed lock on every run and invokes Cargo with `--locked`; the product
+`Cargo.lock` is unchanged. To update the test graph intentionally, regenerate
+that separate lock using the disposable workspace manifest, review its changes,
+copy it back to `vendor/test-workspace.Cargo.lock`, and rerun both source and
+behavior checks. Changing product dependencies alone does not silently refresh
+this test resolution.
+
+`Linux native dependency smoke` builds the actual desktop in the digest-pinned
+Bookworm builder, retaining Fontconfig/FreeType, bundled fonts, X11, Wayland and
+AT-SPI support. It runs the existing private Xvfb/D-Bus accessibility check and
+headless Weston/GL screenshot check. System Python supplies the distro's
+GI/pyatspi bindings. The Bookworm environment keeps the exercised Weston 10
+command-line/screenshot interfaces; Ubuntu 24.04's [Weston 13](https://packages.ubuntu.com/noble/weston)
+has different renderer options and is not substituted without validation.
+Environment/package versions, logs and screenshots are retained as workflow
+artifacts. The automated Wayland check establishes window survival, native title
+and screenshot capture; a human must inspect the screenshot before claiming
+visual correctness. This Linux smoke is not a complete accessibility audit or
+Windows/macOS/mobile runtime evidence.
+
+Configured checks are not passing evidence until their workflow run succeeds.
+These controls also do not replace the maintainer's weekly upstream/security
+review and patch-retirement decisions described in the vendor register.
