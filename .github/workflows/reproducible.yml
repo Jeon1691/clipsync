@@ -59,7 +59,10 @@ jobs:
       - name: Exact Rust toolchain
         run: rustup toolchain install 1.100.0 --profile minimal --no-self-update
       - name: Build independent trees and compare bytes
-        run: bash scripts/check-repeatable-build.sh target/repeatability-report
+        run: |
+          # checkout's temporary HOME does not persist this trust into the job container.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          bash scripts/check-repeatable-build.sh target/repeatability-report
       - name: Retain environment, hashes, build logs and differing outputs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

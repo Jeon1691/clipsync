@@ -20,6 +20,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Repository rust-toolchain.toml selects stable unless explicitly overridden.
+  RUSTUP_TOOLCHAIN: nightly-2026-11-11
 
 jobs:
   coverage:
