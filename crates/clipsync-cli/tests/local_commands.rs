@@ -242,3 +242,64 @@ async fn cli_push_and_pull_preserve_daemon_payloads_in_json_and_human_output() {
     }
     responder.await.unwrap();
 }
+
+#[test]
+fn initialized_identity_and_paired_devices_are_visible_in_both_output_modes() {
+    use clipsync_protocol::{DeviceId, DeviceRole, RoomId};
+    use clipsync_storage::{AppPaths, LocalStore, PeerRecord, RoomRecord};
+    let root = tempfile::tempdir().unwrap();
+    let paths = AppPaths::from_root(root.path().to_path_buf());
+    let store = LocalStore::open_from(paths.clone()).unwrap();
+    // A valid file-backed identity avoids creating native Keychain entries.
+    let identity = clipsync_crypto::DeviceIdentity::generate();
+    std::fs::write(
+        paths.identity_file(),
+        serde_json::to_vec(&identity.to_stored()).unwrap(),
+    )
+    .unwrap();
+    let peer = PeerRecord {
+        device_id: DeviceId::new(),
+        device_name: "fixture peer".into(),
+        os: "fixture-os".into(),
+        role: DeviceRole::Member,
+        public_key_hex: "public fixture".into(),
+        fingerprint: "fixture-fingerprint".into(),
+    };
+    let room = RoomRecord {
+        room_id: RoomId::new(),
+        epoch: 3,
+        role: DeviceRole::Owner,
+        created_at: chrono::Utc::now(),
+        device_token: "synthetic fixture token".into(),
+        peers: vec![peer.clone()],
+    };
+    store.upsert_room(room.clone()).unwrap();
+    for json in [false, true] {
+        let initialized = cli(
+            root.path(),
+            json,
+            &["init", "--relay-url", "http://127.0.0.1:4567"],
+        );
+        assert!(
+            initialized.status.success(),
+            "{}",
+            String::from_utf8_lossy(&initialized.stderr)
+        );
+        let output = String::from_utf8(initialized.stdout).unwrap();
+        assert!(output.contains(identity.device_id.as_str()));
+        assert!(output.contains(&identity.fingerprint()));
+        assert_eq!(
+            store.load_config().unwrap().relay_url,
+            "http://127.0.0.1:4567"
+        );
+        let devices = cli(root.path(), json, &["devices"]);
+        assert!(devices.status.success());
+        let output = String::from_utf8(devices.stdout).unwrap();
+        assert!(output.contains(peer.device_id.as_str()));
+        assert!(output.contains("fixture peer"));
+        assert!(output.contains("fixture-fingerprint"));
+        let rooms = cli(root.path(), json, &["room", "list"]);
+        assert!(rooms.status.success());
+        assert!(String::from_utf8_lossy(&rooms.stdout).contains(room.room_id.as_str()));
+    }
+}

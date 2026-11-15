@@ -375,3 +375,82 @@ async fn text_queues_offline_but_binary_requires_an_online_peer() {
         "text envelope item_kind mismatch"
     );
 }
+
+#[tokio::test]
+async fn missing_peers_and_pairing_abort_report_explicit_control_outcomes() {
+    let state = state();
+    let (rid, owner, member, token, _) = room(&state);
+    let (tx, mut rx) = mpsc::channel(16);
+    let mut ctx = None;
+    handle_control(&state, &tx, &mut ctx, hello(&owner, &rid, &token), None)
+        .await
+        .unwrap();
+    receive(&mut rx).await;
+    assert!(state.revoke(rid.as_str(), member.as_str()));
+    let now = chrono::Utc::now();
+    let routing = RoutingHeader {
+        version: clipsync_protocol::PROTOCOL_VERSION,
+        message_id: MessageId::new(),
+        transfer_id: TransferId::new(),
+        room_id: rid,
+        sender_device_id: owner,
+        recipient: Recipient::Broadcast,
+        sent_at: now,
+        expires_at: now + chrono::Duration::seconds(60),
+        item_kind: ItemKind::Text,
+        seq: 1,
+    };
+    let message_id = routing.message_id.clone();
+    handle_control(
+        &state,
+        &tx,
+        &mut ctx,
+        ControlMessage::TextEnvelope {
+            routing,
+            nonce: "opaque".into(),
+            ciphertext: "opaque".into(),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(receive(&mut rx).await, ControlMessage::Ack { message_id: id, status: AckStatus::PeerOffline, .. } if id == message_id)
+    );
+    let sid = PairingSessionId::new();
+    let pending = state
+        .create_pairing(CreatePairingRequest {
+            protocol_version: clipsync_protocol::PROTOCOL_VERSION,
+            pairing_session_id: sid.clone(),
+            device_id: DeviceId::new(),
+            device_name: "fixture".into(),
+            os: "fixture".into(),
+            ttl_secs: None,
+        })
+        .unwrap();
+    ctx.as_mut().unwrap().pairing_sid = Some(sid.to_string());
+    handle_control(
+        &state,
+        &tx,
+        &mut ctx,
+        ControlMessage::Error {
+            code: "abort".into(),
+            message: "cancelled by fixture".into(),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(state.pairing(&pending.pairing_code).is_none());
+    send_err(&tx, "fixture_error", "details").await;
+    assert!(
+        matches!(receive(&mut rx).await, ControlMessage::Error { code, message } if code == "fixture_error" && message == "details")
+    );
+    handle_control(&state, &tx, &mut ctx, ControlMessage::Pong { ts: 5 }, None)
+        .await
+        .unwrap();
+    assert!(
+        rx.try_recv().is_err(),
+        "unsolicited pong must not generate a reply loop"
+    );
+}
