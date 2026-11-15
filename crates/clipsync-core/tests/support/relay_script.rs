@@ -53,6 +53,18 @@ impl Server {
         F: FnOnce(WebSocket) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
+        Self::websocket_with_deadline(router, Duration::from_secs(8), script).await
+    }
+
+    pub async fn websocket_with_deadline<F, Fut>(
+        router: Router,
+        deadline: Duration,
+        script: F,
+    ) -> Self
+    where
+        F: FnOnce(WebSocket) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
         let (finished, completion) = tokio::sync::oneshot::channel();
         let script = Arc::new(Mutex::new(Some((script, finished))));
         let mut server = Self::http(router.route(
@@ -61,7 +73,7 @@ impl Server {
                 let (script, finished) = script.lock().unwrap().take().unwrap();
                 async move {
                     upgrade.on_upgrade(move |socket| async move {
-                        tokio::time::timeout(Duration::from_secs(8), script(socket))
+                        tokio::time::timeout(deadline, script(socket))
                             .await
                             .expect("scripted relay timed out");
                         let _ = finished.send(());

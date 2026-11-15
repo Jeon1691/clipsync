@@ -45,7 +45,6 @@ pub async fn ws_handler(
 struct ConnCtx {
     device_id: String,
     room_id: String,
-    role: ClientRole,
     pairing_sid: Option<String>,
     device_role: DeviceRole,
 }
@@ -95,17 +94,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
                 }
             }
             Message::Binary(b) => {
-                if b.len() > FRAME_HARD_CAP {
-                    send_err(&tx, "too_large", "frame exceeds hard cap").await;
-                    continue;
-                }
                 if let Some(c) = &ctx {
-                    if c.role == ClientRole::Member
-                        || c.role == ClientRole::PairingA
-                        || c.role == ClientRole::PairingB
-                    {
-                        forward_binary(&state, c, b.to_vec(), &tx).await;
-                    }
+                    forward_binary(&state, c, b.to_vec(), &tx).await;
                 }
             }
             Message::Ping(p) => {
@@ -175,7 +165,6 @@ async fn handle_control(
             let conn = ConnCtx {
                 device_id: device_id.as_str().to_string(),
                 room_id: claims.rid.as_str().to_string(),
-                role,
                 pairing_sid: pairing_session_id
                     .as_ref()
                     .map(|s| s.as_str().to_string())

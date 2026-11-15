@@ -452,6 +452,125 @@ mod tests {
         assert_eq!(stable_daemon_exe(&p), p);
     }
 
+    #[test]
+    fn stable_exe_keeps_unlinked_cellar_and_accepts_a_windows_prefix_shim() {
+        let root = tempfile::tempdir().unwrap();
+        let versioned = root.path().join("Cellar/clipsync/0.1.17/bin/clipsync");
+        assert_eq!(stable_daemon_exe(&versioned), versioned);
+        let shim = root.path().join("bin/clipsync.exe");
+        fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        fs::write(&shim, b"").unwrap();
+        assert_eq!(stable_daemon_exe(&versioned), shim);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn failed_service_managers_fall_back_to_a_real_isolated_process_or_report_spawn_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+        const CHILD: &str = "CLIPSYNC_TEST_SERVICE_FALLBACK";
+        if let Ok(case) = std::env::var(CHILD) {
+            let root = PathBuf::from(std::env::var_os("CLIPSYNC_TEST_FIXTURE_ROOT").unwrap());
+            let paths = AppPaths::from_root(root.join("app"));
+            paths.ensure().unwrap();
+            let executable = root.join(if case == "spawn-failed" {
+                "missing-daemon"
+            } else {
+                "daemon"
+            });
+            #[cfg(target_os = "macos")]
+            let result = install_launchd(&executable, &paths);
+            #[cfg(target_os = "linux")]
+            let result = install_systemd(&executable, &paths);
+            if case == "spawn-failed"
+                || case == "bad-parent"
+                || cfg!(target_os = "linux") && case == "missing-manager"
+            {
+                assert!(result.is_err());
+                assert!(!root.join("spawned").exists());
+                return;
+            }
+            result.unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !root.join("spawned").exists() {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let arguments = fs::read_to_string(root.join("spawned")).unwrap();
+            assert!(arguments.starts_with("daemon run\n"), "{arguments}");
+            if case == "present" {
+                assert!(arguments.contains("app-home"));
+            }
+            assert!(is_service_installed());
+            stop_and_uninstall().unwrap();
+            assert!(!is_service_installed());
+            return;
+        }
+        for case in [
+            "present",
+            "optional-absent",
+            "home-fallback",
+            "missing-manager",
+            "spawn-failed",
+            "bad-parent",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let tools = root.path().join("tools");
+            fs::create_dir(&tools).unwrap();
+            if case != "missing-manager" {
+                for name in ["systemctl", "launchctl"] {
+                    let path = tools.join(name);
+                    fs::write(&path, "#!/bin/sh\nexit 1\n").unwrap();
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+                }
+            }
+            let daemon = root.path().join("daemon");
+            fs::write(&daemon, "#!/bin/sh\nprintf '%s\\n%s' \"$*\" \"$CLIPSYNC_HOME\" > \"$CLIPSYNC_TEST_FIXTURE_ROOT/spawned.tmp\"\n/bin/mv \"$CLIPSYNC_TEST_FIXTURE_ROOT/spawned.tmp\" \"$CLIPSYNC_TEST_FIXTURE_ROOT/spawned\"\n").unwrap();
+            fs::set_permissions(daemon, fs::Permissions::from_mode(0o700)).unwrap();
+            let home = root.path().join("home");
+            fs::create_dir(&home).unwrap();
+            if case == "bad-parent" {
+                #[cfg(target_os = "macos")]
+                fs::write(home.join("Library"), b"preserve home file").unwrap();
+                #[cfg(target_os = "linux")]
+                fs::write(home.join(".config"), b"preserve home file").unwrap();
+            }
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "service::tests::failed_service_managers_fall_back_to_a_real_isolated_process_or_report_spawn_failure", "--nocapture"])
+                .env(CHILD, case).env("CLIPSYNC_TEST_FIXTURE_ROOT", root.path()).env("PATH", &tools).env("HOME", &home)
+                .env_remove("USERPROFILE").env_remove("CLIPSYNC_HOME").env_remove("CLIPSYNC_CA_FILE")
+                .current_dir(root.path()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+            if case == "present" {
+                command
+                    .env("CLIPSYNC_HOME", root.path().join("app-home"))
+                    .env("CLIPSYNC_CA_FILE", root.path().join("root.pem"));
+            }
+            if case == "home-fallback" {
+                command.env_remove("HOME");
+            }
+            let mut child = command.spawn().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if child.try_wait().unwrap().is_some() {
+                    break;
+                }
+                if Instant::now() > deadline {
+                    child.kill().unwrap();
+                    let _ = child.wait();
+                    panic!("service fallback worker exceeded its deadline: {case}");
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{case}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn platform_systemd_env_quotes_session_bus() {

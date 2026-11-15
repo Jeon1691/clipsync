@@ -27,8 +27,38 @@ struct Peer {
     identity: DeviceIdentity,
 }
 
+struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn product_logs() -> &'static Arc<Mutex<Vec<u8>>> {
+    static LOGS: std::sync::OnceLock<Arc<Mutex<Vec<u8>>>> = std::sync::OnceLock::new();
+    LOGS.get_or_init(|| {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(move || CapturedLogs(writer.clone()))
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).unwrap();
+        logs
+    })
+}
+
 impl Peer {
     fn new(url: &str, name: &str, secret: u8) -> Self {
+        let _ = product_logs();
         let directory = TempDir::new().unwrap();
         let app = App::open_from(AppPaths::from_root(directory.path().to_path_buf())).unwrap();
         let identity = DeviceIdentity::from_bytes(name.into(), [secret; 32]);
@@ -331,9 +361,35 @@ fn sync_handle() -> SyncHandle {
 
 struct Session {
     clipboard: MockClipboard,
+    reads: Arc<std::sync::atomic::AtomicUsize>,
     handle: SyncHandle,
     shutdown: watch::Sender<bool>,
     task: Option<tokio::task::JoinHandle<Result<(), CoreError>>>,
+}
+
+struct ObservedClipboard {
+    clipboard: MockClipboard,
+    reads: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl ClipboardBackend for ObservedClipboard {
+    fn name(&self) -> &'static str {
+        "observed mock"
+    }
+    fn capabilities(&self) -> clipsync_clipboard::Capabilities {
+        clipsync_clipboard::Capabilities::all()
+    }
+    async fn read(&self) -> clipsync_clipboard::Result<Option<ClipboardItem>> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        self.clipboard.read().await
+    }
+    async fn write(&self, item: &ClipboardItem) -> clipsync_clipboard::Result<()> {
+        self.clipboard.write(item).await
+    }
+    async fn signature(&self) -> clipsync_clipboard::Result<String> {
+        self.clipboard.signature().await
+    }
 }
 
 impl Drop for Session {
@@ -347,7 +403,19 @@ impl Drop for Session {
 impl Session {
     async fn start(peer: &Peer) -> Self {
         let clipboard = MockClipboard::new();
-        let backend = SystemClipboard::mock(clipboard.clone());
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let backend = SystemClipboard::from_backend(
+            Box::new(ObservedClipboard {
+                clipboard: clipboard.clone(),
+                reads: reads.clone(),
+            }),
+            clipsync_clipboard::AdapterInfo {
+                name: "observed mock",
+                source: "test fixture",
+                capabilities: clipsync_clipboard::Capabilities::all(),
+                fallback_reason: None,
+            },
+        );
         let handle = sync_handle();
         let task_handle = handle.clone_inner();
         let store = peer.app.store.clone();
@@ -357,6 +425,7 @@ impl Session {
         });
         let session = Self {
             clipboard,
+            reads,
             handle,
             shutdown,
             task: Some(task),
@@ -471,6 +540,49 @@ async fn paused_disabled_and_receive_only_sessions_do_not_send_local_changes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repeated_clipboard_announcements_and_invalid_local_content_do_not_echo_or_interrupt_sync()
+{
+    let pair = Pair::new().await;
+    let a = Session::start(&pair.a).await;
+    let b = Session::start(&pair.b).await;
+    a.clipboard.set(ClipboardItem::Text {
+        text: "remembered remote text".into(),
+    });
+    b.text("remembered remote text").await;
+    let reads = b.reads.load(Ordering::Relaxed);
+    b.clipboard.set(ClipboardItem::Text {
+        text: "remembered remote text".into(),
+    });
+    wait_until(|| async { b.reads.load(Ordering::Relaxed) > reads }).await;
+    assert_eq!(
+        a.clipboard.signature().await.unwrap(),
+        "1",
+        "a repeated platform announcement echoed remote content"
+    );
+    let reads = b.reads.load(Ordering::Relaxed);
+    b.clipboard.set(ClipboardItem::Text {
+        text: "x".repeat(clipsync_protocol::TEXT_MAX_BYTES + 1),
+    });
+    wait_until(|| async { b.reads.load(Ordering::Relaxed) > reads }).await;
+    assert_eq!(
+        a.clipboard.signature().await.unwrap(),
+        "1",
+        "oversized text reached the peer"
+    );
+    b.clipboard.set(ClipboardItem::Text {
+        text: "valid after local rejection".into(),
+    });
+    a.text("valid after local rejection").await;
+    assert_eq!(
+        a.clipboard.signature().await.unwrap(),
+        "2",
+        "rejected announcements reached the relay before the final valid item"
+    );
+    b.stop().await;
+    a.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn initial_hello_delivers_offline_text_before_live_clipboard_changes() {
     let pair = Pair::new().await;
     oneshot_push(
@@ -552,6 +664,15 @@ async fn authenticated_but_invalid_text_is_ignored_and_the_next_message_still_ar
         b.clipboard.signature().await.unwrap(),
         "1",
         "rejected bytes caused an extra clipboard write"
+    );
+    let logs = String::from_utf8(product_logs().lock().clone()).unwrap();
+    assert!(
+        logs.contains("text decrypt"),
+        "decryption failure lost its diagnostic context"
+    );
+    assert!(
+        !logs.contains("valid after rejection"),
+        "clipboard plaintext entered product logs"
     );
     sender.close().await;
     b.stop().await;
@@ -683,6 +804,135 @@ fn app_commands_use_real_ipc_and_persist_pause_config_and_status() {
         assert_eq!(app.status().await.unwrap()["last_item_kind"], "text");
         serving.await.unwrap();
         assert!(!app.store.paths.socket_file().exists());
+    });
+}
+
+#[test]
+fn ipc_failure_empty_and_binary_responses_preserve_command_error_and_fallback_contracts() {
+    const NAME: &str = "engine::behavior_tests::ipc_failure_empty_and_binary_responses_preserve_command_error_and_fallback_contracts";
+    if !in_worker(NAME) {
+        for case in [
+            "push-error",
+            "push-default",
+            "push-invalid",
+            "pull-invalid",
+            "status-invalid",
+            "pull-empty",
+            "pull-image-copy",
+            "status-empty",
+            "binary-fallback",
+            "oversized",
+        ] {
+            let input = if case == "binary-fallback" {
+                PNG.to_vec()
+            } else if case == "oversized" {
+                vec![b'x'; clipsync_protocol::TEXT_MAX_BYTES + 1]
+            } else {
+                b"IPC payload".to_vec()
+            };
+            worker(NAME, &input, &[("CLIPSYNC_CORE_IPC_CASE", case)]);
+        }
+        return;
+    }
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        use tokio::io::AsyncWriteExt;
+        let case = std::env::var("CLIPSYNC_CORE_IPC_CASE").unwrap();
+        let peer = Peer::new("http://127.0.0.1:1", "ipc-negative", 56);
+        if case == "oversized" {
+            assert!(matches!(
+                peer.app.push(None, &[], false).await,
+                Err(CoreError::Clipboard(_))
+            ));
+            return;
+        }
+        let server = IpcServer::bind(&peer.app.store.paths).await.unwrap();
+        let mode = case.clone();
+        let task = tokio::spawn(async move {
+            let mut stream = server.accept().await.unwrap();
+            let request = read_request(&mut stream).await.unwrap();
+            if mode == "binary-fallback" {
+                assert!(request.is_none());
+                return;
+            }
+            assert!(request.is_some());
+            if mode.ends_with("invalid") {
+                stream.write_all(b"invalid JSON\n").await.unwrap();
+                return;
+            }
+            write_response(
+                &mut stream,
+                &IpcResponse {
+                    ok: !mode.starts_with("push"),
+                    error: if mode == "push-error" {
+                        Some("daemon rejected payload".into())
+                    } else {
+                        None
+                    },
+                    status: None,
+                    pull: if mode == "pull-image-copy" {
+                        Some(PullPayload {
+                            kind: "image".into(),
+                            text: None,
+                            summary: "stored image".into(),
+                        })
+                    } else {
+                        None
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        });
+        match case.as_str() {
+            "push-error" => assert!(peer
+                .app
+                .push(None, &[], false)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("daemon rejected payload")),
+            "push-default" => assert!(peer
+                .app
+                .push(None, &[], false)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("push failed")),
+            "push-invalid" => assert!(matches!(
+                peer.app.push(None, &[], false).await,
+                Err(CoreError::Daemon(_))
+            )),
+            "pull-invalid" => assert!(matches!(
+                peer.app.pull(false, false, None).await,
+                Err(CoreError::Daemon(_))
+            )),
+            "status-invalid" => {
+                assert!(matches!(peer.app.status().await, Err(CoreError::Daemon(_))))
+            }
+            "pull-empty" => assert!(matches!(
+                peer.app.pull(false, false, None).await,
+                Err(CoreError::Storage(
+                    clipsync_storage::StorageError::NotPaired
+                ))
+            )),
+            "binary-fallback" => assert!(matches!(
+                peer.app.push(Some("image"), &[], false).await,
+                Err(CoreError::Storage(
+                    clipsync_storage::StorageError::NotPaired
+                ))
+            )),
+            "pull-image-copy" => {
+                let result = peer.app.pull(true, false, None).await.unwrap();
+                assert_eq!(result.kind, "image");
+                assert!(result.text.is_none());
+            }
+            "status-empty" => assert_eq!(peer.app.status().await.unwrap()["daemon"], false),
+            _ => panic!("unknown IPC case"),
+        }
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
     });
 }
 
@@ -1247,6 +1497,59 @@ async fn hello_wait_rejects_relay_errors_and_disconnects_and_skips_unrelated_fra
 }
 
 #[tokio::test]
+async fn silent_relay_connections_reach_hello_and_pull_deadlines_without_leaving_tasks_running() {
+    use crate::test_relay::{receive, send, Server};
+    for mode in ["hello", "pull"] {
+        let room = RoomId::new();
+        let room_id = room.clone();
+        let (ready, connected) = tokio::sync::oneshot::channel();
+        let (consumed, release) = tokio::sync::oneshot::channel();
+        let mut server = Server::websocket_with_deadline(
+            axum::Router::new(),
+            Duration::from_secs(180),
+            move |mut socket| async move {
+                if mode == "pull" {
+                    assert!(matches!(
+                        receive(&mut socket).await,
+                        ControlMessage::Hello { .. }
+                    ));
+                    send(&mut socket, hello(&room)).await;
+                }
+                let _ = ready.send(());
+                let _ = release.await;
+            },
+        )
+        .await;
+        let peer = scripted_peer(&server.url, room_id);
+        let task = if mode == "hello" {
+            let mut connection = RelayConnection::connect(&join_ws(&server.url, "/v1/ws"))
+                .await
+                .unwrap();
+            tokio::spawn(async move { wait_hello_ok(&mut connection).await })
+        } else {
+            let store = peer.app.store.clone();
+            tokio::spawn(async move { oneshot_pull(&store, false, true, None).await.map(|_| ()) })
+        };
+        tokio::time::timeout(Duration::from_secs(5), connected)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::pause();
+        let result = tokio::time::timeout(Duration::from_secs(40), task)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::resume();
+        let _ = consumed.send(());
+        server.finish().await;
+        assert!(
+            matches!(result, Err(CoreError::Timeout)),
+            "{mode}: {result:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn hello_presence_only_starts_noise_for_a_known_online_peer_with_a_valid_public_key() {
     use crate::test_relay::{receive, Server};
     let mut server = Server::websocket(|mut socket| async move {
@@ -1614,6 +1917,50 @@ fn command_facade_reports_corrupt_config_and_state_without_replacing_them() {
         assert!(peer.app.resume().await.is_err());
         assert_eq!(std::fs::read(state).unwrap(), b"invalid state");
     });
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn read_only_local_metadata_reports_failed_mutations_without_losing_saved_values() {
+    use std::os::unix::fs::PermissionsExt;
+    let peer = Peer::new("http://127.0.0.1:1", "read-only-metadata", 57);
+    peer.app.store.save_state(&Default::default()).unwrap();
+    let before_state = std::fs::read(peer.app.store.paths.state_file()).unwrap();
+    std::fs::set_permissions(
+        &peer.app.store.paths.data_dir,
+        std::fs::Permissions::from_mode(0o500),
+    )
+    .unwrap();
+    let pause = peer.app.pause().await;
+    let resume = peer.app.resume().await;
+    std::fs::set_permissions(
+        &peer.app.store.paths.data_dir,
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    assert!(pause.is_err() && resume.is_err());
+    assert_eq!(
+        std::fs::read(peer.app.store.paths.state_file()).unwrap(),
+        before_state
+    );
+    let before_config = std::fs::read(peer.app.store.paths.config_file()).unwrap();
+    std::fs::set_permissions(
+        &peer.app.store.paths.config_dir,
+        std::fs::Permissions::from_mode(0o500),
+    )
+    .unwrap();
+    let setting = peer.app.config_set("sync.enabled", "false");
+    let init = peer.app.init(Some("http://127.0.0.1:2".into()));
+    std::fs::set_permissions(
+        &peer.app.store.paths.config_dir,
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    assert!(setting.is_err() && init.is_err());
+    assert_eq!(
+        std::fs::read(peer.app.store.paths.config_file()).unwrap(),
+        before_config
+    );
 }
 
 #[tokio::test]

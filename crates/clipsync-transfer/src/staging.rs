@@ -311,4 +311,81 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(std::fs::read(&second[0]).unwrap(), b"replacement");
     }
+
+    #[tokio::test]
+    async fn blocked_partial_or_destination_paths_and_unsafe_names_leave_existing_data_intact() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = StagingArea::new(root.path().join("inbox")).unwrap();
+        let file = |name: &str| clipsync_protocol::FileManifest {
+            name: name.into(),
+            size: 7,
+            mime: None,
+            hash: blake3_hex(b"payload"),
+        };
+        let blocked_partial = TransferId::new();
+        let partial = staging.inbox().join(format!(".{blocked_partial}.partial"));
+        std::fs::write(&partial, b"existing partial marker").unwrap();
+        assert!(staging
+            .commit_files(&blocked_partial, &[file("report.txt")], b"payload")
+            .await
+            .is_err());
+        assert_eq!(std::fs::read(partial).unwrap(), b"existing partial marker");
+        let blocked_destination = TransferId::new();
+        let destination = staging.inbox().join(blocked_destination.as_str());
+        std::fs::write(&destination, b"existing destination marker").unwrap();
+        assert!(staging
+            .commit_files(&blocked_destination, &[file("report.txt")], b"payload")
+            .await
+            .is_err());
+        assert_eq!(
+            std::fs::read(destination).unwrap(),
+            b"existing destination marker"
+        );
+        let outside = staging.inbox().join("outside.txt");
+        std::fs::write(&outside, b"must remain private").unwrap();
+        assert!(matches!(
+            staging
+                .commit_files(&TransferId::new(), &[file("../outside.txt")], b"payload")
+                .await,
+            Err(TransferError::UnsafeName(_))
+        ));
+        assert_eq!(std::fs::read(outside).unwrap(), b"must remain private");
+        let file_root = root.path().join("file-root");
+        std::fs::write(&file_root, b"file").unwrap();
+        assert!(StagingArea::new(file_root).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_only_inbox_keeps_validated_bytes_private_when_commit_cannot_publish() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let staging = StagingArea::new(root.path().join("inbox")).unwrap();
+        let id = TransferId::new();
+        let partial = staging.inbox().join(format!(".{id}.partial"));
+        std::fs::create_dir(&partial).unwrap();
+        std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o500)).unwrap();
+        std::fs::set_permissions(staging.inbox(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = staging
+            .commit_files(
+                &id,
+                &[clipsync_protocol::FileManifest {
+                    name: "report.txt".into(),
+                    size: 7,
+                    mime: None,
+                    hash: blake3_hex(b"payload"),
+                }],
+                b"payload",
+            )
+            .await;
+        // Restore fixture permissions before assertions or cleanup.
+        std::fs::set_permissions(staging.inbox(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(matches!(result, Err(TransferError::Io(_))));
+        assert_eq!(
+            std::fs::read(partial.join("report.txt")).unwrap(),
+            b"payload"
+        );
+        assert!(!staging.inbox().join(id.as_str()).exists());
+    }
 }

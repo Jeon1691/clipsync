@@ -80,9 +80,6 @@ pub async fn run_daemon(clipboard: Option<SystemClipboard>) -> Result<(), CoreEr
                             if let Ok(Some(req)) = read_request(&mut stream).await {
                                 let resp = handle_ipc(&store2, &h, req).await;
                                 let _ = write_response(&mut stream, &resp).await;
-                                if req_is_shutdown(&resp) {
-                                    // ignore
-                                }
                             }
                         });
                     }
@@ -109,10 +106,6 @@ fn drop_idle_transfers(
     let ttl = std::time::Duration::from_secs(clipsync_protocol::TRANSFER_IDLE_SECS);
     let _ = prune_idle_transfers(incoming, std::time::Instant::now(), ttl);
     manifests.retain(|id, _| incoming.contains_key(id));
-}
-
-fn req_is_shutdown(_resp: &IpcResponse) -> bool {
-    false
 }
 
 impl SyncHandle {
@@ -702,28 +695,22 @@ async fn apply_remote(
     item: ClipboardItem,
     last_sig: &mut String,
 ) {
-    if matches!(
-        // receive-only/send-only checked by caller via config in send path; apply always writes
-        item.kind(),
-        _
-    ) {
-        guard.remember_remote(message_id, &item);
-        match clipboard.write(&item).await {
-            Ok(()) => {
-                if let Ok(sig) = clipboard.signature().await {
-                    *last_sig = sig;
-                }
-                notifier.received(&format!("{:?}", item.kind()), "peer", &item.summary());
-                *handle.last_item.lock() = Some(item);
+    guard.remember_remote(message_id, &item);
+    match clipboard.write(&item).await {
+        Ok(()) => {
+            if let Ok(sig) = clipboard.signature().await {
+                *last_sig = sig;
             }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    kind = ?item.kind(),
-                    "failed to write remote clipboard item"
-                );
-                *handle.last_item.lock() = Some(item);
-            }
+            notifier.received(&format!("{:?}", item.kind()), "peer", &item.summary());
+            *handle.last_item.lock() = Some(item);
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                kind = ?item.kind(),
+                "failed to write remote clipboard item"
+            );
+            *handle.last_item.lock() = Some(item);
         }
     }
 }

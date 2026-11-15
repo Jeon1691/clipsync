@@ -761,6 +761,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn silent_pairing_expires_without_persisting_credentials() {
+        use crate::test_relay::Server;
+        let (ready, connected) = tokio::sync::oneshot::channel();
+        let (consumed, release) = tokio::sync::oneshot::channel();
+        let mut server = Server::websocket_with_deadline(
+            axum::Router::new(),
+            Duration::from_secs(180),
+            move |socket| async move {
+                let _ = ready.send(());
+                let _ = release.await;
+                drop(socket);
+            },
+        )
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+        let identity = DeviceIdentity::from_bytes("pairing-timeout".into(), [35; 32]);
+        let connection = RelayConnection::connect(&join_ws(&server.url, "/v1/ws"))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), connected)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::pause();
+        let result = tokio::time::timeout(
+            Duration::from_secs(150),
+            run_pairing(
+                &store,
+                &identity,
+                connection,
+                PairingRole::A,
+                "123456",
+                PairingSessionId::new(),
+                identity.device_id.clone(),
+                DeviceId::new(),
+                clipsync_protocol::RoomId::new(),
+                DeviceRole::Owner,
+            ),
+        )
+        .await
+        .unwrap();
+        tokio::time::resume();
+        let _ = consumed.send(());
+        server.finish().await;
+        assert!(matches!(result, Err(CoreError::Timeout)));
+        assert!(store.load_state().unwrap().rooms.is_empty());
+        assert_eq!(std::fs::read_dir(&store.paths.data_dir).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
     async fn hostile_pairing_frames_cannot_publish_peer_identity_or_room_credentials() {
         use crate::test_relay::{receive, send, Server};
         for attack in [

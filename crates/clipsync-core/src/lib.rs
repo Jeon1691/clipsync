@@ -457,18 +457,9 @@ pub fn current_os() -> &'static str {
                 return os;
             }
         }
-        if cfg!(target_os = "macos") {
-            "macos".into()
-        } else if cfg!(target_os = "linux") {
-            "linux".into()
-        } else if cfg!(target_os = "windows") {
-            "windows".into()
-        } else if cfg!(target_os = "ios") {
-            "ios".into()
-        } else if cfg!(target_os = "android") {
-            "android".into()
-        } else {
-            "unknown".into()
+        match std::env::consts::OS {
+            os @ ("macos" | "linux" | "windows" | "ios" | "android") => os.into(),
+            _ => "unknown".into(),
         }
     })
     .as_str()

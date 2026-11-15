@@ -7,7 +7,35 @@ use clipsync_protocol::{
     TransferId,
 };
 
+struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+impl std::io::Write for LogWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+fn product_logs() -> &'static Arc<std::sync::Mutex<Vec<u8>>> {
+    static LOGS: std::sync::OnceLock<Arc<std::sync::Mutex<Vec<u8>>>> = std::sync::OnceLock::new();
+    LOGS.get_or_init(|| {
+        let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(move || LogWriter(writer.clone()))
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).unwrap();
+        logs
+    })
+}
+
 fn state() -> Arc<RelayState> {
+    let _ = product_logs();
     Arc::new(RelayState::new(RelayConfig {
         bind: "127.0.0.1:0".parse().unwrap(),
         public_url: "http://127.0.0.1".into(),
@@ -488,6 +516,44 @@ fn websocket_message_budget_rejects_the_eighty_first_fast_message_and_resets_aft
 }
 
 #[tokio::test]
+async fn websocket_frame_limits_reject_oversized_binary_before_dispatch() {
+    use tokio_tungstenite::tungstenite::Message as ClientMessage;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let state = state();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let serving = state.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new()
+                    .route("/v1/ws", axum::routing::get(ws_handler))
+                    .with_state(serving),
+            )
+            .await
+            .unwrap();
+        });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/v1/ws"))
+            .await
+            .unwrap();
+        let sent = socket
+            .send(ClientMessage::Binary(vec![7; FRAME_HARD_CAP + 1].into()))
+            .await;
+        if sent.is_ok() {
+            assert!(!matches!(
+                socket.next().await,
+                Some(Ok(ClientMessage::Binary(_) | ClientMessage::Text(_)))
+            ));
+        }
+        assert_eq!(state.frames_forwarded.load(Ordering::Relaxed), 0);
+        assert_eq!(state.connections_total.load(Ordering::Relaxed), 0);
+        server.abort();
+    })
+    .await
+    .expect("oversized websocket fixture exceeded its deadline");
+}
+
+#[tokio::test]
 async fn websocket_recovers_after_malformed_control_and_unauthenticated_binary() {
     tokio::time::timeout(Duration::from_secs(10), async {
     use tokio_tungstenite::tungstenite::Message as ClientMessage;
@@ -551,6 +617,9 @@ async fn websocket_recovers_after_malformed_control_and_unauthenticated_binary()
         matches!(&messages[0], ControlMessage::Error { code, message } if code == "error" && message == "unsupported protocol version")
     );
     assert!(matches!(messages[1], ControlMessage::Pong { ts: 912 }));
+        let logs = String::from_utf8(product_logs().lock().unwrap().clone()).unwrap();
+        assert!(logs.contains("bad control"), "malformed control lost its diagnostic context");
+        assert!(!logs.contains("invalid JSON"), "malformed payload bytes entered relay logs");
     socket.close(None).await.unwrap();
     server.abort();
 
