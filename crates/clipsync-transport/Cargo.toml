@@ -12,7 +12,6 @@ futures-util.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
-rustls-pemfile.workspace = true
 rustls-platform-verifier.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

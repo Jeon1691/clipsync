@@ -1,5 +1,7 @@
 # Security model
 
+To disclose a vulnerability privately, follow the [security policy](../SECURITY.md).
+
 ## Threats in scope
 
 - Honest-but-curious relay operator
