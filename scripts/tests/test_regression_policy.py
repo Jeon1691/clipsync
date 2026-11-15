@@ -6,9 +6,12 @@ import copy
 import importlib.util
 import json
 import io
+import os
 from contextlib import redirect_stdout
 from contextlib import redirect_stderr
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -53,6 +56,75 @@ class RegressionPolicyTests(unittest.TestCase):
 
     def evaluate(self, document, **kwargs):
         return POLICY.evaluate(document, self.root, "linux", rust_tests=self.inventory, **kwargs)
+
+    def run_with_legacy_encoding(self, document, mode):
+        script = self.root / "scripts/check-regressions.py"
+        script.parent.mkdir(exist_ok=True)
+        script.write_bytes(SCRIPT.read_bytes())
+        manifest = self.root / "docs/regressions.json"
+        manifest.parent.mkdir(exist_ok=True)
+        manifest.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+        # POSIX's C locale supplies a real ASCII default. The isolated cp1252
+        # mode also reproduces Windows' undefined 0x90 byte on UTF-8 systems.
+        bootstrap = '''
+import io, locale, runpy, sys
+mode, script, *arguments = sys.argv[1:]
+assert sys.flags.utf8_mode == 0
+if mode == "native":
+    assert locale.getpreferredencoding(False).lower().replace("-", "") != "utf8"
+else:
+    original_open = io.open
+    def windows_default_open(file, mode="r", buffering=-1, encoding=None,
+                             errors=None, newline=None, closefd=True, opener=None):
+        if "b" not in mode and encoding in (None, "locale"):
+            encoding = "cp1252"
+        return original_open(file, mode, buffering, encoding, errors, newline, closefd, opener)
+    io.open = windows_default_open
+sys.argv = [script, *arguments]
+runpy.run_path(script, run_name="__main__")
+'''
+        env = dict(os.environ, PYTHONUTF8="0", LC_ALL="C", PYTHONCOERCECLOCALE="0")
+        result = subprocess.run(
+            [sys.executable, "-c", bootstrap, mode, str(script), "--platform", "linux",
+             "--report", "report.json"], cwd=self.root, env=env,
+            capture_output=True, encoding="utf-8", timeout=15,
+        )
+        report = json.loads((self.root / "report.json").read_text(encoding="utf-8"))
+        return result, report
+
+    def test_utf8_repository_sources_and_manifest_ignore_the_process_default_encoding(self):
+        rust = self.root / self.check["source"]
+        rust.write_text("// UTF-8 fixture: А – 한글\n#[test]\nfn protects_behavior() {}\n",
+                        encoding="utf-8")
+        python = self.root / "scripts/tests/test_unicode.py"
+        python.parent.mkdir(parents=True)
+        python.write_text("# UTF-8 fixture: А – 한글\nclass Checks:\n    def test_behavior(self): pass\n",
+                          encoding="utf-8")
+        document = self.manifest(42)
+        document["defects"][0]["description"] = "UTF-8 ledger text: А – 한글"
+        document["defects"][0]["checks"] = [{
+            "kind": "python", "source": "scripts/tests/test_unicode.py",
+            "test": "test_unicode.Checks.test_behavior", "platforms": ["linux"],
+        }]
+        original_rust, original_python = rust.read_bytes(), python.read_bytes()
+        for mode in (["native", "cp1252"] if os.name != "nt" else ["cp1252"]):
+            with self.subTest(encoding=mode):
+                result, report = self.run_with_legacy_encoding(document, mode)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(report["passed"], report["errors"])
+                self.assertEqual((report["covered"], report["total"]), (42, 84))
+                self.assertEqual(rust.read_bytes(), original_rust)
+                self.assertEqual(python.read_bytes(), original_python)
+
+    def test_invalid_utf8_source_is_rejected_without_replacement_or_repair(self):
+        rust = self.root / self.check["source"]
+        malformed = b"// invalid UTF-8: \xff\n#[test]\nfn protects_behavior() {}\n"
+        rust.write_bytes(malformed)
+        result, report = self.run_with_legacy_encoding(self.manifest(42), "cp1252")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertFalse(report["passed"])
+        self.assertTrue(any("utf-8" in error and "decode" in error for error in report["errors"]))
+        self.assertEqual(rust.read_bytes(), malformed)
 
     def test_41_of_84_is_below_the_required_half(self):
         report = self.evaluate(self.manifest(41))

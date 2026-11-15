@@ -9,6 +9,11 @@ mod loop_guard;
 mod notify;
 mod pairing;
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../tests/support/relay_script.rs"]
+mod test_relay;
+
 pub use engine::{
     oneshot_pull as engine_oneshot_pull, oneshot_push as engine_oneshot_push, run_daemon,
     SyncHandle,
@@ -368,7 +373,29 @@ async fn load_push_item(
         return Ok(ClipboardItem::Files { files: out });
     }
     let mut stdin = std::io::stdin();
-    if !stdin.is_terminal() {
+    let terminal = stdin.is_terminal();
+    load_push_input(
+        r#type,
+        from_clipboard,
+        &mut stdin,
+        terminal,
+        SystemClipboard::open,
+    )
+    .await
+}
+
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
+async fn load_push_input(
+    r#type: Option<&str>,
+    from_clipboard: bool,
+    stdin: &mut impl Read,
+    terminal: bool,
+    open_clipboard: impl FnOnce() -> clipsync_clipboard::Result<SystemClipboard>,
+) -> Result<ClipboardItem, CoreError> {
+    if !terminal {
         let mut buf = Vec::new();
         stdin.read_to_end(&mut buf)?;
         match r#type {
@@ -390,7 +417,7 @@ async fn load_push_item(
         }
     }
     if from_clipboard || r#type.is_some() {
-        let clip = SystemClipboard::open()?;
+        let clip = open_clipboard()?;
         let item = clip
             .read()
             .await?
@@ -430,18 +457,9 @@ pub fn current_os() -> &'static str {
                 return os;
             }
         }
-        if cfg!(target_os = "macos") {
-            "macos".into()
-        } else if cfg!(target_os = "linux") {
-            "linux".into()
-        } else if cfg!(target_os = "windows") {
-            "windows".into()
-        } else if cfg!(target_os = "ios") {
-            "ios".into()
-        } else if cfg!(target_os = "android") {
-            "android".into()
-        } else {
-            "unknown".into()
+        match std::env::consts::OS {
+            os @ ("macos" | "linux" | "windows" | "ios" | "android") => os.into(),
+            _ => "unknown".into(),
         }
     })
     .as_str()
@@ -543,3 +561,8 @@ mod regression_tests {
         });
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../tests/support/facade_behavior.rs"]
+mod facade_behavior;

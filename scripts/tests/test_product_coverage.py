@@ -63,3 +63,69 @@ class ProductCoverageTests(unittest.TestCase):
         report = self.report()
         report["data"][0]["totals"]["lines"]["covered"] = 99
         self.assertTrue(policy.validate(report, {"core"})[0])
+
+    def gold_report(self, branches=80):
+        report = self.report(lines=90, regions=90)
+        for summary in [report["data"][0]["files"][0]["summary"], report["data"][0]["totals"]]:
+            summary["branches"] = {"covered": branches, "count": 100}
+        return report
+
+    def test_gold_requires_ninety_percent_lines_and_regions_and_eighty_branches(self):
+        errors, metrics = policy.validate(self.gold_report(), {"core"}, 90, 80)
+        self.assertEqual(errors, [])
+        self.assertEqual(metrics["branches"]["percent"], 80)
+        for metric in ["lines", "regions", "branches"]:
+            report = self.gold_report()
+            for summary in [report["data"][0]["files"][0]["summary"], report["data"][0]["totals"]]:
+                summary[metric]["covered"] -= 1
+            self.assertTrue(any(f"{metric} coverage" in error
+                                for error in policy.validate(report, {"core"}, 90, 80)[0]))
+
+    def test_gold_rejects_absent_empty_or_inconsistent_branch_instrumentation(self):
+        for replacement in [None, {"covered": 0, "count": 0}, {"covered": 101, "count": 100}]:
+            report = self.gold_report()
+            for summary in [report["data"][0]["files"][0]["summary"], report["data"][0]["totals"]]:
+                if replacement is None:
+                    del summary["branches"]
+                else:
+                    summary["branches"] = replacement
+            self.assertTrue(policy.validate(report, {"core"}, 90, 80)[0])
+        report = self.gold_report()
+        report["data"][0]["totals"]["branches"]["covered"] += 1
+        self.assertTrue(any("branches totals disagree" in error
+                            for error in policy.validate(report, {"core"}, 90, 80)[0]))
+
+    def test_nonproduct_branch_counters_cannot_inflate_gold(self):
+        report = self.gold_report(branches=79)
+        report["data"][0]["files"].append({"filename": "/repo/tests/smoke.rs", "summary": {
+            "lines": {"count": 0, "covered": 0}, "regions": {"count": 0, "covered": 0},
+            "branches": {"count": 100, "covered": 100}}})
+        report["data"][0]["totals"]["branches"] = {"count": 200, "covered": 179}
+        self.assertTrue(any("test/non-product" in error
+                            for error in policy.validate(report, {"core"}, 90, 80)[0]))
+
+    def test_invalid_thresholds_cannot_disable_the_gate(self):
+        for minimum, branches in [(101, 80), (-1, 80), (90, -1), (90, 101), (True, 80)]:
+            self.assertTrue(policy.validate(self.gold_report(), {"core"}, minimum, branches)[0])
+
+    def test_same_product_file_from_two_build_roots_is_not_counted_twice(self):
+        import copy
+        report = self.report()
+        duplicate = copy.deepcopy(report["data"][0]["files"][0])
+        duplicate["filename"] = "/old-build/crates/core/src/lib.rs"
+        report["data"][0]["files"].append(duplicate)
+        for metric in report["data"][0]["totals"].values():
+            metric["covered"] *= 2
+            metric["count"] *= 2
+        self.assertTrue(policy.validate(report, {"core"})[0])
+
+    def test_parent_path_alias_cannot_hide_counted_test_code_as_product(self):
+        report = self.report(lines=0, regions=0)
+        report["data"][0]["files"][0]["summary"] = {
+            key: {"covered": 0, "count": 1} for key in ["lines", "regions"]}
+        report["data"][0]["files"].append({
+            "filename": "/repo/crates/core/src/../tests/smoke.rs",
+            "summary": {key: {"covered": 99, "count": 99} for key in ["lines", "regions"]}})
+        report["data"][0]["totals"] = {
+            key: {"covered": 99, "count": 100} for key in ["lines", "regions"]}
+        self.assertTrue(policy.validate(report, {"core"})[0])

@@ -1,7 +1,7 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
 use clap::Parser;
-use clipsync_relay::{serve, RelayConfig};
+use clipsync_relay::{serve_with_transport, RelayConfig, RelayTransportConfig};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -11,6 +11,8 @@ use tracing_subscriber::EnvFilter;
     about = "Zero-knowledge ClipSync WebSocket relay"
 )]
 struct Args {
+    #[command(flatten)]
+    transport: RelayTransportConfig,
     /// Listen address
     #[arg(long, env = "CLIPSYNC_RELAY_BIND")]
     bind: Option<String>,
@@ -34,6 +36,13 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(url) = args.public_url {
         config.public_url = url;
+    } else {
+        let scheme = if args.transport.allow_http {
+            "http"
+        } else {
+            "https"
+        };
+        config.public_url = format!("{scheme}://127.0.0.1:{}", config.bind.port());
     }
-    serve(config).await
+    serve_with_transport(config, args.transport).await
 }

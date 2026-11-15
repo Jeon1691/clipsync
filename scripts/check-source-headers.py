@@ -22,8 +22,12 @@ def sources(root):
         cwd=root, check=True, capture_output=True,
     )
     for name in sorted(set(result.stdout.decode().split("\0")) - {""}):
+        # Vendored sources retain their upstream copyrights and license files.
+        # Provenance and local patches are catalogued in vendor/README.md.
+        if name.startswith("vendor/"):
+            continue
         path = root / name
-        if path.is_file() and (path.suffix in SUFFIXES or path.name in {"Dockerfile", "PKGBUILD"} or name.startswith(".githooks/")):
+        if path.is_file() and (path.suffix in SUFFIXES or path.name == "PKGBUILD" or path.name.startswith("Dockerfile") or name.startswith(".githooks/")):
             yield path
 
 

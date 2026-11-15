@@ -113,4 +113,115 @@ mod tests {
         let pt = tb.decrypt(&ct).unwrap();
         assert_eq!(pt, b"ping");
     }
+
+    fn established_sessions() -> (NoiseSession, NoiseSession) {
+        let a = StaticSecret::from([41u8; 32]);
+        let b = StaticSecret::from([42u8; 32]);
+        let mut initiator = NoiseHandshake::initiator(&a, &PublicKey::from(&b)).unwrap();
+        let mut responder = NoiseHandshake::responder(&b, &PublicKey::from(&a)).unwrap();
+        responder
+            .read_message(&initiator.write_message().unwrap())
+            .unwrap();
+        initiator
+            .read_message(&responder.write_message().unwrap())
+            .unwrap();
+        assert!(
+            initiator.write_message().is_err(),
+            "a completed handshake cannot emit another message"
+        );
+        (
+            initiator.into_transport().unwrap(),
+            responder.into_transport().unwrap(),
+        )
+    }
+
+    #[test]
+    fn incomplete_or_out_of_order_noise_handshakes_fail_closed() {
+        let a = StaticSecret::from([41u8; 32]);
+        let b = StaticSecret::from([42u8; 32]);
+        let mut responder = NoiseHandshake::responder(&b, &PublicKey::from(&a)).unwrap();
+        assert!(!responder.is_finished());
+        assert!(matches!(
+            responder.write_message(),
+            Err(CryptoError::Noise(_))
+        ));
+        assert!(matches!(
+            responder.into_transport(),
+            Err(CryptoError::Noise(_))
+        ));
+        let mut initiator = NoiseHandshake::initiator(&a, &PublicKey::from(&b)).unwrap();
+        assert!(matches!(
+            initiator.read_message(&[]),
+            Err(CryptoError::Noise(_))
+        ));
+        assert!(matches!(
+            initiator.into_transport(),
+            Err(CryptoError::Noise(_))
+        ));
+    }
+
+    #[test]
+    fn noise_handshake_authenticates_the_pinned_static_identity_and_transcript() {
+        let a = StaticSecret::from([41u8; 32]);
+        let b = StaticSecret::from([42u8; 32]);
+        let unexpected = StaticSecret::from([43u8; 32]);
+        let mut initiator = NoiseHandshake::initiator(&a, &PublicKey::from(&b)).unwrap();
+        let message = initiator.write_message().unwrap();
+        let mut wrong_peer = NoiseHandshake::responder(&b, &PublicKey::from(&unexpected)).unwrap();
+        assert!(matches!(
+            wrong_peer.read_message(&message),
+            Err(CryptoError::Noise(_))
+        ));
+        for malformed in [&[][..], &message[..message.len() - 1]] {
+            let mut responder = NoiseHandshake::responder(&b, &PublicKey::from(&a)).unwrap();
+            assert!(matches!(
+                responder.read_message(malformed),
+                Err(CryptoError::Noise(_))
+            ));
+            assert!(!responder.is_finished());
+        }
+        let mut damaged = message;
+        *damaged.last_mut().unwrap() ^= 1;
+        let mut responder = NoiseHandshake::responder(&b, &PublicKey::from(&a)).unwrap();
+        assert!(matches!(
+            responder.read_message(&damaged),
+            Err(CryptoError::Noise(_))
+        ));
+    }
+
+    #[test]
+    fn noise_transport_rejects_bad_tags_replays_and_oversized_messages() {
+        let (mut sender, mut receiver) = established_sessions();
+        let ciphertext = sender.encrypt(b"authenticated payload").unwrap();
+        let mut damaged = ciphertext.clone();
+        damaged[0] ^= 1;
+        assert!(matches!(
+            receiver.decrypt(&damaged),
+            Err(CryptoError::Noise(_))
+        ));
+        assert_eq!(
+            receiver.decrypt(&ciphertext).unwrap(),
+            b"authenticated payload"
+        );
+        assert!(matches!(
+            receiver.decrypt(&ciphertext),
+            Err(CryptoError::Noise(_))
+        ));
+        assert!(matches!(receiver.decrypt(&[]), Err(CryptoError::Noise(_))));
+        assert!(matches!(
+            receiver.decrypt(&vec![0; 65_536]),
+            Err(CryptoError::Noise(_))
+        ));
+        assert!(matches!(
+            sender.encrypt(&vec![0; 65_536]),
+            Err(CryptoError::Noise(_))
+        ));
+        let next = sender.encrypt(b"next authenticated payload").unwrap();
+        assert_eq!(
+            receiver.decrypt(&next).unwrap(),
+            b"next authenticated payload"
+        );
+        let reverse = receiver.encrypt(b"reverse direction").unwrap();
+        assert_eq!(sender.decrypt(&reverse).unwrap(), b"reverse direction");
+    }
 }

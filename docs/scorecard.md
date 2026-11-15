@@ -1,22 +1,24 @@
 # OpenSSF Scorecard improvement plan
 
-## Measured baseline
+## Measured result
 
 The [published report](https://api.securityscorecards.dev/projects/github.com/Jeon1691/clipsync)
-on 2026-11-15 evaluates commit `85c24217751734954582cb6daf0cf6bf6a48f8e2`
-with Scorecard v5.1.1 and gives **6.3/10**. The overall result is weighted;
-it is not a simple average of the checks.
+at **2026-11-15T11:25:39Z** evaluates commit
+`af580d7a893e7b5316dcd945ee33161690eac4ee` with Scorecard v5.6.0 and gives
+**7.3/10**. The initial report was 6.3/10 with v5.1.1; subsequent reports were
+6.8 and 7.1. The overall result is weighted, not a simple average. A source
+change, local audit or proposed release does not update this public measurement.
 
 | Check | Score | Next action |
 | --- | --- | --- |
-| Signed-Releases | 0 | Publish and verify signed attestation bundles with future release archives. |
+| Signed-Releases | 8 | Four of the latest five releases have verified provenance. Publish the next substantive release with the same verification; preserve older unsigned releases. |
 | Branch-Protection | 4 | Administrator bypass has been removed; require CI and security results. Independent review remains a prerequisite for approval requirements. |
-| Vulnerabilities | 4 | Track the six upstream maintenance advisories in [security-alerts.md](security-alerts.md). Native audits currently report no patched-version vulnerabilities. |
+| Vulnerabilities | 4 | The v0.2.0 migration removes all six maintenance-advisory packages; both audits are clean. See [security-alerts.md](security-alerts.md) for the explicit source-patch maintenance policy. |
 | Code-Review | 0 | Merge real changes after independent human review and approval; recent commit history currently contains no qualifying approvals. |
 | Maintained | 0 | The repository is younger than 90 days. Recheck after 2026-12-15 while continuing normal development and issue triage. |
-| CII-Best-Practices | 0 | Complete the remaining verified answers in [project 16709](https://www.bestpractices.dev/en/projects/16709) using the [evidence worksheet](best-practices-assessment.md). |
+| CII-Best-Practices | 7 | [Project 16709](https://www.bestpractices.dev/en/projects/16709) has earned Silver. Gold still requires verified technical evidence and actual additional people/review history. |
 | Contributors | 0 | Reflects actual contributor/organization history. Broader contributions must be genuine; changing profile metadata is not a security improvement. |
-| Packaging | Not scored | GitHub Release archives and the Homebrew tap exist, but Scorecard does not detect a supported package-publishing workflow. This inconclusive result is excluded from the current total. |
+| Packaging | 10 | The successful container workflow publishes tested native amd64/arm64 relay images, verifies OCI provenance, then promotes the version tag. |
 
 CI-Tests, Dependency-Update-Tool, Binary-Artifacts, Dangerous-Workflow,
 Security-Policy, Token-Permissions, Pinned-Dependencies, SAST, License, and
@@ -39,19 +41,19 @@ Publication requires all supported mandatory targets and their sidecars, a
 source tag on the default branch's history, and a draft bound to that exact
 source commit. It refuses published releases and nonempty existing drafts,
 uploads without replacement, then downloads and verifies the complete set
-before publishing. This supports GitHub's draft-first immutable-release flow;
-repository immutability must be enabled separately.
+before publishing. Repository immutable releases are enabled; v0.1.18 is
+immutable. Enabling this setting does not retroactively freeze earlier releases.
 
 Scorecard v5.6.0 examines the latest five releases and recognizes
 `.sigstore.json` as signatures and `.intoto.jsonl` as provenance. Its
 [release scoring](https://github.com/ossf/scorecard/blob/v5.6.0/checks/evaluation/signed_releases.go)
 assigns 8 points to a signature-only release or 10 to a release with detected
-provenance, averages the window, and rounds down. At the 2026-11-15 inspection,
-v0.1.15, v0.1.16, and v0.1.17 have authentic original bundles, giving three of
-five releases signature credit and a **4/10** component. Adding verified DSSE
-exports to those three would give **6/10** with the same window and evaluator.
-These are component measurements/estimates, not an overall-score promise; a
-merged workflow alone does not change published release assets.
+provenance, averages the window, and rounds down. v0.1.15, v0.1.16 and v0.1.17
+now include verified exports of their original signed envelopes; their existing
+archives, checksums and bundles were unchanged. v0.1.18 supplies all five
+archives, checksums, bundles and DSSE exports in an immutable release. Four of
+the latest five releases therefore have provenance, giving the measured **8/10**
+component. v0.1.14 has no original provenance and remains unchanged.
 
 Existing authentic bundles may be exported without changing any old binary,
 tag, signed payload, or signature. This is another representation of original
@@ -63,10 +65,12 @@ cryptographic verification, and renaming a Sigstore bundle is not a DSSE export.
 
 The maintainer confirmed on 2026-11-15 that this is a solo project. The active
 [Protect master ruleset](https://github.com/Jeon1691/clipsync/rules/27029148)
-prevents force pushes/deletion and requires PRs, resolved threads,
-up-to-date branches, and the Linux/macOS/Windows CI checks. It now also requires
-the dependency audit, protocol fuzzing, stable `Minimum Rust` check, and CodeQL
-result, including all four configured language-analysis jobs. Required results are
+prevents force pushes/deletion and requires signed commits, PRs, resolved
+threads, up-to-date branches, and the Linux/macOS/Windows CI checks. Its 15
+required contexts include dependency audit, protocol fuzzing, `Minimum Rust`,
+CodeQL and all four language-analysis jobs, product coverage, dependency-source
+and upstream tests, Linux native dependency smoke testing and macOS product
+coverage. The macOS result passed before it became required. Required results are
 bound to the GitHub App that actually produces them. CodeQL merge protection
 blocks security findings at medium severity or higher and code findings at error
 severity. Administrator bypass has been removed and stale approvals are
@@ -84,21 +88,24 @@ Scorecard's review-dependent scoring tiers can keep Branch-Protection at 4 even
 after these useful controls are enabled.
 
 Code-Review is based on recent history, so a policy change alone will not erase
-the current 0/25 approved-changeset measurement. Use normal reviewed development;
+the current 0/5 approved-changeset measurement. Use normal reviewed development;
 do not create empty commits, reviews, or releases just to alter the score.
 
 ## Maintenance and assessment
 
-The remaining RustSec findings describe unmaintained upstream GUI/font/D-Bus
-or code-generation dependencies. Removing accessibility, suppressing advisories,
-or reducing audit coverage would hide the exposure rather than fix it. Prefer
-tested upstream migrations that keep supported platforms and the declared
-minimum Rust version consistent.
+The v0.2.0 [dependency migration](dependency-migration.md) removes the six former
+RustSec maintenance-advisory packages while retaining accessibility, title text,
+clipboard formats, both renderers, and mobile bindings. Both audited lockfiles
+are clean without ignores. Eight explicit source patches now require
+ClipSync maintenance; their source hashes, complete diffs, licenses, review
+cadence, and retirement conditions are documented. This is an actual component
+migration with Rust 1.95 as the tested minimum. A clean local audit does not
+claim that the published Scorecard report has already changed.
 
 The Best Practices badge is a separate project self-assessment. The maintainer
 completed GitHub account linking, and [project 16709](https://www.bestpractices.dev/en/projects/16709)
-is registered for the exact repository URL. Its saved answers and completion
-state are the authority; registration alone does not earn a passing badge. The
+is registered for the exact repository URL. Passing and Silver are both 100%;
+the saved answers and earned badge remain authoritative. The
 [contribution guide](../CONTRIBUTING.md) and
 [criterion-by-criterion worksheet](best-practices-assessment.md) provide a
 prepared registration record, evidence, and concrete gaps. Existing
@@ -106,10 +113,10 @@ security policy, CI, tests, fuzzing, dependency updates, and release verificatio
 provide evidence, but the maintainer must confirm that each requirement is met.
 Adding an unearned badge image does not satisfy the assessment.
 
-This patch includes the Scorecard action v2.5.0 update proposed by Dependabot in
+The Scorecard action v2.5.0 update proposed by Dependabot in
 [PR #8](https://github.com/Jeon1691/clipsync/pull/8), which uses Scorecard v5.6.0
-and recognizes standard `.sigstore.json` bundles. The measured baseline above
-uses v5.1.1; the future release-component estimates use v5.6.0. Compare evaluator
+and recognizes standard `.sigstore.json` bundles, is merged. The initial
+baseline used v5.1.1; the current report uses v5.6.0. Compare evaluator
 versions explicitly rather than treating a version change as a security fix.
 
 References: [Scorecard checks](https://github.com/ossf/scorecard/blob/v5.6.0/docs/checks.md),

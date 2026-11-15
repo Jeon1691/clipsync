@@ -1,6 +1,6 @@
 # Six-month regression-test audit — 2026-11-15
 
-The complete ledger now registers **47 of 87 distinct corrected defects (54.02%)**,
+The complete ledger now registers **61 of 106 distinct corrected defects (57.55%)**,
 meeting the Silver requirement of at least 50%. [The machine-readable ledger](regressions.json)
 and [CI checker](../scripts/check-regressions.py) preserve the full denominator
 and derive credit from concrete test references, not a manually entered Boolean.
@@ -10,10 +10,15 @@ that an assertion reproduces a historical defect.
 ## Scope and counting rules
 
 - Window: 2026-05-15 through 2026-11-15; the project began on 2026-09-16. The
-  reviewed source history includes all 61 non-merge commits through
+  baseline reviewed all 61 non-merge commits through
   `639000d60f1af1cc856fe20c61b60c84f9b2ab7b` and PR #16's five commits through
-  `3faac58836d94457c16e890f4d1380151236e5ea`. Later documentation confirmations
-  add no product defects. The follow-up adds focused tests for existing defects.
+  `3faac58836d94457c16e890f4d1380151236e5ea`. The source-history additions below
+  also register the public PR #21 publication corrections and the integrated
+  reconstruction, relay revocation/FIFO, and mobile fixture corrections through
+  `2e42f06061a636a5f58b3aaf96a40d48fd75e00c`. Documentation confirmations,
+  coverage expansions, compatibility features and release bumps add no defects.
+  IDs follow ledger append order, not commit chronology; a cherry-pick does not
+  create an additional defect.
 - A row is one materially distinct corrected failure/security invariant.
   Multiple input strings, aliases, package paths, tests and merge commits do not
   increase the bug count. The three emSign advisories sharing CVE-2026-111943
@@ -34,9 +39,9 @@ that an assertion reproduces a historical defect.
 
 | Scope | Registered defects | Complete defects | Fraction |
 | --- | ---: | ---: | ---: |
-| Broad ledger | 47 | 87 | 54.02% |
-| Project runtime/security | 41 | 54 | 75.93% |
-| All project-authored corrections | 47 | 75 | 62.67% |
+| Broad ledger | 61 | 106 | 57.55% |
+| Project runtime/security | 47 | 60 | 78.33% |
+| All project-authored corrections | 61 | 93 | 65.59% |
 
 The original baseline increased from **24/84 (28.57%)** to **44/84 (52.38%)** without
 removing defects or treating test variants as extra bugs. The newly covered rows
@@ -50,7 +55,87 @@ the original 84-row denominator and its uncredited rows remain intact.
 The publication follow-up adds F87: an incomplete upload could previously leave
 a public release exposed. The real publication shell now verifies all uploaded
 assets in a draft before making it public. Its failure/order fixtures register
-this additional defect, giving the current **47/87 (54.02%)** total.
+this additional defect, giving the then-current **47/87 (54.02%)** total.
+
+The relay revocation correction (F88) closes the actual authenticated socket
+before discarding its sender and rejects revoked reconnects before registration.
+Its direct-sender and real-WebSocket regressions produce **48/88 (54.55%)**.
+The FIFO correction (F89) is one credential-opening defect across token, TLS key
+and certificate paths. With production source `822af5d1` and the new tests, all
+three writer-less FIFO cases reached the five-second rejection deadline; the
+nonblocking descriptor validation in `39e32b2` passes them and preserves symlink
+support. These additions produce **49/89 (55.06%)** before the completeness
+reconciliation below. Local RED/GREEN was observed on macOS; Linux execution
+belongs to its CI run, and Unix FIFO cases are not registered for Windows.
+
+A source-history completeness review also registers two distinct PR #21 defects
+fixed by `2ebdde2`: valid Windows GNU binary checksum records were rejected (F90),
+and an ancestry-only container guard could accept an old workflow commit after
+the release tag moved (F91). The publication-shell replay rejects the Windows
+`hash *basename` record before the fix; the current publisher accepts it while
+binding the actual digest and exact basename. Real local Git fixtures reproduce
+the retargeted tag accepted by the old guard and rejected by fresh-fetch source
+validation. These are Unix publisher/control tests; a Windows archive format
+is not a claim of execution on a Windows host.
+
+The reconstruction-wrapper correction first recorded as `c847d2d`, integrated
+as `c5ad280`, contains two materially distinct failures. F92 is report lifecycle:
+a failed rerun overwrote the source identity while retaining earlier success
+markers. F93 is environment identity: the multiarch base left Docker's target
+architecture host-selected and unrecorded. Synthetic Docker fixtures replay the
+old wrapper and protect the corrected per-run report, platform arguments and
+platform record. They do not run independent builds or prove cross-architecture
+output identity. Failed build/comparison variants are not extra defects. F90–F93
+bring the ledger to **53/93 (56.99%)**.
+
+F94 records the later mobile fixture readiness correction in `2e42f06`: the room
+file could become visible before background pairing persisted its sync setting.
+It remains **uncredited**. The targeted current fixture passes, but the old one
+can pass intermittently and no deterministic focused RED/GREEN regression has
+been established. This is a test-fixture defect, not a newly claimed mobile
+product failure. Including it in the denominator yields the current
+**53/94 (56.38%)**, rather than increasing credit from nearby passing tests.
+
+The next additions are Linux backend metadata (F95), native clipboard FIFO
+opening (F96), and coverage source-path classification (F97). Isolated Linux
+backend fixtures fail the old unconditional metadata; both native FIFO readers
+hit a five-second deadline before nonblocking descriptor validation. Adversarial
+coverage reports expose test-path aliases and duplicate build roots accepted by
+the old validator. The corrected real report retains identical totals. These
+three distinct failures produce **56/97 (57.73%)**. FIFO variants and path aliases
+are not counted as additional defects.
+
+F98 records the actual early-joiner pairing failure discovered during coverage
+work. A real protocol fence and a delayed create-response fixture reproduce lost
+presence/SPAKE delivery. Both public Core clients now complete and persist the
+same keys. Session authentication, bounded pending storage, replacement and
+disconnect/expiry contracts protect the correction. One ordering/session-lifecycle
+defect brings the complete ledger to **57/98 (58.16%)**.
+
+The final reconciliation adds malformed extra-CA handling (F99), three
+uncredited fixture corrections (F100–F102), UniFFI macro nondeterminism (F103),
+lost reconstruction diagnostics (F104), and locale-dependent policy decoding
+(F105). F99, F104 and F105 have focused locally reproduced failures. F103 has
+three deterministic-emission and two semantic vendor regressions, but this
+ledger conservatively gives no credit because its Rust inventory covers only
+product-workspace packages; those tests run in the separate locked upstream CI
+workspace. No unrelated test is substituted for them. The final total is
+**60/105 (57.14%)**, retaining all earlier rows and honest missing-credit reasons.
+
+F106 records the output-directory ownership correction after the next actual
+hosted run passed both six-output and native-package comparisons but failed
+strict host cleanup. A separate real Docker root producer/UID1001 consumer
+reproduces the unlink failure and verifies the directory-only ownership handoff
+without mode or content changes. Synthetic Python contracts protect the caller
+handoff and reject malformed IDs before Docker. The complete ledger is now
+**61/106 (57.55%)**; cleanup errors remain fatal and the full reconstruction
+must finish successfully before the complete workflow is called passing.
+
+The scope table is derived from the ledger: runtime/security includes the
+`Runtime` and `Runtime-PR16` rows; project-authored corrections include every
+kind except `Dependency`. All F01–F88 rows and their existing references remain
+unchanged. The initial baseline and intermediate fractions above are history,
+not competing current totals.
 
 Historical staging source, older packaging scripts and isolated reversals of
 the relevant fix hunks fail the targeted cases; current source passes. The proof
@@ -178,11 +263,33 @@ whether the assertion meaningfully protects the stated behavior.
 | F84 | Dependency | [63f23ed](https://github.com/Jeon1691/clipsync/commit/63f23ed) | RUSTSEC-2026-0538: quinn-udp receive loop could spin after truncated datagram | **Uncredited**; No added project-owned reproducer/regression. Routine cargo-audit monitoring and upstream fixes alone are not counted as project test additions. |
 | F85 | Build/CI | [01d4a8b](https://github.com/Jeon1691/clipsync/commit/01d4a8b0655e07fecbb16b0f302516de439a9f0f) | Parallel clipboard regression fixtures reused temporary files, producing cross-test clipboard results | **Registered** — [command::regression_tests::concurrent_command_fixtures_never_share_files](../crates/clipsync-clipboard/src/command.rs); Hosted macOS CI reproduced the wrong-fixture result. Atomic allocation and exclusive directory creation isolate each fixture; the concurrent test preserves this contract. |
 | F86 | Runtime | [01d4a8b](https://github.com/Jeon1691/clipsync/commit/01d4a8b0655e07fecbb16b0f302516de439a9f0f) | Mobile FFI constructor discarded initialization errors and returned a usable client after configuration failure | **Registered** — [tests::mobile_constructor_and_commands_are_exercised_in_an_isolated_host](../crates/clipsync-mobile/src/lib.rs); The isolated bad-config child fails against the ignored-error constructor and passes with propagation. F53 fixed App.init itself; this distinct public FFI caller still discarded the returned error. |
+| F87 | Build/CI | [d9ec242](https://github.com/Jeon1691/clipsync/commit/d9ec24225f22128a1fa2ef3df5c12b02d782b394) | Public release exposed before complete uploaded asset verification | **Registered** — actual publication shell rejects changed uploaded evidence and verifies a complete draft before public transition; Linux/macOS fixture, Ubuntu publisher. |
+| F88 | Runtime | [7eb0c5c](https://github.com/Jeon1691/clipsync/commit/7eb0c5c2a2e8603b621efeb3676d25a8e91abd63) | Revoked relay device retained its authenticated socket; rejected Hello registered before membership validation | **Registered** — direct sender and real-WebSocket RED/GREEN regressions verify Close, blocked sends/reconnect, owner liveness and persisted revocation. |
+| F89 | Runtime | [39e32b2](https://github.com/Jeon1691/clipsync/commit/39e32b21437e02223b9c93256d072d30b8690652) | Writer-less credential FIFOs blocked relay startup before file-type rejection | **Registered** — three bounded [token/key/certificate FIFO tests](../crates/clipsync-relay/tests/secure_listener.rs) fail at five seconds against pre-fix code and pass with nonblocking descriptor validation; one defect, Linux/macOS scope. |
+| F90 | Build/CI | [2ebdde2](https://github.com/Jeon1691/clipsync/commit/2ebdde2102b5028e6689df0335ca966074b6a98b) | Publisher rejected valid GNU Windows binary checksum markers | **Registered** — [Windows-record acceptance](../scripts/tests/test_release_checksums.py) and [actual publication-shell fixture](../scripts/tests/test_release_publication.py) bind the digest and basename; Linux/macOS publisher tests. |
+| F91 | Build/CI | [2ebdde2](https://github.com/Jeon1691/clipsync/commit/2ebdde2102b5028e6689df0335ca966074b6a98b) | Retargeted release tag could publish the older container workflow source | **Registered** — [real local-Git retarget/default-branch fixtures](../scripts/tests/test_release_source.py) reject stale source before package writes and version promotion; Linux/macOS. |
+| F92 | Build/CI | [c5ad280](https://github.com/Jeon1691/clipsync/commit/c5ad280e8cacff1dc3d598b8f25ac1dbff2648d3) | Failed reconstruction rerun mixed a new source identity with earlier success evidence | **Registered** — [failed-rerun and build/comparison fixtures](../scripts/tests/test_build_reconstruction.py) preserve old reports and prevent current success markers; synthetic orchestration, Linux/macOS. |
+| F93 | Build/CI | [c5ad280](https://github.com/Jeon1691/clipsync/commit/c5ad280e8cacff1dc3d598b8f25ac1dbff2648d3) | Reconstruction target architecture remained host-selected and unrecorded | **Registered** — [default amd64 and explicit arm64 fixtures](../scripts/tests/test_build_reconstruction.py) check both builds/runs and the platform record; no cross-architecture build-result claim, Linux/macOS. |
+| F94 | Build/CI | [2e42f06](https://github.com/Jeon1691/clipsync/commit/2e42f06061a636a5f58b3aaf96a40d48fd75e00c) | Mobile fixture checked pairing completion before sync configuration persistence | **Uncredited** — intermittent old-fixture behavior has no deterministic focused regression; a current targeted pass is not historical proof. |
+| F95 | Runtime | [a0022e6](https://github.com/Jeon1691/clipsync/commit/a0022e65146742d61bfe45fb6e3a91218db0dbe7) | Linux backend metadata always identified xclip | **Registered** — [isolated backend/session contracts](../crates/clipsync-clipboard/src/detect.rs) reproduce old metadata errors on Linux. |
+| F96 | Runtime | [a0022e6](https://github.com/Jeon1691/clipsync/commit/a0022e65146742d61bfe45fb6e3a91218db0dbe7) | Native clipboard file reads blocked on writer-less FIFOs | **Registered** — [arboard file reader](../crates/clipsync-clipboard/src/detect.rs) and [AppKit reader](../crates/clipsync-clipboard/src/macos.rs) have bounded real FIFO regressions, macOS. |
+| F97 | Build/CI | [8488848](https://github.com/Jeon1691/clipsync/commit/8488848b10d6cdcdf2b99391b0507fddbbb6472e) | Coverage source classification accepted noncanonical aliases and duplicate build roots | **Registered** — [adversarial report fixtures](../scripts/tests/test_product_coverage.py) reject test aliases and duplicate product files without changing valid real totals, Linux/macOS. |
+
+| F98 | Runtime | [4cca45c](https://github.com/Jeon1691/clipsync/commit/4cca45c6937226657d32b484f0d2b8e0c3a72e65) | Early joiner socket lost creator presence and its first SPAKE message | **Registered** — [actual WebSocket ordering](../crates/clipsync-relay/tests/pairing_order.rs) and [full Core exchange/persisted keys](../crates/clipsync-relay/src/ws_tests.rs) use deterministic fences and private credentials, all three CI platforms. |
+
+
+| F99 | Runtime | [c335d3c](https://github.com/Jeon1691/clipsync/commit/c335d3cca102d177b36eb457b8f18627ea52039f) | Linux ignored malformed configured extra CA roots | **Registered** — [isolated single/mixed certificate fixtures](../crates/clipsync-transport/src/tls.rs) now reject every invalid trust anchor before client construction; valid private-CA, hostname and issuer contracts remain, all platforms. |
+| F100 | Build/CI | [c335d3c](https://github.com/Jeon1691/clipsync/commit/c335d3cca102d177b36eb457b8f18627ea52039f) | Windows deadline fixture assumed nanosecond SystemTime precision | **Uncredited** — a representable microsecond step fixes the fixture while preserving the exact production boundary; no independent fixture regression is claimed. |
+| F101 | Build/CI | 5294762, 248fc9e, 4cca45c | Loopback fixtures closed sockets before consumers received queued terminal frames | **Uncredited** — consumer fences preserve existing product assertions; no deterministic isolated old-fixture regression is claimed. |
+| F102 | Build/CI | 5cb9042 | Hostile-pairing fixture required a best-effort outbound error after client termination | **Uncredited** — exact local cryptographic failure and unchanged persistence remain asserted; no separate fixture regression is claimed. |
+| F103 | Dependency | [276c37c](https://github.com/Jeon1691/clipsync/commit/276c37c92f975ee745fc91c7a126165e34e5b341) | UniFFI randomized descendant-check emission prevented reproducible build output | **Uncredited by this inventory** — [three macro regressions](../vendor/uniffi_internal_macros/src/node.rs) and [two semantic contracts](../vendor/uniffi_internal_macros/tests/node_descendants.rs) run in the separate locked upstream workspace; actual RED/GREEN expansion and binary comparison evidence is retained. |
+| F104 | Build/CI | [276c37c](https://github.com/Jeon1691/clipsync/commit/276c37c92f975ee745fc91c7a126165e34e5b341) | Independent-container failure cleanup discarded differing binary bytes | **Registered** — [actual publication-wrapper diagnostic lifecycle](../scripts/tests/test_build_reconstruction.py) preserves both differing payloads and bounded diagnostics without success markers, Linux/macOS; synthetic orchestration is not build reproducibility proof. |
+| F105 | Build/CI | [8e63e94](https://github.com/Jeon1691/clipsync/commit/8e63e94894cc5a752627df975cdfc3429966fe43) | Process-locale decoding rejected valid UTF-8 regression sources on Windows | **Registered** — [strict UTF-8 evidence contracts](../scripts/tests/test_regression_policy.py) cover real ASCII-locale subprocesses, Windows1252 simulation and malformed-source rejection without modifying source bytes, all platforms. |
+
+| F106 | Build/CI | [7f6e976](https://github.com/Jeon1691/clipsync/commit/7f6e9767a28a5989c41fde1811924c2fa8058101) | Root-owned exported directories broke host cleanup after matching builds | **Registered** — [caller ownership and malformed-ID contracts](../scripts/tests/test_build_reconstruction.py), plus separate real Docker permission RED/GREEN; modes and payload hashes stay unchanged, Linux/macOS orchestration. |
 
 The [official Silver criterion](https://www.bestpractices.dev/en/criteria/1#regression_tests_added50)
 defines the badge requirement. This ledger's defect taxonomy and conservative
 qualifications are project self-assessment evidence, not an official taxonomy
 imposed by OpenSSF. See [testing](testing.md) for the separate production-source
 line/region/branch measurements; a regression-defect fraction is not statement coverage.
-
-| F87 | Build/CI | [d9ec242](https://github.com/Jeon1691/clipsync/commit/d9ec24225f22128a1fa2ef3df5c12b02d782b394) | Public release exposed before complete uploaded asset verification | **Registered** — actual publication shell rejects changed uploaded evidence and verifies a complete draft before public transition; Linux/macOS fixture, Ubuntu publisher. |

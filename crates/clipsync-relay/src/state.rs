@@ -45,6 +45,9 @@ pub struct PairingSession {
     pub ttl_secs: u64,
     pub bind_count: u32,
     pub completed: bool,
+    // Only authenticated sockets for this session may exchange pairing frames.
+    pub(crate) pairing_senders: [Option<mpsc::Sender<WsOut>>; 2],
+    pub(crate) pending_spake: [Option<String>; 2],
 }
 
 pub struct Room {
@@ -109,6 +112,8 @@ impl RelayState {
             ttl_secs: ttl,
             bind_count: 0,
             completed: false,
+            pairing_senders: [None, None],
+            pending_spake: [None, None],
         };
         self.pairing_by_id
             .insert(req.pairing_session_id.0.clone(), code.clone());
@@ -238,7 +243,22 @@ impl RelayState {
         &self,
         sid: &str,
     ) -> Option<(String, String, RoomId, PeerInfo, PeerInfo)> {
+        self.complete_pairing_bound(sid, None)
+    }
+
+    pub(crate) fn complete_pairing_bound(
+        &self,
+        sid: &str,
+        expected_room: Option<&str>,
+    ) -> Option<(String, String, RoomId, PeerInfo, PeerInfo)> {
         let mut session = self.pairing_mut(sid)?;
+        if expected_room.is_some_and(|room| room != session.room_id.as_str()) {
+            return None;
+        }
+        if session.expires_at < Utc::now() {
+            session.pending_spake = [None, None];
+            return None;
+        }
         if session.completed {
             return None;
         }
@@ -247,6 +267,7 @@ impl RelayState {
             return None;
         }
         session.completed = true;
+        session.pending_spake = [None, None];
         let joiner = session.joiner.clone()?;
         let creator = session.creator.clone();
         let room_id = session.room_id.clone();

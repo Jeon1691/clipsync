@@ -1,0 +1,320 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -11,7 +11,7 @@
+ 
+ [package]
+ edition = "2021"
+-rust-version = "1.77.2"
++rust-version = "1.89"
+ name = "atspi-proxies"
+ version = "0.13.0"
+ build = false
+@@ -26,7 +26,6 @@
+ autotests = false
+ autobenches = false
+ description = "AT-SPI2 proxies to query or manipulate UI objects"
+-homepage = "https://github.com/odilia-app/atspi"
+ readme = "README.md"
+ keywords = [
+     "a11y",
+@@ -63,8 +62,8 @@
+ default-features = false
+ 
+ [dependencies.zbus]
+-version = "5.5"
+-features = ["async-io"]
++version = "6.3"
++features = ["default-rt", "proxy"]
+ default-features = false
+ 
+ [dev-dependencies.atspi-common]
+--- a/src/accessible.rs
++++ b/src/accessible.rs
+@@ -296,8 +296,8 @@
+ 		let path = self.path();
+ 
+ 		AccessibleProxy::builder(conn)
+-			.destination(name)?
+-			.path(path)?
++			.destination(name)
++			.path(path)
+ 			.cache_properties(zbus::proxy::CacheProperties::No)
+ 			.build()
+ 			.await
+@@ -318,8 +318,8 @@
+ 		let path = self.path();
+ 
+ 		AccessibleProxy::builder(conn)
+-			.destination(name)?
+-			.path(path)?
++			.destination(name)
++			.path(path)
+ 			.cache_properties(zbus::proxy::CacheProperties::No)
+ 			.build()
+ 			.await
+--- a/src/collection.rs
++++ b/src/collection.rs
+@@ -63,7 +63,7 @@
+ 	/// [`TreeTraversalType`]: atspi_common::TreeTraversalType
+ 	fn get_matches_from(
+ 		&self,
+-		current_object: &zbus::zvariant::ObjectPath<'_>,
++		current_object: &zbus::ObjectPath<'_>,
+ 		rule: ObjectMatchRule,
+ 		sortby: SortOrder,
+ 		tree: TreeTraversalType,
+@@ -90,7 +90,7 @@
+ 	#[allow(clippy::too_many_arguments)]
+ 	fn get_matches_to(
+ 		&self,
+-		current_object: &zbus::zvariant::ObjectPath<'_>,
++		current_object: &zbus::ObjectPath<'_>,
+ 		rule: ObjectMatchRule,
+ 		sortby: SortOrder,
+ 		tree: TreeTraversalType,
+--- a/src/device_event_controller.rs
++++ b/src/device_event_controller.rs
+@@ -11,7 +11,7 @@
+ //!
+ 
+ use serde::{Deserialize, Serialize};
+-use zbus::zvariant::Type;
++use zbus::Type;
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+ #[repr(u32)]
+@@ -77,14 +77,14 @@
+ 	/// `DeregisterDeviceEventListener` method
+ 	fn deregister_device_event_listener(
+ 		&self,
+-		listener: &zbus::zvariant::ObjectPath<'_>,
++		listener: &zbus::ObjectPath<'_>,
+ 		types: EventType,
+ 	) -> zbus::Result<()>;
+ 
+ 	/// `DeregisterKeystrokeListener` method
+ 	fn deregister_keystroke_listener(
+ 		&self,
+-		listener: &zbus::zvariant::ObjectPath<'_>,
++		listener: &zbus::ObjectPath<'_>,
+ 		keys: &[KeyDefinition<'_>],
+ 		mask: u32,
+ 		type_: EventType,
+@@ -110,14 +110,14 @@
+ 	/// `RegisterDeviceEventListener` method
+ 	fn register_device_event_listener(
+ 		&self,
+-		listener: &zbus::zvariant::ObjectPath<'_>,
++		listener: &zbus::ObjectPath<'_>,
+ 		types: EventType,
+ 	) -> zbus::Result<bool>;
+ 
+ 	/// `RegisterKeystrokeListener` method
+ 	fn register_keystroke_listener(
+ 		&self,
+-		listener: &zbus::zvariant::ObjectPath<'_>,
++		listener: &zbus::ObjectPath<'_>,
+ 		keys: &[KeyDefinition<'_>],
+ 		mask: u32,
+ 		type_: &[EventType],
+--- a/src/proxy_ext.rs
++++ b/src/proxy_ext.rs
+@@ -44,8 +44,8 @@
+ 		if self.interfaces.contains(Interface::Action) {
+ 			Ok(ActionProxy::builder(self.proxy.connection())
+ 				.cache_properties(zbus::proxy::CacheProperties::No)
+-				.destination(self.proxy.destination())?
+-				.path(self.proxy.path())?
++				.destination(self.proxy.destination())
++				.path(self.proxy.path())
+ 				.build()
+ 				.await?)
+ 		} else {
+@@ -62,8 +62,8 @@
+ 		if self.interfaces.contains(Interface::Application) {
+ 			Ok(ApplicationProxy::builder(self.proxy.connection())
+ 				.cache_properties(zbus::proxy::CacheProperties::No)
+-				.destination(self.proxy.destination())?
+-				.path(self.proxy.path())?
++				.destination(self.proxy.destination())
++				.path(self.proxy.path())
+ 				.build()
+ 				.await?)
+ 		} else {
+@@ -80,8 +80,8 @@
+ 		if self.interfaces.contains(Interface::Cache) {
+ 			Ok(CacheProxy::builder(self.proxy.connection())
+ 				.cache_properties(zbus::proxy::CacheProperties::No)
+-				.destination(self.proxy.destination())?
+-				.path(self.proxy.path())?
++				.destination(self.proxy.destination())
++				.path(self.proxy.path())
+ 				.build()
+ 				.await?)
+ 		} else {
+@@ -98,8 +98,8 @@
+ 		if self.interfaces.contains(Interface::Collection) {
+ 			Ok(CollectionProxy::builder(self.proxy.connection())
+ 				.cache_properties(zbus::proxy::CacheProperties::No)
+-				.destination(self.proxy.destination())?
+-				.path(self.proxy.path())?
++				.destination(self.proxy.destination())
++				.path(self.proxy.path())
+ 				.build()
+ 				.await?)
+ 		} else {
+@@ -116,8 +116,8 @@
+ 		if self.interfaces.contains(Interface::Component) {
+ 			Ok(ComponentProxy::builder(self.proxy.connection())
+ 				.cache_properties(zbus::proxy::CacheProperties::No)
+-				.destination(self.proxy.destination())?
+-				.path(self.proxy.path())?
++				.destination(self.proxy.destination())
++				.path(self.proxy.path())
+ 				.build()
+ 				.await?)
+ 		} else {
+@@ -134,8 +134,8 @@
+ 		if self.interfaces.contains(Interface::Document) {
+ 			Ok(DocumentProxy::builder(self.proxy.connection())
+ 				.cache_properties(zbus::proxy::CacheProperties::No)
+-				.destination(self.proxy.destination())?
+-				.path(self.proxy.path())?
++				.destination(self.proxy.destination())
++				.path(self.proxy.path())
+ 				.build()
+ 				.await?)
+ 		} else {
+@@ -152,8 +152,8 @@
+ 		if self.interfaces.contains(Interface::EditableText) {
+ 			Ok(EditableTextProxy::builder(self.proxy.connection())
+ 				.cache_properties(zbus::proxy::CacheProperties::No)
+-				.destination(self.proxy.destination())?
+-				.path(self.proxy.path())?
++				.destination(self.proxy.destination())
++				.path(self.proxy.path())
+ 				.build()
+ 				.await?)
+ 		} else {
+@@ -170,8 +170,8 @@
+ 		if self.interfaces.contains(Interface::Hyperlink) {
+ 			Ok(HyperlinkProxy::builder(self.proxy.connection())
+ 				.cache_properties(zbus::proxy::CacheProperties::No)
+-				.destination(self.proxy.destination())?
+-				.path(self.proxy.path())?
++				.destination(self.proxy.destination())
++				.path(self.proxy.path())
+ 				.build()
+ 				.await?)
+ 		} else {
+@@ -188,8 +188,8 @@
+ 		if self.interfaces.contains(Interface::Hypertext) {
+ 			Ok(HypertextProxy::builder(self.proxy.connection())
+ 				.cache_properties(zbus::proxy::CacheProperties::No)
+-				.destination(self.proxy.destination())?
+-				.path(self.proxy.path())?
++				.destination(self.proxy.destination())
++				.path(self.proxy.path())
+ 				.build()
+ 				.await?)
+ 		} else {
+@@ -206,8 +206,8 @@
+ 		if self.interfaces.contains(Interface::Image) {
+ 			Ok(ImageProxy::builder(self.proxy.connection())
+ 				.cache_properties(zbus::proxy::CacheProperties::No)
+-				.destination(self.proxy.destination())?
+-				.path(self.proxy.path())?
++				.destination(self.proxy.destination())
++				.path(self.proxy.path())
+ 				.build()
+ 				.await?)
+ 		} else {
+@@ -224,8 +224,8 @@
+ 		if self.interfaces.contains(Interface::Selection) {
+ 			Ok(SelectionProxy::builder(self.proxy.connection())
+ 				.cache_properties(zbus::proxy::CacheProperties::No)
+-				.destination(self.proxy.destination())?
+-				.path(self.proxy.path())?
++				.destination(self.proxy.destination())
++				.path(self.proxy.path())
+ 				.build()
+ 				.await?)
+ 		} else {
+@@ -242,8 +242,8 @@
+ 		if self.interfaces.contains(Interface::Table) {
+ 			Ok(TableProxy::builder(self.proxy.connection())
+ 				.cache_properties(zbus::proxy::CacheProperties::No)
+-				.destination(self.proxy.destination())?
+-				.path(self.proxy.path())?
++				.destination(self.proxy.destination())
++				.path(self.proxy.path())
+ 				.build()
+ 				.await?)
+ 		} else {
+@@ -260,8 +260,8 @@
+ 		if self.interfaces.contains(Interface::TableCell) {
+ 			Ok(TableCellProxy::builder(self.proxy.connection())
+ 				.cache_properties(zbus::proxy::CacheProperties::No)
+-				.destination(self.proxy.destination())?
+-				.path(self.proxy.path())?
++				.destination(self.proxy.destination())
++				.path(self.proxy.path())
+ 				.build()
+ 				.await?)
+ 		} else {
+@@ -278,8 +278,8 @@
+ 		if self.interfaces.contains(Interface::Text) {
+ 			Ok(TextProxy::builder(self.proxy.connection())
+ 				.cache_properties(zbus::proxy::CacheProperties::No)
+-				.destination(self.proxy.destination())?
+-				.path(self.proxy.path())?
++				.destination(self.proxy.destination())
++				.path(self.proxy.path())
+ 				.build()
+ 				.await?)
+ 		} else {
+@@ -296,8 +296,8 @@
+ 		if self.interfaces.contains(Interface::Value) {
+ 			Ok(ValueProxy::builder(self.proxy.connection())
+ 				.cache_properties(zbus::proxy::CacheProperties::No)
+-				.destination(self.proxy.destination())?
+-				.path(self.proxy.path())?
++				.destination(self.proxy.destination())
++				.path(self.proxy.path())
+ 				.build()
+ 				.await?)
+ 		} else {
+--- a/src/socket.rs
++++ b/src/socket.rs
+@@ -31,11 +31,11 @@
+ 	/// * The registry sets the "Id" property on the org.a11y.atspi.Application interface on the @plug object.
+ 	/// * The Embed method returns with the bus name and object path for the registry's root object.
+ 	/// Returns: the bus name and object path of the registry's root object.
+-	fn embed(&self, plug: &(&str, zbus::zvariant::ObjectPath<'_>)) -> zbus::Result<ObjectRefOwned>;
++	fn embed(&self, plug: &(&str, zbus::ObjectPath<'_>)) -> zbus::Result<ObjectRefOwned>;
+ 
+ 	/// This method is called by a socket to inform the plug that it is being
+ 	/// embedded. The plug should register the embedding socket as its parent.
+-	fn embedded(&self, path: zbus::zvariant::ObjectPath<'_>) -> zbus::Result<()>;
++	fn embedded(&self, path: zbus::ObjectPath<'_>) -> zbus::Result<()>;
+ 
+ 	/// Unembed method
+ 	/// @plug: a string for the unique bus name of the application, and an object path
+@@ -44,5 +44,5 @@
+ 	/// Unregisters an application from the accesibility registry.  It is not necessary to
+ 	/// call this method; the accessibility registry detects when an application
+ 	/// disconnects from the bus.
+-	fn unembed(&self, plug: &(&str, zbus::zvariant::ObjectPath<'_>)) -> zbus::Result<()>;
++	fn unembed(&self, plug: &(&str, zbus::ObjectPath<'_>)) -> zbus::Result<()>;
+ }
+--- a/src/text.rs
++++ b/src/text.rs
+@@ -45,7 +45,7 @@
+ 		coord_type: CoordType,
+ 		x_clip_type: ClipType,
+ 		y_clip_type: ClipType,
+-	) -> zbus::Result<Vec<(i32, i32, String, zbus::zvariant::OwnedValue)>>;
++	) -> zbus::Result<Vec<(i32, i32, String, zbus::OwnedVariant)>>;
+ 
+ 	/// `GetCharacterAtOffset` method
+ 	fn get_character_at_offset(&self, offset: i32) -> zbus::Result<i32>;

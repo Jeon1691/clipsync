@@ -1,6 +1,6 @@
 # Copyright the ClipSync contributors.
 # SPDX-License-Identifier: MIT
-name: Linux build repeatability
+name: Linux build reproducibility
 
 on:
   push:
@@ -11,8 +11,12 @@ on:
       - rust-toolchain.toml
       - '.cargo/**'
       - '**/build.rs'
+      - 'crates/**'
       - Dockerfile
+      - Dockerfile.reproducible
+      - 'vendor/**'
       - scripts/check-repeatable-build.sh
+      - scripts/reproduce-linux-build.sh
       - .github/workflows/reproducible.yml
   pull_request:
     paths:
@@ -21,8 +25,12 @@ on:
       - rust-toolchain.toml
       - '.cargo/**'
       - '**/build.rs'
+      - 'crates/**'
       - Dockerfile
+      - Dockerfile.reproducible
+      - 'vendor/**'
       - scripts/check-repeatable-build.sh
+      - scripts/reproduce-linux-build.sh
       - .github/workflows/reproducible.yml
   schedule:
     - cron: '45 18 * * 2'
@@ -37,37 +45,21 @@ concurrency:
 
 jobs:
   linux:
-    name: Linux workspace repeatability
+    name: Linux workspace reproducibility
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    container:
-      # Same immutable builder image as Dockerfile; apt packages are recorded.
-      image: rust:1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c
-    env:
-      RUSTUP_TOOLCHAIN: 1.100.0
-      CARGO_BUILD_JOBS: '2'
-      REPEATABILITY_CONTAINER: rust:1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 1
-      - name: Native workspace dependencies
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends python3 pkg-config libgtk-3-dev libxkbcommon-dev libwayland-dev libxkbcommon-x11-dev
-      - name: Exact Rust toolchain
-        run: rustup toolchain install 1.100.0 --profile minimal --no-self-update
-      - name: Build independent trees and compare bytes
-        run: |
-          # checkout's temporary HOME does not persist this trust into the job container.
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          bash scripts/check-repeatable-build.sh target/repeatability-report
+      - name: Reconstruct independent environments and compare build outputs
+        run: bash scripts/reproduce-linux-build.sh target/reproducibility-report
       - name: Retain environment, hashes, build logs and differing outputs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: linux-repeatability
-          path: target/repeatability-report/
+          name: linux-reproducibility
+          path: target/reproducibility-report/
           if-no-files-found: warn
           retention-days: 14

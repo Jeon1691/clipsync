@@ -17,6 +17,12 @@ SPAKE2 transcript to the protocol version, pairing session ID, and device IDs,
 then exchange HMAC confirmations. Wrong code, mutated transcript, or failed
 confirmation aborts without storing credentials.
 
+The relay generates this password. Pair through a trusted relay: an actively
+malicious operator who knows the password is outside the honest-but-curious
+model and may impersonate a pairing participant. HTTPS/WSS authenticates the
+chosen relay and protects traffic in transit; it does not establish that the
+operator is honest.
+
 Device-binding messages share a session wrapping key but use sender-specific
 nonce domains (A: index 2, B: index 3). Index 1 is reserved for legacy senders;
 receivers decrypt using the nonce carried by the v1 message. This prevents the
@@ -97,7 +103,9 @@ A compromised or unlocked authorized endpoint can read clipboard contents and
 keys. Same-user local malware and administrators are outside the confidentiality
 guarantee. Pairing codes must be shared through an authenticated separate
 channel. Use HTTPS/WSS with trusted certificates for public deployments; the
-relay's HTTP listener requires TLS termination and network restrictions.
+relay requires a TLS certificate/key pair by default and permits only TLS
+1.2/1.3. Its explicit HTTP opt-in requires TLS termination and network
+restrictions for public deployments; see [self-hosting](self-hosting.md).
 Metadata and traffic timing remain visible to the relay. Denial of service,
 delivery by a malicious relay, secure erasure of old copies/backups, and payload
 forward secrecy are not guaranteed. Native libraries, OS trust stores and

@@ -45,9 +45,87 @@ pub async fn ws_handler(
 struct ConnCtx {
     device_id: String,
     room_id: String,
-    role: ClientRole,
     pairing_sid: Option<String>,
     device_role: DeviceRole,
+    pairing_side: Option<usize>,
+}
+
+// A protocol-v1 Ed25519 SPAKE message is 33 bytes (44 in base64). Retain only
+// its first public message while the authenticated peer opens its WebSocket.
+const PAIRING_SPAKE_MAX_BYTES: usize = 1024;
+
+struct PairingArrival {
+    joined: Option<(mpsc::Sender<WsOut>, PeerInfo)>,
+    pending: Option<ControlMessage>,
+}
+
+fn register_pairing_connection(
+    state: &RelayState,
+    conn: &mut ConnCtx,
+    tx: &mpsc::Sender<WsOut>,
+    role: ClientRole,
+) -> Result<PairingArrival, String> {
+    let sid = conn
+        .pairing_sid
+        .as_deref()
+        .ok_or("pairing session required")?;
+    let mut session = state.pairing_mut(sid).ok_or("unknown pairing session")?;
+    if session.room_id.as_str() != conn.room_id {
+        return Err("pairing room mismatch".into());
+    }
+    if session.expires_at < chrono::Utc::now() {
+        session.pending_spake = [None, None];
+        return Err("pairing expired".into());
+    }
+    if session.completed {
+        return Err("pairing completed".into());
+    }
+    let side = match (role, conn.device_role) {
+        (ClientRole::PairingA, DeviceRole::Owner)
+            if conn.device_id == session.creator.device_id.as_str() =>
+        {
+            0
+        }
+        (ClientRole::PairingB, DeviceRole::Member)
+            if session
+                .joiner
+                .as_ref()
+                .is_some_and(|peer| peer.device_id.as_str() == conn.device_id) =>
+        {
+            1
+        }
+        _ => return Err("pairing role or device mismatch".into()),
+    };
+    // Registration, presence and the pending-message take share the session
+    // lock with forwarding, so an arriving peer cannot miss an early SPAKE.
+    if session.pairing_senders[side].is_some() {
+        session.pending_spake = [None, None];
+    }
+    state.register_conn(&conn.device_id, tx.clone());
+    session.pairing_senders[side] = Some(tx.clone());
+    conn.pairing_side = Some(side);
+    let peer_online = session.pairing_senders[1 - side]
+        .as_ref()
+        .is_some_and(|sender| !sender.is_closed());
+    let joined = if peer_online {
+        session.joiner.clone().map(|mut peer| {
+            peer.online = true;
+            (session.pairing_senders[0].as_ref().unwrap().clone(), peer)
+        })
+    } else {
+        None
+    };
+    let pending = if peer_online {
+        session.pending_spake[1 - side]
+            .take()
+            .map(|message| ControlMessage::Spake2Msg {
+                pairing_session_id: session.session_id.clone(),
+                message,
+            })
+    } else {
+        None
+    };
+    Ok(PairingArrival { joined, pending })
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Option<String>) {
@@ -75,15 +153,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
     let mut burst = 0u32;
 
     while let Some(Ok(msg)) = stream.next().await {
-        if last_msg.elapsed() < Duration::from_millis(20) {
-            burst += 1;
-            if burst > 80 {
-                send_err(&tx, "rate_limited", "too many messages").await;
-                break;
-            }
-        } else {
-            burst = 0;
-            last_msg = Instant::now();
+        if message_rate_exceeded(&mut last_msg, &mut burst, Instant::now()) {
+            send_err(&tx, "rate_limited", "too many messages").await;
+            break;
         }
         match msg {
             Message::Text(t) => {
@@ -101,17 +173,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
                 }
             }
             Message::Binary(b) => {
-                if b.len() > FRAME_HARD_CAP {
-                    send_err(&tx, "too_large", "frame exceeds hard cap").await;
-                    continue;
-                }
                 if let Some(c) = &ctx {
-                    if c.role == ClientRole::Member
-                        || c.role == ClientRole::PairingA
-                        || c.role == ClientRole::PairingB
-                    {
-                        forward_binary(&state, c, b.to_vec(), &tx).await;
-                    }
+                    forward_binary(&state, c, b.to_vec(), &tx).await;
                 }
             }
             Message::Ping(p) => {
@@ -124,11 +187,39 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
     }
 
     if let Some(c) = ctx {
-        state.unregister_conn(&c.device_id);
-        notify_peers_left(&state, &c).await;
+        state
+            .connections
+            .remove_if(&c.device_id, |_, sender| sender.same_channel(&tx));
+        if let (Some(sid), Some(side)) = (&c.pairing_sid, c.pairing_side) {
+            if let Some(mut session) = state.pairing_mut(sid) {
+                if session.pairing_senders[side]
+                    .as_ref()
+                    .is_some_and(|sender| sender.same_channel(&tx))
+                {
+                    session.pairing_senders[side] = None;
+                    session.pending_spake = [None, None];
+                }
+            }
+        }
+        // A replacement may already own this device's routing entry. Its
+        // peers must stay online when the superseded socket finishes closing.
+        if !state.is_online(&c.device_id) {
+            notify_peers_left(&state, &c).await;
+        }
     }
     let _ = tx.send(WsOut::Close).await;
     let _ = writer.await;
+}
+
+fn message_rate_exceeded(last: &mut Instant, burst: &mut u32, now: Instant) -> bool {
+    if now.duration_since(*last) < Duration::from_millis(20) {
+        *burst += 1;
+        *burst > 80
+    } else {
+        *burst = 0;
+        *last = now;
+        false
+    }
 }
 
 async fn handle_control(
@@ -149,6 +240,9 @@ async fn handle_control(
             token,
             pairing_session_id,
         } => {
+            if ctx.is_some() {
+                return Err("hello already received".into());
+            }
             if protocol_version != clipsync_protocol::PROTOCOL_VERSION {
                 return Err("unsupported protocol version".into());
             }
@@ -167,54 +261,33 @@ async fn handle_control(
                     return Err("token room mismatch".into());
                 }
             }
-            let conn = ConnCtx {
+            if claims.typ == "pair"
+                && pairing_session_id
+                    .as_ref()
+                    .is_some_and(|sid| Some(sid.as_str()) != claims.sid.as_deref())
+            {
+                return Err("token pairing session mismatch".into());
+            }
+            let mut conn = ConnCtx {
                 device_id: device_id.as_str().to_string(),
                 room_id: claims.rid.as_str().to_string(),
-                role,
-                pairing_sid: pairing_session_id
-                    .as_ref()
-                    .map(|s| s.as_str().to_string())
-                    .or(claims.sid.clone()),
+                pairing_sid: if claims.typ == "pair" {
+                    claims.sid.clone()
+                } else {
+                    None
+                },
                 device_role: claims.role,
+                pairing_side: None,
             };
-            state.register_conn(&conn.device_id, tx.clone());
-
+            if claims.typ != "pair" {
+                let room = state.room(&conn.room_id).ok_or("unknown room")?;
+                let device = room.devices.get(&conn.device_id).ok_or("unknown device")?;
+                if device.revoked {
+                    return Err("device revoked".into());
+                }
+            }
             if claims.typ == "pair" {
-                if let Some(sid) = &conn.pairing_sid {
-                    if let Some(session) = state.pairing(sid) {
-                        if let Some(joiner) = &session.joiner {
-                            if device_id == session.creator.device_id {
-                                // notify creator that joiner is in
-                                let _ = device_name;
-                                let _ = os;
-                            }
-                            let _ = joiner;
-                        }
-                    }
-                }
-                // If joiner just connected, tell creator.
-                if role == ClientRole::PairingB {
-                    if let Some(sid) = &conn.pairing_sid {
-                        if let Some(session) = state.pairing(sid) {
-                            if let Some(creator_tx) =
-                                state.connections.get(session.creator.device_id.as_str())
-                            {
-                                let joined = ControlMessage::PeerJoined {
-                                    device: PeerInfo {
-                                        device_id: device_id.clone(),
-                                        device_name: device_name.clone(),
-                                        os: os.clone(),
-                                        role: DeviceRole::Member,
-                                        online: true,
-                                    },
-                                };
-                                if let Ok(s) = joined.encode() {
-                                    let _ = creator_tx.send(WsOut::Text(s)).await;
-                                }
-                            }
-                        }
-                    }
-                }
+                let arrival = register_pairing_connection(state, &mut conn, tx, role)?;
                 let hello_ok = ControlMessage::HelloOk {
                     room_id: claims.rid.clone(),
                     peer_online: false,
@@ -223,18 +296,14 @@ async fn handle_control(
                     device_token: None,
                 };
                 send_msg(tx, &hello_ok).await;
-            } else {
-                if let Some(room) = state.room(&conn.room_id) {
-                    if let Some(dev) = room.devices.get(&conn.device_id) {
-                        if dev.revoked {
-                            return Err("device revoked".into());
-                        }
-                    } else {
-                        return Err("unknown device".into());
-                    }
-                } else {
-                    return Err("unknown room".into());
+                if let Some((creator, device)) = arrival.joined {
+                    send_msg(&creator, &ControlMessage::PeerJoined { device }).await;
                 }
+                if let Some(pending) = arrival.pending {
+                    send_msg(tx, &pending).await;
+                }
+            } else {
+                state.register_conn(&conn.device_id, tx.clone());
                 let peers: Vec<PeerInfo> = state
                     .peer_ids(&conn.room_id, &conn.device_id)
                     .into_iter()
@@ -286,7 +355,7 @@ async fn handle_control(
         | ControlMessage::DeviceBind { .. }
         | ControlMessage::NoiseHandshake { .. } => {
             let c = ctx.as_ref().ok_or("hello required")?;
-            forward_pairing_or_peer(state, c, msg).await
+            forward_pairing_or_peer(state, c, tx, msg).await
         }
         ControlMessage::TextEnvelope {
             routing,
@@ -405,11 +474,17 @@ async fn handle_control(
             if c.device_role != DeviceRole::Owner {
                 return Err("manage permission required".into());
             }
+            // Revoke removes the routing entry. Keep the sender long enough
+            // to close the authenticated socket after invalidating its device.
+            let revoked_connection = state
+                .connections
+                .get(device_id.as_str())
+                .map(|connection| connection.value().clone());
             if !state.revoke(&c.room_id, device_id.as_str()) {
                 return Err("device not found".into());
             }
             fanout_except(state, &c.room_id, &c.device_id, &msg).await;
-            if let Some(p) = state.connections.get(device_id.as_str()) {
+            if let Some(p) = revoked_connection {
                 let _ = p.send(WsOut::Close).await;
             }
             state.webhook_spawn(serde_json::json!({
@@ -440,52 +515,88 @@ async fn handle_control(
 async fn forward_pairing_or_peer(
     state: &Arc<RelayState>,
     c: &ConnCtx,
+    tx: &mpsc::Sender<WsOut>,
     msg: ControlMessage,
 ) -> Result<(), String> {
-    let is_bind = matches!(msg, ControlMessage::DeviceBind { .. });
     if let Some(sid) = &c.pairing_sid {
-        if let Some(session) = state.pairing(sid) {
-            let peer = if c.device_id == session.creator.device_id.as_str() {
-                session
-                    .joiner
+        let side = c
+            .pairing_side
+            .ok_or("authenticated pairing hello required")?;
+        let message_sid = match &msg {
+            ControlMessage::Spake2Msg {
+                pairing_session_id, ..
+            }
+            | ControlMessage::KeyConfirm {
+                pairing_session_id, ..
+            }
+            | ControlMessage::DeviceBind {
+                pairing_session_id, ..
+            } => pairing_session_id,
+            _ => return Err("unexpected pairing frame".into()),
+        };
+        if message_sid.as_str() != sid {
+            return Err("pairing frame session mismatch".into());
+        }
+        let senders = {
+            let mut session = state.pairing_mut(sid).ok_or("unknown pairing session")?;
+            if session.room_id.as_str() != c.room_id {
+                return Err("pairing room mismatch".into());
+            }
+            if session.expires_at < chrono::Utc::now() {
+                session.pending_spake = [None, None];
+                return Err("pairing expired".into());
+            }
+            if session.completed {
+                return Err("pairing completed".into());
+            }
+            if !session.pairing_senders[side]
+                .as_ref()
+                .is_some_and(|sender| sender.same_channel(tx))
+            {
+                return Err("pairing connection replaced".into());
+            }
+            if let ControlMessage::Spake2Msg { message, .. } = &msg {
+                if message.len() > PAIRING_SPAKE_MAX_BYTES {
+                    return Err("pairing SPAKE message too large".into());
+                }
+                if !session.pairing_senders[1 - side]
                     .as_ref()
-                    .map(|j| j.device_id.as_str().to_string())
-            } else {
-                Some(session.creator.device_id.as_str().to_string())
-            };
-            drop(session);
-            if let Some(peer) = peer {
-                if let Some(p) = state.connections.get(&peer) {
-                    if let Ok(s) = msg.encode() {
-                        let _ = p.send(WsOut::Text(s)).await;
+                    .is_some_and(|sender| !sender.is_closed())
+                {
+                    match &session.pending_spake[side] {
+                        Some(first) if first != message => {
+                            return Err("pairing SPAKE already pending".into())
+                        }
+                        Some(_) => {}
+                        None => session.pending_spake[side] = Some(message.clone()),
                     }
+                    return Ok(());
                 }
             }
+            session.pairing_senders.clone()
+        };
+        if let Some(peer) = &senders[1 - side] {
+            send_msg(peer, &msg).await;
         }
-        if is_bind {
-            if let Some((owner_tok, member_tok, room_id, creator, joiner)) =
-                state.complete_pairing(sid)
+        if matches!(msg, ControlMessage::DeviceBind { .. }) {
+            if let Some((owner_tok, member_tok, room_id, _, _)) =
+                state.complete_pairing_bound(sid, Some(&c.room_id))
             {
-                let to_owner = ControlMessage::PairingComplete {
-                    room_id: room_id.clone(),
-                    epoch: 1,
-                    device_token: owner_tok,
-                    role: DeviceRole::Owner,
-                };
-                let to_member = ControlMessage::PairingComplete {
-                    room_id,
-                    epoch: 1,
-                    device_token: member_tok,
-                    role: DeviceRole::Member,
-                };
-                if let Some(p) = state.connections.get(creator.device_id.as_str()) {
-                    if let Ok(s) = to_owner.encode() {
-                        let _ = p.send(WsOut::Text(s)).await;
-                    }
-                }
-                if let Some(p) = state.connections.get(joiner.device_id.as_str()) {
-                    if let Ok(s) = to_member.encode() {
-                        let _ = p.send(WsOut::Text(s)).await;
+                for (sender, device_token, role) in [
+                    (&senders[0], owner_tok, DeviceRole::Owner),
+                    (&senders[1], member_tok, DeviceRole::Member),
+                ] {
+                    if let Some(sender) = sender {
+                        send_msg(
+                            sender,
+                            &ControlMessage::PairingComplete {
+                                room_id: room_id.clone(),
+                                epoch: 1,
+                                device_token,
+                                role,
+                            },
+                        )
+                        .await;
                     }
                 }
             }

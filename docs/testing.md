@@ -1,7 +1,7 @@
 # Testing and coverage
 
 The [CI workflow](../.github/workflows/ci.yml) tests the Rust workspace on Linux,
-macOS, and Windows, checks the Rust 1.88 minimum, and runs formatting, compiler
+macOS, and Windows, checks the Rust 1.95 minimum, and runs formatting, compiler
 warnings, Clippy, stability, platform, relay, and format checks. Run the workspace
 tests locally with:
 
@@ -9,10 +9,14 @@ tests locally with:
 cargo test --workspace --locked -- --test-threads=1
 ```
 
-Clipboard tests write to the system clipboard. On Linux, install `xclip`, `xvfb`,
-`libgtk-3-dev`, `libxkbcommon-dev`, `libwayland-dev`, and `libxkbcommon-x11-dev`, and
-run that command through `xvfb-run -a`. Native clipboard behavior still needs the
-three-platform CI matrix and manual platform testing.
+The real host clipboard roundtrip requires `CLIPSYNC_TEST_HOST_CLIPBOARD=1`;
+enable it only in a disposable test session. Ordinary local tests use private
+named pasteboards or isolated adapters. Full foreground CLI completion on macOS
+also requires `CLIPSYNC_TEST_DISPOSABLE_HOST=1`; local validation leaves that flag
+unset. Hosted CI supplies both flags. On Linux, install `xclip`, `xvfb`,
+`libgtk-3-dev`, `libxkbcommon-dev`, `libwayland-dev`, `libxkbcommon-x11-dev`,
+`libfontconfig1-dev` and `libfreetype6-dev`, then run through `xvfb-run -a`.
+Native behavior still needs the three-platform CI matrix and manual testing.
 
 ## Measuring coverage
 
@@ -24,7 +28,7 @@ filters omit dependency sources, generated build output, and standalone test,
 example, and benchmark directories. It runs on pull requests, default branch
 pushes, weekly, and on manual dispatch.
 
-The `workspace-coverage` artifact contains `lcov.info`, an HTML report in
+The `workspace-coverage-linux` and `workspace-coverage-macos` artifacts contain `lcov.info`, an HTML report in
 `html/index.html`, `summary.json`, and `summary.txt`. The Actions job summary also
 shows per-file and total line, region, function, and branch results. Coverage
 reports reuse the same test run; exporting each format does not rerun tests.
@@ -34,7 +38,7 @@ records remain in LCOV; the other reports retain function metrics.
 
 The workflow pins [cargo-llvm-cov 0.9.1](https://github.com/taiki-e/cargo-llvm-cov/releases/tag/v0.9.1)
 and a nightly compiler because [branch instrumentation is unstable](https://github.com/taiki-e/cargo-llvm-cov#usage).
-Production continues to support Rust 1.88; nightly is a measurement toolchain.
+Production continues to support Rust 1.95; nightly is a measurement toolchain.
 To reproduce the measurement from the repository root:
 
 ```sh
@@ -56,13 +60,16 @@ On Linux, prefix the instrumented test command with `xvfb-run -a`.
 Silver requires at least 80% statement coverage; Gold requires at least 90%
 statement and 80% branch coverage. LLVM reports source lines and regions rather
 than a language-independent statement count. Review both metrics and the missing
-source before using this evidence for a statement-coverage assertion. The workflow now requires at least 80% product lines and executable regions.
+source before using this evidence for a statement-coverage assertion. The workflow
+requires at least 90% product lines and executable regions plus 80% branches
+on both Linux and macOS after both actual hosted results passed.
 The checker sums only validated production-file counters, rejects missing
 crates, duplicate/non-product files and inconsistent totals, and retains the
 full HTML/JSON reports even when the threshold fails.
 
 Coverage is specific to the compiler, host, active `cfg` paths, and tests. The
-Linux workflow does not measure Windows or macOS implementations, iOS/Android
+Linux and macOS jobs measure their own active implementations separately.
+They do not measure Windows paths, iOS/Android
 device behavior, Swift/Kotlin apps, or C/C++/OS libraries. Documentation tests are
 not instrumented by this command. The HTML report keeps uncovered desktop and
 mobile Rust paths visible; compiling those crates does not demonstrate their
@@ -77,24 +84,26 @@ their assertion lines do not increase production coverage. Desktop/mobile and
 all other product source stay in the denominator. Stable builds/MSRV remain
 unchanged; the known coverage cfg names are declared through workspace lints.
 
-A clean macOS measurement of the regression candidate passed all 190 Rust tests:
+A [hosted macOS product measurement](https://github.com/Jeon1691/clipsync/actions/runs/43716973414/job/132820497919)
+of `c335d3cca102d177b36eb457b8f18627ea52039f` passed the entire instrumented
+workspace suite, including the opt-in native clipboard roundtrip:
 
 | Metric | Covered / total | Coverage |
 | --- | ---: | ---: |
-| Product-source lines | 5,116 / 5,924 | 86.36% |
-| Executable regions | 5,304 / 6,591 | 80.47% |
-| Branches | 751 / 1,064 | 70.58% |
+| Product-source lines | 5,825 / 6,194 | 94.04% |
+| Executable regions | 6,227 / 6,892 | 90.35% |
+| Branches | 944 / 1,118 | 84.44% |
 
-Hosted Linux evidence for the same source is available in the
-[coverage run](https://github.com/Jeon1691/clipsync/actions/runs/43696427313):
-4,703/5,421 lines (86.76%), 4,883/6,080 executable regions (80.31%) and
-659/952 branches (69.22%). The required gate passes on the real Linux runner;
-platform-specific denominators are reported separately rather than summed.
+The [hosted Linux job](https://github.com/Jeon1691/clipsync/actions/runs/43716973414/job/132820497622)
+for the same source measures 5,392/5,665 lines (95.18%), 5,785/6,360 executable
+regions (90.96%) and 856/1,000 branches (85.60%). A separate unprivileged Linux
+ARM64 container run measured 95.29%/91.04%/85.60%, with all 285 tests passing.
+Platform-specific denominators are reported separately rather than summed.
 
-Both product lines and executable regions exceed the 80% Silver gate. LLVM
+Both hosted jobs exceed the 90% line/region and 80% branch Gold gate. LLVM
 executable-region mapping provides this project's Rust statement-coverage
-evidence, with the additional line threshold retained. Gold's 90% statement
-and 80% branch targets remain unmet. Earlier
+evidence, with the additional line threshold retained. Both hosted platform
+measurements meet Gold's 90% statement-evidence and 80% branch targets. Earlier
 57.74% macOS / 59.17% Linux line reports included inline test-code lines and
 are historical source-report baselines, not directly comparable production-only
 measurements. Do not claim an increase from changing the denominator. The new
@@ -177,21 +186,23 @@ dynamic-analysis coverage.
 ## Regression policy and remaining higher-tier work
 
 The [full audit](regression-audit.md) and [machine-readable ledger](regressions.json)
-now register **46/86 (53.49%)** distinct corrected defects, exceeding the 50%
+now register **61/106 (57.55%)** distinct corrected defects, exceeding the 50%
 Silver regression requirement. The checker validates real test references and
 the full denominator in all three CI platform jobs; future fixes must update
 the ledger and cannot silently delete uncovered cases. This fraction is separate
 from product-source statement coverage.
 
-Local validation passed 190 Rust tests, 37 Python policy/packaging tests, and
-62 native macOS clipboard/daemon/mobile ASan tests. Historical/hunk-restored implementations fail the
+The integrated v0.2.0 candidate passed 310 local Rust tests and 83 Python
+policy/packaging tests; hosted native macOS ASan also passed. Exact sources,
+scope and pre-release fuzz logs are recorded in [release verification](releases/v0.2.0-verification.md).
+Historical/hunk-restored implementations fail the
 targeted transfer, CLI, storage, TLS, service and packaging cases. Current source
 passes. Characterization tests with no reliable historical failure are not
 credited in the defect fraction.
 
 The added cases exercise sustained daemon/IPC sessions, adapter command failures,
 headless desktop state transitions, mobile callbacks and service cleanup. Native
-window startup, some OS failure paths and Gold thresholds still need more work.
+window startup and some OS failure paths still need more work.
 The complete desktop/mobile source remains visible in the reports.
 
 The v0.1.17 security candidate's earlier ASan/assertion campaigns completed

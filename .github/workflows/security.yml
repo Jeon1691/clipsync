@@ -32,9 +32,11 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --version 0.23.0 --locked
       - name: Audit workspace dependencies
-        run: cargo audit --deny unsound --deny yanked
+        run: cargo audit --deny unsound --deny yanked --deny unmaintained
       - name: Audit fuzz dependencies
-        run: cargo audit --file fuzz/Cargo.lock --deny unsound --deny yanked
+        run: cargo audit --file fuzz/Cargo.lock --deny unsound --deny yanked --deny unmaintained
+      - name: Audit frozen upstream test dependencies
+        run: cargo audit --file vendor/test-workspace.Cargo.lock --deny unsound --deny yanked --deny unmaintained
 
   fuzz:
     runs-on: ubuntu-latest

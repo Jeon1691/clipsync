@@ -94,4 +94,43 @@ mod tests {
             Err(ProtocolError::FrameTooLarge)
         ));
     }
+
+    #[test]
+    fn rejects_each_corrupt_header_before_exposing_ciphertext() {
+        let valid = encode_chunk_frame(&ChunkFrame {
+            transfer_id: TransferId::new(),
+            chunk_index: 0,
+            chunk_count: 1,
+            ciphertext: vec![7; 16],
+        })
+        .unwrap();
+        for (offset, value, detail) in [
+            (0, b'X', "bad magic"),
+            (4, 2, "unsupported version"),
+            (5, 1, "not a chunk frame"),
+            (33, 17, "length mismatch"),
+        ] {
+            let mut corrupt = valid.clone();
+            corrupt[offset] = value;
+            assert!(
+                matches!(decode_chunk_frame(&corrupt), Err(ProtocolError::Chunk(actual)) if actual == detail)
+            );
+        }
+        for length in 0..CHUNK_HEADER_LEN {
+            assert!(matches!(
+                decode_chunk_frame(&valid[..length]),
+                Err(ProtocolError::Chunk("truncated header"))
+            ));
+        }
+        assert!(matches!(
+            decode_chunk_frame(&vec![0; FRAME_HARD_CAP + 1]),
+            Err(ProtocolError::FrameTooLarge)
+        ));
+        let mut trailing = valid;
+        trailing.push(0);
+        assert!(matches!(
+            decode_chunk_frame(&trailing),
+            Err(ProtocolError::Chunk("length mismatch"))
+        ));
+    }
 }

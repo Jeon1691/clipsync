@@ -1,6 +1,6 @@
 # Copyright the ClipSync contributors.
 # SPDX-License-Identifier: MIT
-"""Require 80% executable-source line and region coverage across all Rust products.
+"""Require measured source coverage across all Rust products.
 
 LLVM executable regions provide the statement-coverage evidence used by this
 project. Requiring both source lines and regions avoids accepting a high line
@@ -10,6 +10,7 @@ Only test code is excluded by the measurement; product crates remain included.
 import argparse
 import json
 from pathlib import Path
+import posixpath
 import sys
 
 
@@ -27,8 +28,14 @@ def counter(metric):
     return covered, count
 
 
-def validate(report, packages):
+def validate(report, packages, minimum=MINIMUM, minimum_branches=None):
     errors = []
+    thresholds = {"lines": minimum, "regions": minimum}
+    if minimum_branches is not None:
+        thresholds["branches"] = minimum_branches
+    if any(isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100
+           for value in thresholds.values()):
+        return ["coverage thresholds must be integer percentages from 0 to 100"], {}
     data = report.get("data", []) if isinstance(report, dict) else []
     if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
         return ["expected one LLVM workspace report"], {}
@@ -36,13 +43,13 @@ def validate(report, packages):
     files = unit.get("files", [])
     if not isinstance(files, list) or not files:
         return ["report contains no product files"], {}
-    present, seen = set(), set()
-    sums = {name: [0, 0] for name in ["lines", "regions"]}
+    present, seen, product_sources = set(), set(), set()
+    sums = {name: [0, 0] for name in thresholds}
     for source in files:
         if not isinstance(source, dict) or not isinstance(source.get("filename"), str):
             errors.append("invalid source record")
             continue
-        name = source["filename"].replace("\\", "/")
+        name = posixpath.normpath(source["filename"].replace("\\", "/"))
         if name in seen:
             errors.append(f"duplicate source: {name}")
             continue
@@ -58,7 +65,12 @@ def validate(report, packages):
             if any(value[1] for value in counts.values()):
                 errors.append(f"test/non-product source included in product metrics: {name}")
             continue
-        if all(value[1] > 0 for value in counts.values()):
+        logical_source = f"{package}/{relative}"
+        if logical_source in product_sources:
+            errors.append(f"duplicate production source across build roots: {logical_source}")
+            continue
+        product_sources.add(logical_source)
+        if all(counts[key][1] > 0 for key in ["lines", "regions"]):
             present.add(package)
         for key, (covered, count) in counts.items():
             sums[key][0] += covered
@@ -76,23 +88,29 @@ def validate(report, packages):
             errors.append(f"empty product {name} totals")
             continue
         metrics[name] = {"covered": covered, "count": count, "percent": 100 * covered / count}
-        if covered * 100 < MINIMUM * count:
-            errors.append(f"{name} coverage {metrics[name]['percent']:.2f}% is below {MINIMUM}%")
+        if covered * 100 < thresholds[name] * count:
+            errors.append(f"{name} coverage {metrics[name]['percent']:.2f}% is below {thresholds[name]}%")
     return errors, metrics
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("summary", type=Path)
+    parser.add_argument("--minimum-percent", type=int, default=MINIMUM,
+                        help="Required product line and executable-region percentage (default: 80)")
+    parser.add_argument("--minimum-branch-percent", type=int,
+                        help="Require branch instrumentation and this product branch percentage")
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[1]
     packages = {path.parent.name for path in (root / "crates").glob("*/Cargo.toml")}
     try:
-        errors, metrics = validate(json.loads(args.summary.read_text()), packages)
+        errors, metrics = validate(json.loads(args.summary.read_text()), packages,
+                                   args.minimum_percent, args.minimum_branch_percent)
     except (OSError, ValueError, TypeError, AttributeError) as error:
         errors, metrics = [str(error)], {}
     for name, metric in metrics.items():
-        print(f"Product {name}: {metric['covered']}/{metric['count']} ({metric['percent']:.2f}%; required {MINIMUM}%)")
+        minimum = args.minimum_branch_percent if name == "branches" else args.minimum_percent
+        print(f"Product {name}: {metric['covered']}/{metric['count']} ({metric['percent']:.2f}%; required {minimum}%)")
     for error in errors:
         print(f"error: {error}", file=sys.stderr)
     return int(bool(errors))

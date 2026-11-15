@@ -1,0 +1,110 @@
+# Copyright the ClipSync contributors.
+# SPDX-License-Identifier: MIT
+name: Dependency compatibility patches
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  schedule:
+    - cron: '20 20 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-patches-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: 1.100.0
+
+jobs:
+  source-tests:
+    name: Dependency source and upstream tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: 1.100.0
+      - name: Verify every original archive and complete local patch
+        run: |
+          mkdir -p target/dependency-ci-evidence
+          python3 scripts/check-dependency-patches.py 2>&1 | tee target/dependency-ci-evidence/sources.log
+      - name: Run locked upstream parser, wire, XML and macro tests
+        run: |
+          python3 scripts/test-dependency-patches.py --toolchain 1.100.0 2>&1 | tee target/dependency-ci-evidence/upstream-tests.log
+          cmp vendor/test-workspace.Cargo.lock target/dependency-next/source-tests/Cargo.lock
+          git -c safe.directory="$GITHUB_WORKSPACE" diff --exit-code -- Cargo.lock vendor
+      - name: Retain source and test evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dependency-patch-source-tests
+          path: target/dependency-ci-evidence/
+          if-no-files-found: warn
+          retention-days: 30
+
+  native-smoke:
+    name: Linux native dependency smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container:
+      # Bookworm's Weston 10 matches the exercised headless GL/screenshooter
+      # interfaces. This is a native amd64 run, not cross-platform GUI evidence.
+      image: rust:1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TARGET_DIR: target/dependency-ci-native
+      LIBGL_ALWAYS_SOFTWARE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install native build, font and isolated display tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            python3 python3-pyatspi dbus-x11 at-spi2-core xvfb xauth x11-utils \
+            weston fonts-dejavu-core libgl1-mesa-dri libegl1-mesa-dev \
+            pkg-config libgtk-3-dev libxkbcommon-dev libwayland-dev \
+            libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev
+          rustup toolchain install 1.100.0 --profile minimal --no-self-update
+      - name: Record the native environment and build the real desktop
+        run: |
+          mkdir -p target/dependency-ci-native/evidence
+          {
+            rustc --version --verbose
+            cargo --version
+            weston --version
+            dpkg-query -W
+          } > target/dependency-ci-native/evidence/environment.txt
+          cargo build --locked -p clipsync-desktop
+      - name: Verify X11 title and system AT-SPI controls
+        run: |
+          /usr/bin/python3 scripts/test-linux-desktop.py "$CARGO_TARGET_DIR/debug/clipsync-desktop" \
+            2>&1 | tee target/dependency-ci-native/evidence/x11-atspi.log
+      - name: Render the private Wayland window and capture evidence
+        run: |
+          /usr/bin/python3 scripts/test-linux-wayland.py "$CARGO_TARGET_DIR/debug/clipsync-desktop" \
+            target/dependency-ci-native/evidence/wayland \
+            2>&1 | tee target/dependency-ci-native/evidence/wayland.log
+          git -c safe.directory="$GITHUB_WORKSPACE" diff --exit-code -- Cargo.lock vendor
+      - name: Retain native smoke logs and screenshot
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dependency-patch-linux-native
+          path: target/dependency-ci-native/evidence/
+          if-no-files-found: warn
+          retention-days: 30

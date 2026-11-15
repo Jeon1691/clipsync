@@ -15,6 +15,7 @@ fn config_child(case: &str, secret: Option<&str>) -> Output {
     command
         .args(["--exact", "relay_config_from_env_child", "--nocapture"])
         .env(CASE_ENV, case)
+        .env_remove("CLIPSYNC_RELAY_TOKEN_SECRET_FILE")
         .env_remove("CLIPSYNC_RELAY_BIND")
         .env_remove("CLIPSYNC_RELAY_PUBLIC_URL")
         .env_remove("CLIPSYNC_RELAY_WEBHOOK_URL")
@@ -107,6 +108,9 @@ fn relay_config_from_env_child() {
             assert_eq!(second.token_secret.len(), 32);
             assert!(first.token_secret != second.token_secret, "key was reused");
         }
+        "file" => {
+            assert!(first.token_secret == [0u8; 32], "file key bytes changed");
+        }
         "preserve" => {
             let supplied = std::env::var(SECRET_ENV).expect("explicit test key");
             assert!(
@@ -117,4 +121,75 @@ fn relay_config_from_env_child() {
         "load" => {}
         _ => panic!("unknown isolated config test case"),
     }
+}
+
+#[test]
+fn token_secret_file_preserves_binary_key_and_rejects_ambiguous_or_bad_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("token.secret");
+    std::fs::write(&path, [0u8; 32]).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let run = |secret: Option<&str>| {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "relay_config_from_env_child", "--nocapture"])
+            .env(CASE_ENV, "file")
+            .env("CLIPSYNC_RELAY_BIND", "127.0.0.1:0")
+            .env("CLIPSYNC_RELAY_TOKEN_SECRET_FILE", &path);
+        if let Some(value) = secret {
+            command.env(SECRET_ENV, value);
+        } else {
+            command.env_remove(SECRET_ENV);
+        }
+        command.output().unwrap()
+    };
+    assert_child_success(run(None));
+    for value in ["", VALID_TEST_KEY] {
+        let output = run(Some(value));
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("configure only one"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(VALID_TEST_KEY));
+    }
+    std::fs::write(&path, [0u8; 31]).unwrap();
+    let output = run(None);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("at least 32 bytes"));
+    std::fs::remove_file(&path).unwrap();
+    let output = run(None);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("CLIPSYNC_RELAY_TOKEN_SECRET_FILE"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(&path, [0u8; 32]).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let output = run(None);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("private credential permissions"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn token_secret_symlink_preserves_private_regular_file_bytes() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("token.secret");
+    let link = directory.path().join("token-link.secret");
+    std::fs::write(&path, [0u8; 32]).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    symlink("token.secret", &link).unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "relay_config_from_env_child", "--nocapture"])
+        .env(CASE_ENV, "file")
+        .env("CLIPSYNC_RELAY_BIND", "127.0.0.1:0")
+        .env("CLIPSYNC_RELAY_TOKEN_SECRET_FILE", link)
+        .env_remove(SECRET_ENV)
+        .output()
+        .unwrap();
+    assert_child_success(output);
 }

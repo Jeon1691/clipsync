@@ -1,0 +1,95 @@
+{
+  "excluded_archive_files": [
+    "Cargo.lock"
+  ],
+  "sources": [
+    {
+      "name": "accesskit_atspi_common",
+      "version": "0.21.1",
+      "archive_url": "https://static.crates.io/crates/accesskit_atspi_common/accesskit_atspi_common-0.21.1.crate",
+      "archive_sha256": "24f5baf62e34a4a6c30e3d697e4782f821a7337049c44c3b40576a27dfbb580d",
+      "repository": "https://github.com/AccessKit/accesskit",
+      "revision": "f3026222559c7f5f46d8f25cb7404de68eb149f0",
+      "path_in_repository": "adapters/atspi-common",
+      "license": "MIT OR Apache-2.0",
+      "patch": "patches/accesskit_atspi_common.patch"
+    },
+    {
+      "name": "accesskit_unix",
+      "version": "0.24.1",
+      "archive_url": "https://static.crates.io/crates/accesskit_unix/accesskit_unix-0.24.1.crate",
+      "archive_sha256": "30d5192871228c54f1b0fb4a85cef000e11a3804f25d2165f14afa0daa67f3f6",
+      "repository": "https://github.com/AccessKit/accesskit",
+      "revision": "f3026222559c7f5f46d8f25cb7404de68eb149f0",
+      "path_in_repository": "adapters/unix",
+      "license": "MIT OR Apache-2.0",
+      "patch": "patches/accesskit_unix.patch"
+    },
+    {
+      "name": "askama_derive",
+      "version": "0.16.1",
+      "archive_url": "https://static.crates.io/crates/askama_derive/askama_derive-0.16.1.crate",
+      "archive_sha256": "071ee5ebf2138e3ad180e0aacf6940c2cab5e6d8333741d9925c7bee2b153f39",
+      "repository": "https://github.com/askama-rs/askama",
+      "revision": "9ae4d5bdf4352b35e34106e38944c90d7a7ede3e",
+      "path_in_repository": "askama_derive",
+      "license": "MIT OR Apache-2.0",
+      "patch": "patches/askama_derive.patch"
+    },
+    {
+      "name": "atspi-common",
+      "version": "0.13.0",
+      "archive_url": "https://static.crates.io/crates/atspi-common/atspi-common-0.13.0.crate",
+      "archive_sha256": "20c5617155740c98003016429ad13fe43ce7a77b007479350a9f8bf95a29f63d",
+      "repository": "https://github.com/odilia-app/atspi",
+      "revision": "f486755b9bf993613f63a779133aafc54925004a",
+      "path_in_repository": "atspi-common",
+      "license": "Apache-2.0 OR MIT",
+      "patch": "patches/atspi-common.patch"
+    },
+    {
+      "name": "atspi-proxies",
+      "version": "0.13.0",
+      "archive_url": "https://static.crates.io/crates/atspi-proxies/atspi-proxies-0.13.0.crate",
+      "archive_sha256": "2230e48787ed3eb4088996eab66a32ca20c0b67bbd4fd6cdfe79f04f1f04c9fc",
+      "repository": "https://github.com/odilia-app/atspi",
+      "revision": "f486755b9bf993613f63a779133aafc54925004a",
+      "path_in_repository": "atspi-proxies",
+      "license": "Apache-2.0 OR MIT",
+      "patch": "patches/atspi-proxies.patch"
+    },
+    {
+      "name": "uniffi_internal_macros",
+      "version": "0.32.2",
+      "archive_url": "https://static.crates.io/crates/uniffi_internal_macros/uniffi_internal_macros-0.32.2.crate",
+      "archive_sha256": "0f4bad017164375d99450d70495014810d15a84ba9da6ed14b9628b1424223ba",
+      "repository": "https://github.com/mozilla/uniffi-rs",
+      "revision": "7bc621ee9d0d15371d792612707ba5ed4111f950",
+      "path_in_repository": "uniffi_internal_macros",
+      "license": "MPL-2.0",
+      "patch": "patches/uniffi_internal_macros.patch"
+    },
+    {
+      "name": "zbus-lockstep",
+      "version": "0.7.0",
+      "archive_url": "https://static.crates.io/crates/zbus-lockstep/zbus-lockstep-0.7.0.crate",
+      "archive_sha256": "9685b228021d41c5adc5ea4a7f1d0082726681222794e4b75b3816ae5c94b4a6",
+      "repository": "https://github.com/luukvanderduim/zbus-lockstep",
+      "revision": "ac20711dd0ce42eb185f19c42d360c12b51aff1e",
+      "path_in_repository": "zbus-lockstep",
+      "license": "MIT",
+      "patch": "patches/zbus-lockstep.patch"
+    },
+    {
+      "name": "zbus-lockstep-macros",
+      "version": "0.7.0",
+      "archive_url": "https://static.crates.io/crates/zbus-lockstep-macros/zbus-lockstep-macros-0.7.0.crate",
+      "archive_sha256": "d0212bfb9b37899fa93da3e0abc187c48a3db13b19b46f982abeb7a832814bbd",
+      "repository": "https://github.com/luukvanderduim/zbus-lockstep",
+      "revision": "ac20711dd0ce42eb185f19c42d360c12b51aff1e",
+      "path_in_repository": "zbus-lockstep-macros",
+      "license": "MIT",
+      "patch": "patches/zbus-lockstep-macros.patch"
+    }
+  ]
+}

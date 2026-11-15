@@ -117,4 +117,40 @@ mod tests {
         assert!(safe_transfer_id("01ARZ3NDEKTSV4RRFFQ69G5FA").is_err());
         assert!(safe_transfer_id("01arz3ndektsv4rrffq69g5fav").is_err());
     }
+
+    #[test]
+    fn cross_platform_names_reject_controls_reserved_syntax_and_trailing_spaces() {
+        for name in [
+            "", ".", " ", "report ", "a\\b", "a\nb", "a\rb", "a\tb", "a*b", "a?b", "a\"b", "a<b",
+            "a>b", "a|b",
+        ] {
+            assert!(
+                safe_filename(name).is_err(),
+                "unsafe basename accepted: {name:?}"
+            );
+        }
+        for name in ["PRN", "NUL", "com1.log", "COM9", "lpt1.txt", "LPT9.csv"] {
+            assert!(
+                safe_filename(name).is_err(),
+                "reserved device accepted: {name}"
+            );
+        }
+        for name in [
+            "자료.txt",
+            "first.last.csv",
+            "com10.txt",
+            "lpt10",
+            "report-01_23.png",
+        ] {
+            assert_eq!(safe_filename(name).unwrap(), name);
+        }
+        for id in [
+            "IIIIIIIIIIIIIIIIIIIIIIIIII",
+            "OOOOOOOOOOOOOOOOOOOOOOOOOO",
+            "UUUUUUUUUUUUUUUUUUUUUUUUUU",
+            "0000000000000000000000000!",
+        ] {
+            assert!(safe_transfer_id(id).is_err());
+        }
+    }
 }

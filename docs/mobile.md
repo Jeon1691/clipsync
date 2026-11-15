@@ -38,6 +38,12 @@ cd clipsync-android && ./scripts/sync-core.sh
 # then open the folder in Android Studio
 ```
 
+v0.2.0 upgrades UniFFI to 0.32.2 and requires Rust 1.95. Regenerate the
+Swift/Kotlin bindings and rebuild the native library from the same core checkout;
+do not mix older UniFFI 0.29 generated bindings with the new library. The exported
+ClipSync methods, records, errors, and clipboard callback contract are preserved.
+See [dependency migration](dependency-migration.md) for validation details.
+
 `CLIPSYNC_CORE` can point at a non-sibling checkout of this repository.
 
 Pair with the desktop CLI as usual (`clipsync room create` / `room join`).

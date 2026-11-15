@@ -17,6 +17,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  CLIPSYNC_TEST_DISPOSABLE_HOST: '1'
+  # Hosted runners provide disposable clipboard sessions for the host contract.
+  CLIPSYNC_TEST_HOST_CLIPBOARD: '1'
 
 jobs:
   msrv:
@@ -28,14 +31,14 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          toolchain: 1.88.0
+          toolchain: 1.95.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Linux desktop dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev libxkbcommon-x11-dev
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev
       - name: Check minimum supported Rust version
-        run: cargo +1.88.0 check --workspace --all-targets --locked
+        run: cargo +1.95.0 check --workspace --all-targets --locked
 
   test:
     name: ${{ matrix.platform }}
@@ -63,7 +66,7 @@ jobs:
         if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y xclip xvfb libgtk-3-dev libxkbcommon-dev libwayland-dev libxkbcommon-x11-dev
+          sudo apt-get install -y xclip xvfb libgtk-3-dev libxkbcommon-dev libwayland-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev
       - name: Source copyright and license notices
         if: matrix.platform != 'windows'
         run: python3 scripts/check-source-headers.py

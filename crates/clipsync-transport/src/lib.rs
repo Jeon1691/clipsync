@@ -342,4 +342,349 @@ mod tests {
         }
         assert!(max <= Duration::from_secs(16), "{max:?}");
     }
+
+    #[tokio::test]
+    async fn malformed_relay_frames_do_not_hide_later_binary_or_control_messages() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (consumed_tx, consumed_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            socket
+                .send(Message::Text("malformed JSON".into()))
+                .await
+                .unwrap();
+            socket
+                .send(Message::Text(
+                    ControlMessage::Ping { ts: 77 }.encode().unwrap().into(),
+                ))
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let frame = socket.next().await.unwrap().unwrap();
+                    if let Message::Text(text) = frame {
+                        if matches!(
+                            ControlMessage::decode(&text),
+                            Ok(ControlMessage::Pong { ts: 77 })
+                        ) {
+                            break;
+                        }
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            socket
+                .send(Message::Binary(Vec::new().into()))
+                .await
+                .unwrap();
+            socket
+                .send(Message::Binary(vec![1, 2, 3].into()))
+                .await
+                .unwrap();
+            socket
+                .send(Message::Text(
+                    ControlMessage::PeerLeft {
+                        device_id: "fixture".into(),
+                    }
+                    .encode()
+                    .unwrap()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            // Keep the peer alive until the consumer has observed both frames.
+            // The connection emits an immediate heartbeat, so closing earlier
+            // can legitimately reset TCP before its receive task drains them.
+            consumed_rx.await.unwrap();
+            socket.send(Message::Close(None)).await.unwrap();
+        });
+        let mut connection = RelayConnection::connect(&format!("ws://{address}/v1/ws"))
+            .await
+            .unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(5), connection.incoming.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(first, Incoming::Binary(bytes) if bytes == [1,2,3]));
+        let second = tokio::time::timeout(Duration::from_secs(5), connection.incoming.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(second, Incoming::Control(ControlMessage::PeerLeft { device_id }) if device_id.as_str() == "fixture")
+        );
+        consumed_tx.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), connection.incoming.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            connection
+                .send_control(ControlMessage::Ping { ts: 88 })
+                .await,
+            Err(TransportError::Closed)
+        ));
+        assert!(matches!(
+            connection.send_binary(vec![4]).await,
+            Err(TransportError::Closed)
+        ));
+        connection.close().await;
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+
+        }).await.expect("loopback protocol fixture exceeded its deadline");
+    }
+
+    #[tokio::test]
+    async fn invalid_urls_and_invalid_websocket_protocol_close_with_useful_errors() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            assert!(matches!(
+                RelayConnection::connect("not a URL").await,
+                Err(TransportError::Url(_))
+            ));
+            assert!(RelayConnection::connect("https://127.0.0.1/")
+                .await
+                .is_err());
+            // URL normalization accepts a trailing newline; HTTP request
+            // construction must reject the original control character.
+            assert!(matches!(
+                RelayConnection::connect("ws://127.0.0.1:0/\n").await,
+                Err(TransportError::Protocol(_))
+            ));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                // A reserved opcode is invalid on the wire and must terminate the
+                // transport rather than delivering an invented control message.
+                socket.get_mut().write_all(&[0x83, 0x00]).await.unwrap();
+            });
+            let mut connection = RelayConnection::connect(&format!("ws://{address}/v1/ws"))
+                .await
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_secs(5), connection.incoming.recv())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            tokio::time::timeout(Duration::from_secs(5), server)
+                .await
+                .unwrap()
+                .unwrap();
+        })
+        .await
+        .expect("loopback protocol fixture exceeded its deadline");
+    }
+
+    #[test]
+    fn backward_clock_and_exact_deadlines_do_not_disconnect_healthy_sessions() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+        // Windows SystemTime stores 100ns ticks, so a 1ns addition rounds away.
+        // Keep the exact boundary and exercise a representable instant after it.
+        let after_boundary = Duration::from_micros(1);
+        assert!(!should_force_reconnect(
+            now,
+            now,
+            now - Duration::from_secs(1)
+        ));
+        assert!(!should_force_reconnect(
+            now,
+            now,
+            now + Duration::from_secs(8)
+        ));
+        assert!(should_force_reconnect(
+            now,
+            now,
+            now + Duration::from_secs(8) + after_boundary
+        ));
+        let stale = Duration::from_secs(HEARTBEAT_SECS * 2 + 5);
+        let watchdog = now + stale;
+        assert!(!should_force_reconnect(now, watchdog, watchdog));
+        assert!(should_force_reconnect(
+            now,
+            watchdog,
+            watchdog + after_boundary
+        ));
+        assert_eq!(next_attempt(u32::MAX, Duration::from_secs(29)), 8);
+        assert_eq!(next_attempt(u32::MAX, Duration::from_secs(30)), 1);
+    }
+
+    #[tokio::test]
+    async fn receiver_shutdown_closes_the_session_for_binary_and_control_frames() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            for binary in [false, true] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let (ready, received) = tokio::sync::oneshot::channel();
+                let server = tokio::spawn(async move {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                    received.await.unwrap();
+                    let message = if binary {
+                        Message::Binary(vec![1, 2, 3].into())
+                    } else {
+                        Message::Text(
+                            ControlMessage::PeerLeft {
+                                device_id: "synthetic-peer".into(),
+                            }
+                            .encode()
+                            .unwrap()
+                            .into(),
+                        )
+                    };
+                    socket.send(message).await.unwrap();
+                    while let Some(Ok(message)) = socket.next().await {
+                        if matches!(message, Message::Close(_)) {
+                            break;
+                        }
+                    }
+                });
+                let mut connection = RelayConnection::connect(&format!("ws://{address}/v1/ws"))
+                    .await
+                    .unwrap();
+                connection.incoming.close();
+                ready.send(()).unwrap();
+                connection.outgoing.closed().await;
+                assert!(matches!(
+                    connection
+                        .send_control(ControlMessage::Ping { ts: 12 })
+                        .await,
+                    Err(TransportError::Closed)
+                ));
+                assert!(matches!(
+                    connection.send_binary(vec![4]).await,
+                    Err(TransportError::Closed)
+                ));
+                assert!(connection.incoming.recv().await.is_none());
+                server.await.unwrap();
+            }
+        })
+        .await
+        .expect("receiver shutdown must stop the websocket task");
+    }
+
+    #[tokio::test]
+    async fn ping_pong_outgoing_frames_and_client_close_preserve_payloads() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                socket.send(Message::Ping(vec![71].into())).await.unwrap();
+                socket.send(Message::Pong(vec![72].into())).await.unwrap();
+                socket.send(Message::Text(ControlMessage::Pong { ts: 73 }.encode().unwrap().into())).await.unwrap();
+                let mut control = false;
+                let mut binary = false;
+                let mut pong = false;
+                let mut acknowledged = false;
+                while let Some(Ok(message)) = socket.next().await {
+                    match message {
+                        Message::Text(text) if matches!(ControlMessage::decode(&text), Ok(ControlMessage::Ping { ts: 74 })) => control = true,
+                        Message::Binary(bytes) => { assert_eq!(&bytes[..], &[75, 76]); binary = true; },
+                        Message::Pong(bytes) if bytes.as_ref() == [71] => pong = true,
+                        Message::Close(_) => break,
+                        _ => {}
+                    }
+                    if control && binary && pong && !acknowledged {
+                        acknowledged = true;
+                        socket.send(Message::Text(ControlMessage::PeerLeft { device_id: "all-outgoing-seen".into() }.encode().unwrap().into())).await.unwrap();
+                    }
+                }
+                assert!(control && binary && pong);
+            });
+            let mut connection = RelayConnection::connect(&format!("ws://{address}/v1/ws")).await.unwrap();
+            connection.send_control(ControlMessage::Ping { ts: 74 }).await.unwrap();
+            connection.send_binary(vec![75, 76]).await.unwrap();
+            assert!(matches!(connection.incoming.recv().await, Some(Incoming::Pong)));
+            assert!(matches!(connection.incoming.recv().await, Some(Incoming::Control(ControlMessage::PeerLeft { device_id })) if device_id.as_str() == "all-outgoing-seen"));
+            connection.close().await;
+            assert!(connection.incoming.recv().await.is_none());
+            server.await.unwrap();
+        }).await.expect("bidirectional payload/close fixture exceeded its deadline");
+    }
+
+    #[tokio::test]
+    async fn dropping_the_frontend_sends_close_and_releases_the_websocket() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                socket
+                    .send(Message::Text(
+                        ControlMessage::Pong { ts: 1 }.encode().unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
+                while let Some(Ok(message)) = socket.next().await {
+                    if matches!(message, Message::Close(_)) {
+                        return;
+                    }
+                }
+                panic!("dropping all frontend channels must send a Close frame");
+            });
+            let mut connection = RelayConnection::connect(&format!("ws://{address}/v1/ws"))
+                .await
+                .unwrap();
+            assert!(matches!(
+                connection.incoming.recv().await,
+                Some(Incoming::Pong)
+            ));
+            drop(connection);
+            server.await.unwrap();
+        })
+        .await
+        .expect("dropped frontend must release its websocket");
+    }
+
+    #[tokio::test]
+    async fn suspended_runtime_forces_a_live_session_to_reconnect() {
+        tokio::time::timeout(Duration::from_secs(25), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                socket
+                    .send(Message::Text(
+                        ControlMessage::Pong { ts: 2 }.encode().unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
+                while let Some(Ok(_)) = socket.next().await {}
+            });
+            let mut connection = RelayConnection::connect(&format!("ws://{address}/v1/ws"))
+                .await
+                .unwrap();
+            assert!(matches!(
+                connection.incoming.recv().await,
+                Some(Incoming::Pong)
+            ));
+            // Suspend this private current-thread Tokio runtime, not the host
+            // clock. A real nine-second wall-clock gap exercises the watchdog's
+            // wake recovery rather than merely testing its time predicate.
+            std::thread::sleep(Duration::from_secs(9));
+            assert!(connection.incoming.recv().await.is_none());
+            assert!(matches!(
+                connection.send_binary(vec![1]).await,
+                Err(TransportError::Closed)
+            ));
+            server.await.unwrap();
+        })
+        .await
+        .expect("a suspended session must reconnect after its watchdog resumes");
+    }
 }

@@ -124,7 +124,8 @@ impl DesktopApp {
 }
 
 impl DesktopApp {
-    fn update_ui(&mut self, ctx: &egui::Context) {
+    fn update_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         self.drain();
         ctx.request_repaint_after(Duration::from_secs(1));
         if ctx.input(|i| i.time).fract() < 0.05 {
@@ -137,7 +138,7 @@ impl DesktopApp {
         visuals.extreme_bg_color = PANEL;
         ctx.set_visuals(visuals);
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.add_space(12.0);
             ui.label(
                 egui::RichText::new("CLIPSYNC")
@@ -215,8 +216,21 @@ impl DesktopApp {
 }
 
 impl eframe::App for DesktopApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.update_ui(ctx);
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.update_ui(ui);
+    }
+}
+
+fn native_options() -> eframe::NativeOptions {
+    eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("ClipSync")
+            .with_decorations(true)
+            .with_inner_size([440.0, 560.0])
+            .with_min_inner_size([380.0, 480.0]),
+        // Preserve the existing default renderer across eframe's default change.
+        renderer: eframe::Renderer::Glow,
+        ..Default::default()
     }
 }
 
@@ -228,13 +242,7 @@ fn main() -> eframe::Result {
             std::process::exit(1);
         }
     };
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("ClipSync")
-            .with_inner_size([440.0, 560.0])
-            .with_min_inner_size([380.0, 480.0]),
-        ..Default::default()
-    };
+    let options = native_options();
     eframe::run_native("ClipSync", options, Box::new(|_cc| Ok(Box::new(app))))
 }
 
@@ -278,31 +286,174 @@ mod tests {
         (root, app)
     }
 
-    fn frame(app: &mut DesktopApp) -> String {
-        let ctx = egui::Context::default();
-        let output = ctx.run(
-            egui::RawInput {
-                time: Some(0.5),
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(440.0, 560.0),
-                )),
-                ..Default::default()
-            },
-            |ctx| app.update_ui(ctx),
+    #[test]
+    fn native_window_keeps_title_decorations_and_glow_renderer() {
+        let options = native_options();
+        assert_eq!(options.viewport.title.as_deref(), Some("ClipSync"));
+        assert_eq!(options.viewport.decorations, Some(true));
+        assert_eq!(options.viewport.inner_size, Some(egui::vec2(440.0, 560.0)));
+        assert_eq!(
+            options.viewport.min_inner_size,
+            Some(egui::vec2(380.0, 480.0))
         );
-        output
-            .shapes
-            .iter()
-            .filter_map(|shape| {
-                if let egui::Shape::Text(text) = &shape.shape {
-                    Some(text.galley.text().to_owned())
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        assert_eq!(options.renderer, eframe::Renderer::Glow);
+    }
+
+    #[derive(Default)]
+    struct HeadlessUi {
+        ctx: egui::Context,
+    }
+
+    impl HeadlessUi {
+        fn paint(
+            &self,
+            app: &mut DesktopApp,
+            time: f64,
+            events: Vec<egui::Event>,
+        ) -> Vec<(String, egui::Rect)> {
+            let mut output = self.ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(440.0, 560.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| app.update_ui(ui),
+            );
+            // This text-only harness has no renderer to upload the font atlas to.
+            output.textures_delta.clear();
+            output
+                .shapes
+                .iter()
+                .filter_map(|shape| {
+                    if let egui::Shape::Text(text) = &shape.shape {
+                        Some((
+                            text.galley.text().to_owned(),
+                            egui::Rect::from_min_size(text.pos, text.galley.size()),
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+
+        fn text(&self, app: &mut DesktopApp) -> String {
+            self.paint(app, 0.5, Vec::new())
+                .into_iter()
+                .map(|(text, _)| text)
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        fn click(&self, app: &mut DesktopApp, label: &str) {
+            let pos = self
+                .paint(app, 0.5, Vec::new())
+                .into_iter()
+                .find(|(text, _)| text == label)
+                .unwrap_or_else(|| panic!("missing control {label}"))
+                .1
+                .center();
+            for pressed in [true, false] {
+                self.paint(
+                    app,
+                    0.5,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+        }
+    }
+
+    fn frame(app: &mut DesktopApp) -> String {
+        HeadlessUi::default().text(app)
+    }
+
+    fn child_output(command: &mut std::process::Command) -> std::process::Output {
+        let mut child = command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                return child.wait_with_output().unwrap();
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "desktop child exceeded 10 seconds: {} {}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn headless_controls_edit_join_code_and_display_worker_errors() {
+        let (_root, mut app) = fixture();
+        let ui = HeadlessUi::default();
+        ui.click(&mut app, "Join code");
+        ui.paint(&mut app, 0.5, vec![egui::Event::Text("12".into())]);
+        assert_eq!(app.join_code, "12");
+        app.error = Some("old error".into());
+        ui.click(&mut app, "Join");
+        assert!(app.busy && app.error.is_none());
+        let work = app.rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        app.tx.send(work).unwrap();
+        assert!(ui.text(&mut app).contains("enter a 6-digit code"));
+        assert!(!app.busy);
+        assert_eq!(app.join_code, "12");
+
+        std::fs::write(app.core.store.paths.config_file(), "broken = [").unwrap();
+        ui.click(&mut app, "Create room");
+        assert!(app.busy && app.error.is_none());
+        let work = app.rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        app.tx.send(work).unwrap();
+        assert!(ui.text(&mut app).contains("toml"));
+        assert!(!app.busy);
+    }
+
+    #[test]
+    fn headless_pending_controls_ignore_clicks_and_render_completed_work() {
+        let (_root, mut app) = fixture();
+        let ui = HeadlessUi::default();
+        app.busy = true;
+        app.error = Some("previous error".into());
+        ui.click(&mut app, "Create room");
+        ui.click(&mut app, "Join");
+        assert!(app.busy);
+        assert_eq!(app.error.as_deref(), Some("previous error"));
+        assert!(matches!(app.rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+
+        app.tx.send(Work::Created(Ok("482913".into()))).unwrap();
+        let text = ui.text(&mut app);
+        assert!(!app.busy && app.error.is_none());
+        assert!(text.contains("PAIRING CODE") && text.contains("482913"));
+        assert!(text.contains("Create room") && text.contains("Join"));
+
+        app.busy = true;
+        app.error = Some("previous join error".into());
+        app.tx.send(Work::Joined(Ok("paired-room".into()))).unwrap();
+        let text = ui.text(&mut app);
+        assert!(!app.busy && app.error.is_none());
+        assert!(text.contains("Paired · paired-r… · daemon off"));
+        assert!(text.contains("Start background sync"));
+        assert!(!text.contains("PAIRING CODE") && !text.contains("Create room"));
     }
 
     #[test]
@@ -385,16 +536,16 @@ mod tests {
         // in an isolated child, so this fixture can never unlink a user socket.
         const CHILD: &str = "CLIPSYNC_TEST_DESKTOP_IPC_CHILD";
         if std::env::var_os(CHILD).is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "tests::refresh_uses_ipc_status_and_resets_disconnected_daemon",
-                    "--nocapture",
-                ])
-                .env(CHILD, "1")
-                .env_remove(clipsync_daemon::LISTEN_ENV)
-                .output()
-                .unwrap();
+            let output = child_output(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "tests::refresh_uses_ipc_status_and_resets_disconnected_daemon",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, "1")
+                    .env_remove(clipsync_daemon::LISTEN_ENV),
+            );
             assert!(
                 output.status.success(),
                 "{} {}",
@@ -445,26 +596,197 @@ mod tests {
         app.refresh();
         assert!(!app.status.daemon && !app.status.connected);
         assert!(app.status.room_id.is_none());
+
+        for case in [
+            "missing-status",
+            "missing-room",
+            "malformed",
+            "broken-config",
+        ] {
+            let (_root, mut app) = fixture();
+            if case == "broken-config" {
+                std::fs::write(app.core.store.paths.config_file(), "broken = [").unwrap();
+                app.status.device_id = "cached-device".into();
+                app.status.relay_url = "cached-relay".into();
+                app.status.room_id = Some("cached-room".into());
+            }
+            let server = app
+                .rt
+                .block_on(IpcServer::bind(&app.core.store.paths))
+                .unwrap();
+            let worker = app.rt.spawn(async move {
+                let mut conn = server.accept().await.unwrap();
+                assert!(matches!(
+                    read_request(&mut conn).await.unwrap(),
+                    Some(IpcRequest::Status)
+                ));
+                if case == "malformed" {
+                    use tokio::io::AsyncWriteExt;
+                    conn.write_all(b"invalid response\n").await.unwrap();
+                } else {
+                    write_response(
+                        &mut conn,
+                        &IpcResponse {
+                            ok: true,
+                            error: None,
+                            pull: None,
+                            status: (case != "missing-status").then_some(StatusPayload {
+                                daemon: true,
+                                paused: false,
+                                connected: true,
+                                peer_online: false,
+                                room_id: None,
+                                device_id: None,
+                                device_name: None,
+                                relay_url: None,
+                                last_item_kind: None,
+                                last_sync_at: None,
+                            }),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+            });
+            app.refresh();
+            app.rt.block_on(worker).unwrap();
+            if case == "broken-config" {
+                assert_eq!(app.status.device_id, "cached-device");
+                assert_eq!(app.status.relay_url, "cached-relay");
+                assert_eq!(app.status.room_id.as_deref(), Some("cached-room"));
+            } else {
+                assert_eq!(app.status.device_id, "desktop-test-device");
+                assert!(app.status.room_id.is_none());
+            }
+            assert_eq!(
+                app.status.daemon,
+                matches!(case, "missing-room" | "broken-config")
+            );
+            assert_eq!(app.status.connected, app.status.daemon);
+        }
+
+        let (_root, mut app) = fixture();
+        let ui = HeadlessUi::default();
+        ui.text(&mut app);
+        app.status.daemon = true;
+        app.status.connected = true;
+        ui.paint(&mut app, 1.0, Vec::new());
+        assert!(!app.status.daemon && !app.status.connected);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn headless_background_sync_control_reports_isolated_service_results() {
+        const CHILD: &str = "CLIPSYNC_TEST_DESKTOP_SERVICE_CHILD";
+        let Ok(case) = std::env::var(CHILD) else {
+            use std::os::unix::fs::PermissionsExt;
+            let root = tempfile::tempdir().unwrap();
+            let tools = root.path().join("tools");
+            std::fs::create_dir(&tools).unwrap();
+            for name in ["launchctl", "systemctl"] {
+                let path = tools.join(name);
+                std::fs::write(
+                    &path,
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CLIPSYNC_TEST_SERVICE_LOG\"\nexit 0\n",
+                )
+                .unwrap();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            for case in ["success", "failure"] {
+                let home = root.path().join(case);
+                if case == "success" {
+                    std::fs::create_dir(&home).unwrap();
+                } else {
+                    std::fs::write(&home, "a file cannot contain login-service directories")
+                        .unwrap();
+                }
+                let log = root.path().join(format!("{case}.log"));
+                let output = child_output(std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "tests::headless_background_sync_control_reports_isolated_service_results", "--nocapture"])
+                    .env(CHILD, case)
+                    .env("HOME", &home)
+                    .env("USERPROFILE", &home)
+                    .env("PATH", &tools)
+                    .env("CLIPSYNC_TEST_SERVICE_TOOLS", &tools)
+                    .env("CLIPSYNC_TEST_SERVICE_LOG", &log)
+                    .env_remove(clipsync_daemon::LISTEN_ENV));
+                assert!(
+                    output.status.success(),
+                    "{} {}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                if case == "success" {
+                    let calls = std::fs::read_to_string(log).unwrap();
+                    #[cfg(target_os = "macos")]
+                    {
+                        assert!(calls.contains("bootstrap") && calls.contains("kickstart"));
+                        assert!(home
+                            .join("Library/LaunchAgents/dev.clipsync.daemon.plist")
+                            .is_file());
+                    }
+                    #[cfg(target_os = "linux")]
+                    {
+                        assert!(calls.contains("daemon-reload") && calls.contains("enable --now"));
+                        assert!(home.join(".config/systemd/user/clipsync.service").is_file());
+                        assert!(home.join(".config/autostart/clipsync.desktop").is_file());
+                    }
+                } else {
+                    assert!(
+                        !log.exists(),
+                        "installation must fail before calling a service manager"
+                    );
+                }
+            }
+            return;
+        };
+        // Every executable search is confined to successful fake managers. This
+        // prevents service installation from reaching the user's login session
+        // or falling back to spawning a real daemon from the test executable.
+        assert_eq!(
+            std::env::var_os("PATH"),
+            std::env::var_os("CLIPSYNC_TEST_SERVICE_TOOLS")
+        );
+        let (_root, mut app) = fixture();
+        app.status.room_id = Some("paired-room".into());
+        let ui = HeadlessUi::default();
+        ui.click(&mut app, "Start background sync");
+        if case == "failure" {
+            let error = app
+                .error
+                .clone()
+                .expect("failed install must reach the window");
+            assert!(ui.text(&mut app).contains(&error));
+        } else {
+            assert!(app.error.is_none());
+            assert!(ui.text(&mut app).contains("Paired"));
+        }
     }
 
     #[test]
     fn constructor_respects_selected_home_and_reports_configuration_errors() {
         let (root, _app) = fixture();
-        for invalid in [false, true] {
-            if invalid {
+        for case in ["valid", "default-relay", "invalid", "startup-invalid"] {
+            if matches!(case, "invalid" | "startup-invalid") {
                 std::fs::write(root.path().join("config/config.toml"), "broken = [").unwrap();
             }
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
                 .args(["--exact", "tests::constructor_child", "--nocapture"])
-                .env(
-                    "CLIPSYNC_TEST_DESKTOP_CASE",
-                    if invalid { "invalid" } else { "valid" },
-                )
+                .env("CLIPSYNC_TEST_DESKTOP_CASE", case)
                 .env("CLIPSYNC_HOME", root.path())
                 .env("CLIPSYNC_RELAY_URL", "http://127.0.0.1:19")
-                .env_remove("CLIPSYNC_LISTEN")
-                .output()
-                .unwrap();
+                .env_remove("CLIPSYNC_LISTEN");
+            if case == "default-relay" {
+                command.env_remove("CLIPSYNC_RELAY_URL");
+            }
+            let output = child_output(&mut command);
+            if case == "startup-invalid" {
+                assert_eq!(output.status.code(), Some(1));
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(stderr.contains("clipsync-desktop:") && stderr.contains("toml"));
+                continue;
+            }
             assert!(
                 output.status.success(),
                 "{}",
@@ -478,12 +800,23 @@ mod tests {
         let Ok(case) = std::env::var("CLIPSYNC_TEST_DESKTOP_CASE") else {
             return;
         };
-        if case == "invalid" {
+        if case == "startup-invalid" {
+            // Invalid configuration exits before native window initialization.
+            let _ = main();
+            panic!("startup must reject malformed configuration");
+        } else if case == "invalid" {
             assert!(DesktopApp::new().err().unwrap().contains("toml"));
         } else {
             let app = DesktopApp::new().unwrap();
             assert_eq!(app.status.device_id, "desktop-test-device");
-            assert_eq!(app.status.relay_url, "http://127.0.0.1:19");
+            assert_eq!(
+                app.status.relay_url,
+                if case == "default-relay" {
+                    "https://clipsync.develicit.dev"
+                } else {
+                    "http://127.0.0.1:19"
+                }
+            );
             assert!(app.status.room_id.is_none());
         }
     }

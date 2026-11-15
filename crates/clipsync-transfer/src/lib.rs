@@ -139,4 +139,34 @@ mod tests {
         assert_eq!(assembled, payload);
         assert_eq!(hash_hex(&assembled), out.content_hash);
     }
+
+    #[test]
+    fn empty_transfers_have_one_authenticated_chunk_and_short_or_tampered_chunks_fail() {
+        let epoch = [19; 32];
+        let id = TransferId::new();
+        let outgoing = split_and_encrypt(&epoch, &id, &[]).unwrap();
+        assert_eq!(outgoing.chunk_count, 1);
+        assert_eq!(outgoing.total_bytes, 0);
+        assert_eq!(
+            decrypt_chunk(&epoch, &outgoing.frames[0]).unwrap(),
+            (id.clone(), 0, 1, vec![])
+        );
+        let short = encode_chunk_frame(&ChunkFrame {
+            transfer_id: id,
+            chunk_index: 0,
+            chunk_count: 1,
+            ciphertext: vec![0; 11],
+        })
+        .unwrap();
+        assert!(matches!(
+            decrypt_chunk(&epoch, &short),
+            Err(TransferError::Chunk("ciphertext too short"))
+        ));
+        let mut changed = outgoing.frames[0].clone();
+        *changed.last_mut().unwrap() ^= 1;
+        assert!(matches!(
+            decrypt_chunk(&epoch, &changed),
+            Err(TransferError::Aead(_))
+        ));
+    }
 }

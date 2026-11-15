@@ -132,6 +132,53 @@ fn delete_keyring(_user: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod file_failure_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_file_identity_is_reported_without_native_keyring_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(root.path().into());
+        paths.ensure().unwrap();
+        let secrets = SecretStore::new(paths.clone());
+        std::fs::create_dir(paths.identity_file()).unwrap();
+        assert!(matches!(secrets.load_identity(), Err(StorageError::Io(_))));
+        std::fs::remove_dir(paths.identity_file()).unwrap();
+        std::fs::write(paths.identity_file(), b"malformed JSON").unwrap();
+        assert!(matches!(
+            secrets.load_identity(),
+            Err(StorageError::Serde(_))
+        ));
+        let mut invalid = DeviceIdentity::from_bytes("fixture".into(), [1; 32]).to_stored();
+        invalid.secret = "00".into();
+        std::fs::write(paths.identity_file(), serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(matches!(
+            secrets.load_identity(),
+            Err(StorageError::NotInitialized)
+        ));
+    }
+
+    #[test]
+    fn failed_private_file_persistence_preserves_the_target_and_reports_missing_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(root.path().into());
+        paths.ensure().unwrap();
+        let secrets = SecretStore::new(paths.clone());
+        std::fs::create_dir(paths.identity_file()).unwrap();
+        assert!(secrets
+            .save_identity(&DeviceIdentity::from_bytes("fixture".into(), [1; 32]))
+            .is_err());
+        let secret = paths.data_dir.join("blocked.secret");
+        std::fs::create_dir(&secret).unwrap();
+        assert!(secrets.save_named("blocked", "must not publish").is_err());
+        assert!(secrets.load_named("blocked").is_err());
+        assert!(secret.is_dir());
+        assert!(write_private(Path::new("/"), b"invalid destination").is_err());
+    }
+}
+
 #[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod regression_tests {

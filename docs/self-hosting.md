@@ -3,6 +3,83 @@
 Hosted origin used by this project: `https://clipsync.develicit.dev`
 (Proxmox + Cloudflare Tunnel; see `deploy/proxmox/`).
 
+## Upgrade to v0.2.0: choose the origin transport
+
+Starting with v0.2.0, the relay refuses to listen unless it has both TLS
+certificate/key files or an explicit `CLIPSYNC_RELAY_ALLOW_HTTP=true` opt-in.
+The default advertised URL uses HTTPS. Old commands that started a plaintext
+listener without transport settings now fail before binding a port.
+
+- For direct HTTPS/WSS, provide both TLS files and an HTTPS public URL, as shown
+  below. Keep `CLIPSYNC_RELAY_ALLOW_HTTP` unset or `false`.
+- For the existing Proxmox + Cloudflare Tunnel deployment, use the updated
+  `deploy/proxmox/docker-compose.yml`. It explicitly enables HTTP for its
+  loopback-only origin; Cloudflare continues to terminate public HTTPS/WSS.
+  Preserve the private `.env`, token key and hostname during the upgrade.
+- For another TLS proxy, explicitly opt into HTTP and restrict access to the
+  proxy/local host. Public clients must still use the proxy's HTTPS URL.
+
+The root Compose example explicitly opts into local-development HTTP and only
+publishes port 7600 on host loopback. It is ready for `http://127.0.0.1:7600`.
+Binding a raw relay publicly now requires a deliberate transport choice.
+
+## Direct HTTPS/WSS
+
+Obtain a certificate from your chosen CA. Configure a PEM chain with the leaf
+certificate first and a matching unencrypted PEM private key:
+
+```bash
+export CLIPSYNC_RELAY_BIND=0.0.0.0:7600
+export CLIPSYNC_RELAY_PUBLIC_URL=https://relay.example.com:7600
+export CLIPSYNC_RELAY_TLS_CERT_FILE=/etc/clipsync/tls/fullchain.pem
+export CLIPSYNC_RELAY_TLS_KEY_FILE=/etc/clipsync/tls/key.pem
+clipsync-relay
+```
+
+The CLI equivalents are `--tls-cert-file`, `--tls-key-file`, `--public-url` and
+`--bind`. TLS certificate and key settings must be supplied together; invalid,
+unreadable, oversized or mismatched files stop startup. TLS and `--allow-http`
+cannot be combined. Certificates load at startup; renew them through your
+normal certificate manager and restart the relay after replacement.
+
+The rustls listener permits only TLS 1.2 and 1.3. It uses the maintained
+[axum-server RustlsAcceptor](https://docs.rs/axum-server/0.9.2/axum_server/tls_rustls/struct.RustlsAcceptor.html),
+with a five-second TLS handshake deadline and at most 128 incomplete
+handshakes. Excess attempts close immediately, without a waiting socket queue.
+The server also limits the time to its first HTTP request to ten seconds. The
+HTTP/WebSocket router still receives the actual TCP peer address for rate
+limits; proxy deployments see the immediate proxy's address. Forwarded-IP
+headers are not promoted to trusted connection metadata.
+
+For a container, mount the certificate directory read-only and pass the paths
+at runtime. Keep private files out of the image and build context. This example
+uses an already verified official image digest:
+
+```bash
+docker run -d --name clipsync-relay --restart unless-stopped \
+  --read-only --cap-drop ALL --security-opt no-new-privileges \
+  -p 7600:7600 \
+  --mount type=bind,src=/etc/clipsync/tls,dst=/run/tls,readonly \
+  -e CLIPSYNC_RELAY_TLS_CERT_FILE=/run/tls/fullchain.pem \
+  -e CLIPSYNC_RELAY_TLS_KEY_FILE=/run/tls/key.pem \
+  -e CLIPSYNC_RELAY_PUBLIC_URL=https://relay.example.com:7600 \
+  ghcr.io/jeon1691/clipsync-relay@sha256:VERIFIED_INDEX_DIGEST
+```
+
+The container runs as UID/GID 65532. Its user must be able to traverse the
+mounted directory and read both files. On Unix the relay rejects private keys
+and token-secret files that are group-writable or accessible to other users;
+use `0600` for its own files or `0640` with a deliberately selected reader group.
+For a root-owned container secret, assign the reader group GID 65532, make the
+directory traversable by that group, and use `0640` on the key. A root-only file
+that UID/GID 65532 cannot read causes startup to fail; do not weaken its mode to
+`0644`. On Windows, configure equivalent file ACLs for the relay service user.
+
+Clients verify issuer and hostname normally. Publicly trusted certificates need
+no client override; for a private CA, supply its public root PEM through
+`CLIPSYNC_CA_FILE`. This extends trust and preserves hostname/issuer validation.
+Never distribute the server private key to clients.
+
 ## Production (Proxmox)
 
 The live relay runs on the Proxmox host at `/opt/clipsync`:
@@ -32,7 +109,11 @@ ssh proxmox 'cd /opt/clipsync/deploy/proxmox && docker compose up -d --build'
 docker compose up --build
 ```
 
-The relay listens on `0.0.0.0:7600`. Put TLS in front with Caddy or nginx.
+The example explicitly enables HTTP inside its container, reachable only at
+`127.0.0.1:7600` on the host. For a public reverse-proxy deployment, terminate
+TLS with Caddy or nginx and keep `CLIPSYNC_RELAY_PUBLIC_URL` set to the public
+HTTPS URL. The following nginx location assumes a separately configured TLS
+server block:
 
 ```nginx
 location / {
@@ -49,7 +130,11 @@ location / {
 | Variable | Meaning |
 | --- | --- |
 | `CLIPSYNC_RELAY_BIND` | Listen address, default `0.0.0.0:7600` |
-| `CLIPSYNC_RELAY_PUBLIC_URL` | URL clients should use |
+| `CLIPSYNC_RELAY_PUBLIC_URL` | URL clients should use; HTTPS by default |
+| `CLIPSYNC_RELAY_TLS_CERT_FILE` | PEM certificate chain for direct HTTPS/WSS |
+| `CLIPSYNC_RELAY_TLS_KEY_FILE` | Matching PEM private key; both TLS files are required |
+| `CLIPSYNC_RELAY_ALLOW_HTTP` | Explicit `true` for a local/TLS-proxy plaintext origin; default `false` |
+| `CLIPSYNC_RELAY_TOKEN_SECRET_FILE` | Optional private file of exact HMAC key bytes; at least 32 bytes; cannot be combined with `CLIPSYNC_RELAY_TOKEN_SECRET` |
 | `CLIPSYNC_RELAY_TOKEN_SECRET` | HMAC token key; at least 32 bytes when explicitly set. Unset, empty, or whitespace-only generates a fresh random 32-byte key. |
 | `CLIPSYNC_RELAY_WEBHOOK_URL` | Optional metadata webhook |
 | `CLIPSYNC_RELAY_WEBHOOK_SECRET` | HMAC key for webhook signatures |
@@ -70,6 +155,17 @@ deployment environment:
 export CLIPSYNC_RELAY_TOKEN_SECRET="$(openssl rand -hex 32)"
 docker compose up --build
 ```
+
+For credential-file deployments, `CLIPSYNC_RELAY_TOKEN_SECRET_FILE` reads the
+file's exact bytes, including any newline, without hex decoding or trimming.
+Both secret settings being present is an error, even when the environment value
+is empty. Unset `CLIPSYNC_RELAY_TOKEN_SECRET` when selecting a file. The checked-in
+Compose example forwards an optional environment key, so remove that mapping
+in your own credential-file Compose configuration. Mount the file read-only,
+with the same private permissions and relay-user access as the TLS key.
+To migrate an existing environment key, store its exact UTF-8 bytes; do not
+hex-decode a previously hexadecimal string or generate a replacement unless
+rotating the key intentionally.
 
 Use an independently generated value for `CLIPSYNC_RELAY_WEBHOOK_SECRET` if
 enabling webhooks. Avoid publishing either key or resolved Compose output that

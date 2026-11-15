@@ -278,3 +278,138 @@ fn decode_key(hex_str: &str) -> Result<[u8; 32]> {
     key.copy_from_slice(&bytes);
     Ok(key)
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod failure_tests {
+    use super::*;
+
+    fn fixture() -> (tempfile::TempDir, LocalStore) {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalStore::open_from(AppPaths::from_root(root.path().into())).unwrap();
+        (root, store)
+    }
+
+    fn waiting() -> PairingWait {
+        PairingWait {
+            status: "waiting".into(),
+            pairing_code: "482913".into(),
+            room_id: "fixture-room".into(),
+            expires_at: "2026-11-15T00:00:00Z".into(),
+            pid: 1,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn metadata_read_failures_do_not_silently_initialize_or_replace_directories() {
+        let (_root, store) = fixture();
+        for path in [
+            store.paths.config_file(),
+            store.paths.state_file(),
+            store.paths.pairing_file(),
+        ] {
+            std::fs::create_dir(path).unwrap();
+        }
+        assert!(matches!(store.load_config(), Err(StorageError::Io(_))));
+        assert!(matches!(store.load_state(), Err(StorageError::Io(_))));
+        assert!(matches!(
+            store.load_pairing_wait(),
+            Err(StorageError::Io(_))
+        ));
+        assert!(store.current_room().is_err());
+        assert!(store
+            .upsert_room(RoomRecord {
+                room_id: RoomId::new(),
+                epoch: 1,
+                role: DeviceRole::Owner,
+                created_at: Utc::now(),
+                device_token: "fixture".into(),
+                peers: vec![]
+            })
+            .is_err());
+        assert!(store.leave_current().is_err());
+        for path in [
+            store.paths.config_file(),
+            store.paths.state_file(),
+            store.paths.pairing_file(),
+        ] {
+            assert!(path.is_dir());
+        }
+    }
+
+    #[test]
+    fn failed_metadata_replacements_leave_existing_files_or_directories_available() {
+        let (_root, store) = fixture();
+        std::fs::create_dir(store.paths.config_file()).unwrap();
+        assert!(store.save_config(&AppConfig::default()).is_err());
+        assert!(store.paths.config_file().is_dir());
+        std::fs::create_dir(store.paths.state_file()).unwrap();
+        assert!(store.save_state(&StateFile::default()).is_err());
+        assert!(store.paths.state_file().is_dir());
+        std::fs::create_dir(store.paths.pairing_file()).unwrap();
+        assert!(store.save_pairing_wait(&waiting()).is_err());
+        assert!(store.paths.pairing_file().is_dir());
+        std::fs::remove_dir(store.paths.pairing_file()).unwrap();
+        std::fs::remove_file(store.paths.pairing_file().with_extension("json.tmp")).unwrap();
+        std::fs::create_dir(store.paths.pairing_file().with_extension("json.tmp")).unwrap();
+        assert!(store.save_pairing_wait(&waiting()).is_err());
+    }
+
+    #[test]
+    fn unavailable_parent_directories_and_credential_cleanup_errors_are_reported() {
+        let (root, store) = fixture();
+        let blocked = root.path().join("blocked");
+        std::fs::write(&blocked, b"existing data").unwrap();
+        assert!(LocalStore::open_from(AppPaths::from_root(blocked.clone())).is_err());
+        let mut paths = store.paths.clone();
+        paths.config_dir = blocked.clone();
+        let unavailable = LocalStore {
+            paths,
+            secrets: store.secrets.clone(),
+        };
+        assert!(unavailable.save_config(&AppConfig::default()).is_err());
+        let mut paths = store.paths.clone();
+        paths.runtime_dir = blocked.clone();
+        let unavailable = LocalStore {
+            paths,
+            secrets: store.secrets.clone(),
+        };
+        assert!(unavailable.save_pairing_wait(&waiting()).is_err());
+        std::fs::create_dir(store.paths.data_dir.join("webhook.secret")).unwrap();
+        assert!(store.delete_credential("webhook").is_err());
+        assert!(store.save_config(&AppConfig::default()).is_err());
+        assert_eq!(std::fs::read(blocked).unwrap(), b"existing data");
+    }
+
+    #[test]
+    fn stale_current_room_references_fail_closed_and_leave_can_recover_them() {
+        let (_root, store) = fixture();
+        store
+            .save_state(&StateFile {
+                current_room: Some(RoomId::new()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(matches!(store.current_room(), Err(StorageError::NotPaired)));
+        assert!(store.leave_current().unwrap().is_none());
+        assert!(store.load_state().unwrap().current_room.is_none());
+    }
+
+    #[test]
+    fn room_key_failures_stop_before_any_native_secret_store_write() {
+        let (_root, store) = fixture();
+        let id = RoomId::new();
+        let root_path = store.paths.data_dir.join(format!("room-{id}.secret"));
+        std::fs::create_dir(&root_path).unwrap();
+        assert!(store
+            .save_room_keys(&id, &hex::encode([1; 32]), &hex::encode([2; 32]))
+            .is_err());
+        assert!(store.load_room_root(&id).is_err());
+        let epoch_path = store.paths.data_dir.join(format!("epoch-{id}.secret"));
+        std::fs::create_dir(&epoch_path).unwrap();
+        assert!(store.save_epoch_key(&id, &[3; 32]).is_err());
+        assert!(store.load_epoch_key(&id).is_err());
+        assert!(root_path.is_dir() && epoch_path.is_dir());
+    }
+}

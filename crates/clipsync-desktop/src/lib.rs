@@ -193,4 +193,104 @@ mod command_tests {
         );
         server.abort();
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_pairing_commits_both_peer_records_and_installs_only_isolated_services() {
+        const CHILD: &str = "CLIPSYNC_TEST_DESKTOP_PAIRING_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            use std::os::unix::fs::PermissionsExt;
+            let root = tempfile::tempdir().unwrap();
+            let tools = root.path().join("tools");
+            std::fs::create_dir(&tools).unwrap();
+            for name in ["systemctl", "launchctl"] {
+                let path = tools.join(name);
+                std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let mut paths = vec![tools];
+            paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "command_tests::desktop_pairing_commits_both_peer_records_and_installs_only_isolated_services", "--nocapture"])
+                .env(CHILD, "1").env("HOME", root.path()).env("USERPROFILE", root.path())
+                .env("PATH", std::env::join_paths(paths).unwrap())
+                .env_remove("CLIPSYNC_LISTEN").stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                if child.try_wait().unwrap().is_some() {
+                    break;
+                }
+                if std::time::Instant::now() > deadline {
+                    child.kill().unwrap();
+                    panic!("desktop pairing worker exceeded its deadline");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let (_first_home, first) = fixture();
+            let (_second_home, second) = fixture();
+            let identity = DeviceIdentity::from_bytes("desktop-joining-device".into(), [10; 32]);
+            std::fs::write(
+                second.store.paths.identity_file(),
+                serde_json::to_vec(&identity.to_stored()).unwrap(),
+            )
+            .unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    clipsync_relay::router(clipsync_relay::RelayConfig {
+                        bind: address,
+                        public_url: format!("http://{address}"),
+                        token_secret: vec![13; 32],
+                        webhook_url: None,
+                        webhook_secret: None,
+                    })
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .await
+                .unwrap();
+            });
+            for app in [&first, &second] {
+                let mut cfg = app.store.load_config().unwrap();
+                cfg.relay_url = format!("http://{address}");
+                app.store.save_config(&cfg).unwrap();
+            }
+            let code = create_room(first.store.clone()).await.unwrap();
+            let formatted = format!("{} {}-{}", &code[..2], &code[2..4], &code[4..]);
+            let room = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                join_room_code(&second, &formatted),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while first.store.current_room().is_err() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(first.store.current_room().unwrap().room_id.as_str(), room);
+            assert_eq!(
+                local_status(&second).unwrap().room_id.as_deref(),
+                Some(room.as_str())
+            );
+            assert!(clipsync_daemon::is_service_installed());
+            let first_peer = &first.store.current_room().unwrap().peers[0];
+            assert_eq!(first_peer.device_id, identity.device_id);
+            server.abort();
+        });
+    }
 }

@@ -4,8 +4,10 @@ services:
   relay:
     build: .
     ports:
-      - "7600:7600"
+      - "127.0.0.1:7600:7600"
     environment:
+      # The origin is local; the production proxy terminates public TLS.
+      CLIPSYNC_RELAY_ALLOW_HTTP: "true"
       CLIPSYNC_RELAY_BIND: 0.0.0.0:7600
       CLIPSYNC_RELAY_PUBLIC_URL: http://127.0.0.1:7600
       CLIPSYNC_RELAY_TOKEN_SECRET: "${CLIPSYNC_RELAY_TOKEN_SECRET:-}"

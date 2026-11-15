@@ -202,4 +202,73 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn malformed_spake_messages_are_rejected_before_key_confirmation() {
+        for inbound in [Vec::new(), vec![0; 32], vec![b'A'; 33], vec![b'B'; 34]] {
+            let state = start_pairing_a(
+                "482913",
+                PairingSessionId::new(),
+                "dev-a".into(),
+                "dev-b".into(),
+            )
+            .unwrap();
+            assert!(matches!(
+                finish_pairing(state, &inbound),
+                Err(CryptoError::Pairing("spake2 finish failed"))
+            ));
+        }
+    }
+
+    #[test]
+    fn confirmation_checks_length_role_and_transcript_authentication() {
+        let session = PairingSessionId::new();
+        let a = start_pairing_a("482913", session.clone(), "dev-a".into(), "dev-b".into()).unwrap();
+        let b = start_pairing_b("482913", session, "dev-a".into(), "dev-b".into()).unwrap();
+        let keys = finish_pairing(a, &b.outbound).unwrap();
+        let valid = confirm_mac(&keys, PairingRole::B);
+        verify_confirm_mac(&keys, PairingRole::B, &valid).unwrap();
+        for invalid in [Vec::new(), valid[..31].to_vec(), vec![0; 33]] {
+            assert!(matches!(
+                verify_confirm_mac(&keys, PairingRole::B, &invalid),
+                Err(CryptoError::Confirm)
+            ));
+        }
+        assert!(matches!(
+            verify_confirm_mac(&keys, PairingRole::A, &valid),
+            Err(CryptoError::Confirm)
+        ));
+        let mut damaged = valid.clone();
+        damaged[0] ^= 1;
+        assert!(matches!(
+            verify_confirm_mac(&keys, PairingRole::B, &damaged),
+            Err(CryptoError::Confirm)
+        ));
+        let mut changed = keys;
+        changed.transcript_hash[0] ^= 1;
+        assert!(matches!(
+            verify_confirm_mac(&changed, PairingRole::B, &valid),
+            Err(CryptoError::Confirm)
+        ));
+    }
+
+    #[test]
+    fn transcript_message_lengths_and_device_order_are_bound() {
+        let session = PairingSessionId::new();
+        let a = DeviceId::from("dev-a");
+        let b = DeviceId::from("dev-b");
+        let transcript = pairing_transcript(&session, &a, &b, b"ab", b"c");
+        assert_ne!(
+            transcript,
+            pairing_transcript(&session, &a, &b, b"a", b"bc")
+        );
+        assert_ne!(
+            transcript,
+            pairing_transcript(&session, &b, &a, b"ab", b"c")
+        );
+        assert_ne!(
+            transcript,
+            pairing_transcript(&PairingSessionId::new(), &a, &b, b"ab", b"c")
+        );
+    }
 }

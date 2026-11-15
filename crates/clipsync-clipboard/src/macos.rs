@@ -223,7 +223,7 @@ fn load_file_refs(paths: &[PathBuf]) -> Result<Option<Vec<FileRef>>> {
         let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        let bytes = std::fs::read(path)?;
+        let bytes = crate::detect::read_regular_file(path)?;
         files.push(FileRef {
             mime: infer::get(&bytes).map(|k| k.mime_type().to_string()),
             name: name.to_string(),
@@ -608,6 +608,36 @@ mod tests {
 mod behavior_tests {
     use super::*;
     use crate::test_support::Scratch;
+
+    #[test]
+    fn native_file_loader_rejects_private_fifo_without_blocking() {
+        const CHILD: &str = "CLIPSYNC_MAC_FILE_FIFO_CHILD";
+        let Ok(path) = std::env::var(CHILD) else {
+            let root = Scratch::new();
+            let path = root.0.join("native-clipboard-fifo");
+            assert!(std::process::Command::new("/usr/bin/mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success());
+            let output = crate::detect::environment_tests::run_child_with_timeout(
+                root.child("macos::behavior_tests::native_file_loader_rejects_private_fifo_without_blocking")
+                    .env(CHILD, &path),
+                std::time::Duration::from_secs(5),
+            );
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        assert!(matches!(
+            load_file_refs(&[path.into()]),
+            Err(ClipboardError::Io(_))
+        ));
+    }
 
     fn image() -> Vec<u8> {
         crate::item::encode_png_rgba(2, 1, &[5, 6, 7, 255, 8, 9, 10, 255]).unwrap()

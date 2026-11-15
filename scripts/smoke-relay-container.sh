@@ -8,7 +8,7 @@ docker run --rm --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges "$image" --help >/dev/null
 health_file="$(mktemp)"
 container="$(docker run --detach --read-only --cap-drop ALL \
-  --security-opt no-new-privileges --publish 127.0.0.1::7600 "$image")"
+  --security-opt no-new-privileges --env CLIPSYNC_RELAY_ALLOW_HTTP=true --publish 127.0.0.1::7600 "$image")"
 trap 'docker rm --force "$container" >/dev/null; rm -f "$health_file"' EXIT
 address="$(docker port "$container" 7600/tcp)"
 for attempt in {1..60}; do

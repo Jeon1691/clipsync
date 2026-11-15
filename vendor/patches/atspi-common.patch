@@ -1,0 +1,1425 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -11,7 +11,7 @@
+ 
+ [package]
+ edition = "2021"
+-rust-version = "1.77.2"
++rust-version = "1.89"
+ name = "atspi-common"
+ version = "0.13.0"
+ build = false
+@@ -45,7 +45,7 @@
+     "zbus",
+ ]
+ wrappers = []
+-zbus = ["dep:zbus"]
++zbus = ["zbus/comms", "zbus/proxy", "zbus/service", "zbus/default-rt"]
+ 
+ [lib]
+ name = "atspi_common"
+@@ -61,23 +61,14 @@
+ version = "1.1.0"
+ 
+ [dependencies.zbus]
+-version = "5.5"
+-features = ["async-io"]
+-optional = true
++version = "6.3"
+ default-features = false
+ 
+ [dependencies.zbus-lockstep]
+-version = "0.5.1"
++version = "0.7"
+ 
+ [dependencies.zbus-lockstep-macros]
+-version = "0.5.1"
+-
+-[dependencies.zbus_names]
+-version = "4.1.1"
+-
+-[dependencies.zvariant]
+-version = "5.2"
+-default-features = false
++version = "0.7"
+ 
+ [dev-dependencies.assert_matches]
+ version = "1.5.0"
+@@ -108,9 +99,9 @@
+ version = "0.4.2"
+ 
+ [dev-dependencies.zbus]
+-version = "5.5"
+-features = ["async-io"]
++version = "6.3"
++features = ["default-rt", "proxy", "service"]
+ default-features = false
+ 
+ [dev-dependencies.zbus_xml]
+-version = "5.0.2"
++version = "6"
+--- a/src/action.rs
++++ b/src/action.rs
+@@ -1,5 +1,5 @@
+ use serde::{Deserialize, Serialize};
+-use zvariant::Type;
++use zbus::Type;
+ 
+ /// An action which may be triggered through the accessibility API.
+ #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+@@ -17,7 +17,7 @@
+ mod test {
+ 	use super::Action;
+ 	use zbus_lockstep::method_return_signature;
+-	use zvariant::Type;
++	use zbus::Type;
+ 	#[test]
+ 	fn validate_action_signature() {
+ 		// signature is of type `a(sss)`, where `(sss)` is the type we're validating.
+--- a/src/cache.rs
++++ b/src/cache.rs
+@@ -4,7 +4,7 @@
+ use crate::{object_ref::ObjectRefOwned, InterfaceSet, ObjectRef, Role, StateSet};
+ use serde::{Deserialize, Serialize};
+ use zbus_lockstep_macros::validate;
+-use zvariant::Type;
++use zbus::Type;
+ 
+ /// The item type provided by `Cache:Add` signals
+ #[allow(clippy::module_name_repetitions)]
+@@ -117,6 +117,6 @@
+ 	use std::str::FromStr;
+ 	assert_eq!(
+ 		*<LegacyCacheItem as Type>::SIGNATURE,
+-		zbus::zvariant::Signature::from_str("((so)(so)(so)a(so)assusau)").unwrap()
++		zbus::Signature::from_str("((so)(so)(so)a(so)assusau)").unwrap()
+ 	);
+ }
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -55,10 +55,10 @@
+ 	Zbus(String),
+ 
+ 	/// A `zbus_names` error variant
+-	ZBusNames(zbus_names::Error),
++	ZBusNames(zbus::Error),
+ 
+ 	/// A `zbus_names` error variant
+-	Zvariant(zvariant::Error),
++	Zvariant(zbus::Error),
+ 
+ 	/// Failed to parse a string into an enum variant
+ 	ParseError(&'static str),
+@@ -168,21 +168,10 @@
+ 	}
+ }
+ 
+-#[cfg(feature = "zbus")]
++
++
+ impl From<zbus::Error> for AtspiError {
+ 	fn from(e: zbus::Error) -> Self {
+-		Self::Zbus(format!("{e:?}"))
+-	}
+-}
+-
+-impl From<zbus_names::Error> for AtspiError {
+-	fn from(e: zbus_names::Error) -> Self {
+-		Self::ZBusNames(e)
+-	}
+-}
+-
+-impl From<zvariant::Error> for AtspiError {
+-	fn from(e: zvariant::Error) -> Self {
+ 		Self::Zvariant(e)
+ 	}
+ }
+--- a/src/events/cache.rs
++++ b/src/events/cache.rs
+@@ -46,7 +46,7 @@
+ 	type Body<'msg> = LegacyCacheItem;
+ 
+ 	fn from_message_unchecked_parts(item: ObjectRef, body: DbusBody) -> Result<Self, AtspiError> {
+-		Ok(Self { item: item.into(), node_added: body.deserialize_unchecked::<Self::Body<'_>>()? })
++		Ok(Self { item: item.into(), node_added: body.deserialize_ignore_signature::<Self::Body<'_>>()? })
+ 	}
+ 
+ 	fn from_message_unchecked(msg: &zbus::Message, header: &Header) -> Result<Self, AtspiError> {
+@@ -87,7 +87,7 @@
+ 	type Body<'msg> = CacheItem;
+ 
+ 	fn from_message_unchecked_parts(item: ObjectRef, body: DbusBody) -> Result<Self, AtspiError> {
+-		Ok(Self { item: item.into(), node_added: body.deserialize_unchecked::<Self::Body<'_>>()? })
++		Ok(Self { item: item.into(), node_added: body.deserialize_ignore_signature::<Self::Body<'_>>()? })
+ 	}
+ 
+ 	fn from_message_unchecked(msg: &zbus::Message, header: &Header) -> Result<Self, AtspiError> {
+@@ -135,7 +135,7 @@
+ 	fn from_message_unchecked_parts(item: ObjectRef, body: DbusBody) -> Result<Self, AtspiError> {
+ 		Ok(Self {
+ 			item: item.into(),
+-			node_removed: body.deserialize_unchecked::<Self::Body<'_>>()?,
++			node_removed: body.deserialize_ignore_signature::<Self::Body<'_>>()?,
+ 		})
+ 	}
+ 
+--- a/src/events/event_body.rs
++++ b/src/events/event_body.rs
+@@ -4,7 +4,7 @@
+ 	Deserialize, Serialize,
+ };
+ use zbus_lockstep_macros::validate;
+-use zvariant::{ObjectPath, OwnedValue, Type, Value};
++use zbus::{ObjectPath, OwnedVariant as OwnedValue, Type, Variant as Value};
+ 
+ /// Event body as used exclusively by 'Qt' toolkit.
+ ///
+@@ -45,7 +45,7 @@
+ 	/// None of the types in [`crate::events`] use [`std::os::fd::OwnedFd`].
+ 	/// Events on the AT-SPI bus *could, theoretically* send a file descriptor, but nothing in the current
+ 	/// specification describes that.
+-	/// See [`zvariant::Value::try_clone`] for more information.
++	/// See [`zbus::Variant::try_clone`] for more information.
+ 	fn clone(&self) -> Self {
+ 		let cloned_any_data = self.any_data.try_clone().unwrap_or_else(|err| {
+ 			panic!("Failure cloning 'any_data' field: {err:?}");
+@@ -67,7 +67,7 @@
+ /// `QtProperties` has the appropriate implementations for `Serialize` and `Deserialize`
+ /// to make it serialize as an a valid tuple and valid bytes deserialize as placeholder.
+ #[derive(Debug, Copy, Clone, Deserialize, Type, Default, PartialEq)]
+-#[zvariant(signature = "(so)")]
++#[zbus(signature = "(so)")]
+ pub(crate) struct QtProperties;
+ 
+ impl Serialize for QtProperties {
+@@ -100,7 +100,7 @@
+ /// `Properties` has the appropriate implementations for `Serialize` and `Deserialize`
+ /// to make it serialize as an a valid dictionary and valid bytes deserialize as placeholder.
+ #[derive(Debug, Copy, Clone, Type, Default, Deserialize, PartialEq)]
+-#[zvariant(signature = "a{sv}")]
++#[zbus(signature = "a{sv}")]
+ pub(crate) struct Properties;
+ 
+ impl Serialize for Properties {
+@@ -168,7 +168,7 @@
+ 	/// None of the types in [`crate::events`] use [`std::os::fd::OwnedFd`].
+ 	/// Events on the AT-SPI bus *could, theoretically* send a file descriptor, but nothing in the current
+ 	/// specification describes that.
+-	/// See [`zvariant::Value::try_clone`] for more information.
++	/// See [`zbus::Variant::try_clone`] for more information.
+ 	fn clone(&self) -> Self {
+ 		let cloned_any_data = self.any_data.try_clone().unwrap_or_else(|err| {
+ 			panic!("Failure cloning 'any_data' field: {err:?}");
+@@ -231,7 +231,7 @@
+ 	/// 2. the maximum number of open files for the process is exceeded.
+ 	///
+ 	/// Chances are slim because none of the types in [`crate::events`] use [`std::os::fd::OwnedFd`].
+-	/// See [`zvariant::Value::try_clone`] for more information.
++	/// See [`zbus::Variant::try_clone`] for more information.
+ 	pub fn to_fully_owned(&self) -> Result<EventBodyOwned, AtspiError> {
+ 		let owned_any_data = self.any_data.try_to_owned()?;
+ 
+@@ -258,7 +258,7 @@
+ 	/// None of the types in [`crate::events`] use [`std::os::fd::OwnedFd`].
+ 	/// Events on the AT-SPI bus *could, theoretically* send a file descriptor, but nothing in the current
+ 	/// specification describes that.
+-	/// See [`zvariant::Value::try_clone`] for more information.
++	/// See [`zbus::Variant::try_clone`] for more information.
+ 	fn clone(&self) -> Self {
+ 		let cloned_any_data = self.any_data.try_clone().unwrap_or_else(|err| {
+ 			panic!("Failure cloning 'any_data' field: {err:?}");
+@@ -323,7 +323,7 @@
+ 	/// None of the types in [`crate::events`] use [`std::os::fd::OwnedFd`].
+ 	/// Events on the AT-SPI bus *could, theoretically* send a file descriptor, but nothing in the current
+ 	/// specification describes that.
+-	/// See [`zvariant::Value::try_clone`] for more information.
++	/// See [`zbus::Variant::try_clone`] for more information.
+ 	fn clone(&self) -> Self {
+ 		let cloned_any_data = self.any_data.try_clone().unwrap_or_else(|err| {
+ 			panic!("Failure cloning 'any_data' field: {err:?}");
+@@ -499,7 +499,7 @@
+ }
+ 
+ impl Type for EventBody<'_> {
+-	const SIGNATURE: &'static zvariant::Signature = EventBodyOwned::SIGNATURE;
++	const SIGNATURE: &'static zbus::Signature = EventBodyOwned::SIGNATURE;
+ }
+ 
+ impl<'de> Deserialize<'de> for EventBody<'de> {
+@@ -625,8 +625,8 @@
+ 	use super::*;
+ 	use crate::ObjectRef;
+ 	use std::collections::HashMap;
+-	use zvariant::{serialized::Context, LE};
+-	use zvariant::{Array, ObjectPath, Value};
++	use zbus::wire::{serialized::Context, LE};
++	use zbus::{Array, ObjectPath, Variant as Value};
+ 
+ 	#[test]
+ 	fn owned_event_body_clone() {
+@@ -728,8 +728,8 @@
+ 	fn event_body_deserialize_as_owned() {
+ 		let event = EventBodyOwned::default();
+ 
+-		let ctxt = Context::new_dbus(LE, 0);
+-		let bytes = zvariant::to_bytes::<EventBodyOwned>(ctxt, &event).unwrap();
++		let ctxt = Context::new(LE, 0);
++		let bytes = zbus::wire::to_bytes::<EventBodyOwned>(ctxt, &event).unwrap();
+ 
+ 		let (deserialized, _) = bytes.deserialize::<EventBodyOwned>().unwrap();
+ 
+@@ -740,8 +740,8 @@
+ 	fn owned_event_body_deserialize_as_borrowed() {
+ 		let event = EventBodyOwned::default();
+ 
+-		let ctxt = Context::new_dbus(LE, 0);
+-		let bytes = zvariant::to_bytes::<EventBodyOwned>(ctxt, &event).unwrap();
++		let ctxt = Context::new(LE, 0);
++		let bytes = zbus::wire::to_bytes::<EventBodyOwned>(ctxt, &event).unwrap();
+ 
+ 		let (deserialized, _) = bytes.deserialize::<EventBodyBorrowed>().unwrap();
+ 
+@@ -756,8 +756,8 @@
+ 	fn qt_owned_event_body_deserialize_as_borrowed() {
+ 		let event = EventBodyQtOwned::default();
+ 
+-		let ctxt = Context::new_dbus(LE, 0);
+-		let bytes = zvariant::to_bytes::<EventBodyQtOwned>(ctxt, &event).unwrap();
++		let ctxt = Context::new(LE, 0);
++		let bytes = zbus::wire::to_bytes::<EventBodyQtOwned>(ctxt, &event).unwrap();
+ 
+ 		let (deserialized, _) = bytes.deserialize::<EventBodyBorrowed>().unwrap();
+ 
+@@ -772,8 +772,8 @@
+ 	fn event_body_default_deserialize_as_event_body() {
+ 		let event = EventBody::default();
+ 
+-		let ctxt = Context::new_dbus(LE, 0);
+-		let bytes = zvariant::to_bytes::<EventBody>(ctxt, &event).unwrap();
++		let ctxt = Context::new(LE, 0);
++		let bytes = zbus::wire::to_bytes::<EventBody>(ctxt, &event).unwrap();
+ 
+ 		let (deserialized, _) = bytes.deserialize::<EventBody>().unwrap();
+ 
+@@ -784,8 +784,8 @@
+ 	fn event_body_owned_default_deserialize_as_event_body() {
+ 		let event = EventBodyOwned::default();
+ 
+-		let ctxt = Context::new_dbus(LE, 0);
+-		let bytes = zvariant::to_bytes::<EventBodyOwned>(ctxt, &event).unwrap();
++		let ctxt = Context::new(LE, 0);
++		let bytes = zbus::wire::to_bytes::<EventBodyOwned>(ctxt, &event).unwrap();
+ 
+ 		let (deserialized, _) = bytes.deserialize::<EventBody>().unwrap();
+ 
+@@ -807,9 +807,9 @@
+ 			HashMap::from([("key", Value::from(55_u32)), ("key2", Value::from(56_u32))]),
+ 		);
+ 
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let bytes =
+-			zvariant::to_bytes::<(&str, i32, i32, Value, HashMap<&str, Value>)>(ctxt, &event)
++			zbus::wire::to_bytes::<(&str, i32, i32, Value, HashMap<&str, Value>)>(ctxt, &event)
+ 				.unwrap();
+ 
+ 		let (deserialized, _) = bytes.deserialize::<EventBody>().unwrap();
+@@ -832,9 +832,9 @@
+ 			HashMap::from([("key", Value::from(55_u32)), ("key2", Value::from(56_u32))]),
+ 		);
+ 
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let bytes =
+-			zvariant::to_bytes::<(&str, i32, i32, Value, HashMap<&str, Value>)>(ctxt, &event)
++			zbus::wire::to_bytes::<(&str, i32, i32, Value, HashMap<&str, Value>)>(ctxt, &event)
+ 				.unwrap();
+ 
+ 		let (deserialized, _) = bytes.deserialize::<EventBodyOwned>().unwrap();
+@@ -857,8 +857,8 @@
+ 			(":0.0", ObjectPath::from_static_str_unchecked("/")),
+ 		);
+ 
+-		let ctxt = Context::new_dbus(LE, 0);
+-		let bytes = zvariant::to_bytes::<(&str, i32, i32, Value, (&str, ObjectPath))>(ctxt, &event)
++		let ctxt = Context::new(LE, 0);
++		let bytes = zbus::wire::to_bytes::<(&str, i32, i32, Value, (&str, ObjectPath))>(ctxt, &event)
+ 			.unwrap();
+ 
+ 		let (deserialized, _) = bytes.deserialize::<EventBody>().unwrap();
+@@ -882,12 +882,11 @@
+ 		);
+ 
+ 		let msg = zbus::Message::signal("/", "org.a11y.atspi.Object", "StateChange")
+-			.unwrap()
+ 			.build(&event)
+ 			.unwrap();
+ 
+ 		let body = msg.body();
+-		let deserialized = body.deserialize_unchecked::<EventBody>().unwrap();
++		let deserialized = body.deserialize_ignore_signature::<EventBody>().unwrap();
+ 
+ 		assert_eq!(deserialized.kind(), "and that is what they'll do");
+ 		assert_eq!(deserialized.detail1(), 1);
+@@ -908,8 +907,8 @@
+ 			(":0.0", ObjectPath::from_static_str_unchecked("/")),
+ 		);
+ 
+-		let ctxt = Context::new_dbus(LE, 0);
+-		let bytes = zvariant::to_bytes::<(&str, i32, i32, u32, Value<'_>, (&str, ObjectPath<'_>))>(
++		let ctxt = Context::new(LE, 0);
++		let bytes = zbus::wire::to_bytes::<(&str, i32, i32, u32, Value<'_>, (&str, ObjectPath<'_>))>(
+ 			ctxt, &event,
+ 		)
+ 		.unwrap();
+@@ -929,9 +928,9 @@
+ 			HashMap::from([("key", Value::from(55_u32)), ("key2", Value::from(56_u32))]),
+ 		);
+ 
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let bytes =
+-			zvariant::to_bytes::<(&str, i32, i32, Value, HashMap<&str, Value>)>(ctxt, &event)
++			zbus::wire::to_bytes::<(&str, i32, i32, Value, HashMap<&str, Value>)>(ctxt, &event)
+ 				.unwrap();
+ 
+ 		let (deserialized, _) = bytes.deserialize::<EventBodyBorrowed>().unwrap();
+@@ -955,7 +954,6 @@
+ 		);
+ 
+ 		let message = zbus::Message::signal("/", "org.a11y.atspi.Object", "StateChange")
+-			.unwrap()
+ 			.build(&body)
+ 			.unwrap();
+ 
+@@ -974,7 +972,6 @@
+ 		let body = "hello";
+ 
+ 		let message = zbus::Message::signal("/bus/driver/zeenix", "org.Zbus", "TicketCheck")
+-			.unwrap()
+ 			.build(&body)
+ 			.unwrap();
+ 
+@@ -990,8 +987,8 @@
+ 		let key = "test";
+ 		let map = HashMap::from([(key, val)]);
+ 
+-		let ctxt = Context::new_dbus(LE, 0);
+-		let bytes = zvariant::to_bytes::<HashMap<&str, Value>>(ctxt, &map).unwrap();
++		let ctxt = Context::new(LE, 0);
++		let bytes = zbus::wire::to_bytes::<HashMap<&str, Value>>(ctxt, &map).unwrap();
+ 
+ 		let (properties, _) = bytes.deserialize::<Properties>().unwrap();
+ 
+@@ -1002,8 +999,8 @@
+ 	fn test_object_ref_deserializes_as_qt_properties() {
+ 		let object_ref = ObjectRef::default();
+ 
+-		let ctxt = Context::new_dbus(LE, 0);
+-		let bytes = zvariant::to_bytes::<ObjectRef>(ctxt, &object_ref).unwrap();
++		let ctxt = Context::new(LE, 0);
++		let bytes = zbus::wire::to_bytes::<ObjectRef>(ctxt, &object_ref).unwrap();
+ 
+ 		let (qt_props, _) = bytes.deserialize::<QtProperties>().unwrap();
+ 
+@@ -1013,8 +1010,8 @@
+ 	#[test]
+ 	fn test_properties_serializes_as_valid_hashmap() {
+ 		let properties = Properties;
+-		let ctxt = Context::new_dbus(LE, 0);
+-		let bytes = zvariant::to_bytes::<Properties>(ctxt, &properties).unwrap();
++		let ctxt = Context::new(LE, 0);
++		let bytes = zbus::wire::to_bytes::<Properties>(ctxt, &properties).unwrap();
+ 
+ 		let (map, _) = bytes.deserialize::<HashMap<&str, Value>>().unwrap();
+ 
+@@ -1024,8 +1021,8 @@
+ 	#[test]
+ 	fn test_qt_properties_serializes_as_valid_string_objpath_tuple() {
+ 		let qt_properties = QtProperties;
+-		let ctxt = Context::new_dbus(LE, 0);
+-		let bytes = zvariant::to_bytes::<QtProperties>(ctxt, &qt_properties).unwrap();
++		let ctxt = Context::new(LE, 0);
++		let bytes = zbus::wire::to_bytes::<QtProperties>(ctxt, &qt_properties).unwrap();
+ 
+ 		let (tuple, _) = bytes.deserialize::<(&str, ObjectPath)>().unwrap();
+ 
+@@ -1035,8 +1032,8 @@
+ 	#[test]
+ 	fn test_qt_properties_serializes_as_valid_object_ref() {
+ 		let qt_properties = QtProperties;
+-		let ctxt = Context::new_dbus(LE, 0);
+-		let bytes = zvariant::to_bytes::<QtProperties>(ctxt, &qt_properties).unwrap();
++		let ctxt = Context::new(LE, 0);
++		let bytes = zbus::wire::to_bytes::<QtProperties>(ctxt, &qt_properties).unwrap();
+ 
+ 		let (objectref, _) = bytes.deserialize::<ObjectRef>().unwrap();
+ 
+@@ -1047,12 +1044,12 @@
+ 	#[cfg(test)]
+ 	mod signatures {
+ 		use crate::events::EventBodyQtOwned;
+-		use zvariant::{signature::Fields, Signature, Type};
++		use zbus::wire::{signature::Fields, Signature, Type};
+ 
+ 		#[test]
+ 		fn test_event_body_signature_equals_borrowed_event_body_signature() {
+ 			use super::*;
+-			use zvariant::Type;
++			use zbus::Type;
+ 
+ 			let borrowed = EventBodyBorrowed::SIGNATURE;
+ 			let owned = EventBodyOwned::SIGNATURE;
+--- a/src/events/event_wrappers.rs
++++ b/src/events/event_wrappers.rs
+@@ -45,10 +45,10 @@
+ use serde::{Deserialize, Serialize};
+ #[cfg(feature = "zbus")]
+ use zbus::message::Header;
+-use zbus_names::UniqueName;
+-use zvariant::ObjectPath;
+-#[cfg(feature = "zbus")]
+-use zvariant::Type;
++use zbus::names::UniqueName;
++use zbus::ObjectPath;
++#[cfg(feature = "zbus")]
++use zbus::Type;
+ 
+ impl_from_user_facing_event_for_interface_event_enum!(
+ 	EventListenerRegisteredEvent,
+--- a/src/events/keyboard.rs
++++ b/src/events/keyboard.rs
+@@ -35,7 +35,7 @@
+ 	type Body<'msg> = EventBody<'msg>;
+ 
+ 	fn from_message_unchecked_parts(item: ObjectRef, body: DbusBody) -> Result<Self, AtspiError> {
+-		let body = body.deserialize_unchecked::<Self::Body<'_>>()?;
++		let body = body.deserialize_ignore_signature::<Self::Body<'_>>()?;
+ 		Ok(Self {
+ 			item: item.into(),
+ 			previous_modifiers: body.detail1(),
+--- a/src/events/mouse.rs
++++ b/src/events/mouse.rs
+@@ -71,7 +71,7 @@
+ 	type Body<'a> = EventBody<'a>;
+ 
+ 	fn from_message_unchecked_parts(item: ObjectRef, body: DbusBody) -> Result<Self, AtspiError> {
+-		let body = body.deserialize_unchecked::<Self::Body<'_>>()?;
++		let body = body.deserialize_ignore_signature::<Self::Body<'_>>()?;
+ 		Ok(Self { item: item.into(), x: body.detail1(), y: body.detail2() })
+ 	}
+ 	fn from_message_unchecked(msg: &zbus::Message, header: &Header) -> Result<Self, AtspiError> {
+@@ -89,7 +89,7 @@
+ 	type Body<'a> = EventBody<'a>;
+ 
+ 	fn from_message_unchecked_parts(item: ObjectRef, body: DbusBody) -> Result<Self, AtspiError> {
+-		let body = body.deserialize_unchecked::<Self::Body<'_>>()?;
++		let body = body.deserialize_ignore_signature::<Self::Body<'_>>()?;
+ 		Ok(Self { item: item.into(), x: body.detail1(), y: body.detail2() })
+ 	}
+ 
+@@ -109,7 +109,7 @@
+ 	type Body<'a> = EventBody<'a>;
+ 
+ 	fn from_message_unchecked_parts(item: ObjectRef, body: DbusBody) -> Result<Self, AtspiError> {
+-		let mut body = body.deserialize_unchecked::<Self::Body<'_>>()?;
++		let mut body = body.deserialize_ignore_signature::<Self::Body<'_>>()?;
+ 		Ok(Self {
+ 			item: item.into(),
+ 			detail: body.take_kind(),
+--- a/src/events/object.rs
++++ b/src/events/object.rs
+@@ -19,7 +19,7 @@
+ use std::hash::Hash;
+ #[cfg(feature = "zbus")]
+ use zbus::message::{Body as DbusBody, Header};
+-use zvariant::{OwnedValue, Value};
++use zbus::{OwnedVariant as OwnedValue, Variant as Value};
+ 
+ const ACCESSIBLE_NAME_PROPERTY_NAME: &str = "accessible-name";
+ const ACCESSIBLE_DESCRIPTION_PROPERTY_NAME: &str = "accessible-description";
+@@ -608,7 +608,7 @@
+ 	type Body<'b> = EventBody<'b>;
+ 
+ 	fn from_message_unchecked_parts(item: ObjectRef, body: DbusBody) -> Result<Self, AtspiError> {
+-		let mut body = body.deserialize_unchecked::<Self::Body<'_>>()?;
++		let mut body = body.deserialize_ignore_signature::<Self::Body<'_>>()?;
+ 		let property: String = body.take_kind();
+ 		let value: Property = body.try_into()?;
+ 		Ok(Self { item: item.into(), property, value })
+@@ -655,7 +655,7 @@
+ 	type Body<'a> = EventBody<'a>;
+ 
+ 	fn from_message_unchecked_parts(item: ObjectRef, body: DbusBody) -> Result<Self, AtspiError> {
+-		let body: Self::Body<'_> = body.deserialize_unchecked()?;
++		let body: Self::Body<'_> = body.deserialize_ignore_signature()?;
+ 		Ok(Self { item: item.into(), state: body.kind().into(), enabled: body.detail1() > 0 })
+ 	}
+ 
+@@ -684,7 +684,7 @@
+ 	type Body<'a> = EventBody<'a>;
+ 
+ 	fn from_message_unchecked_parts(item: ObjectRef, body: DbusBody) -> Result<Self, AtspiError> {
+-		let mut body = body.deserialize_unchecked::<Self::Body<'_>>()?;
++		let mut body = body.deserialize_ignore_signature::<Self::Body<'_>>()?;
+ 		Ok(Self {
+ 			item: item.into(),
+ 			operation: body.kind().parse()?,
+@@ -741,7 +741,7 @@
+ 	type Body<'a> = EventBody<'a>;
+ 
+ 	fn from_message_unchecked_parts(item: ObjectRef, body: DbusBody) -> Result<Self, AtspiError> {
+-		let mut body = body.deserialize_unchecked::<Self::Body<'_>>()?;
++		let mut body = body.deserialize_ignore_signature::<Self::Body<'_>>()?;
+ 		Ok(Self { item: item.into(), descendant: body.take_any_data().try_into()? })
+ 	}
+ 
+@@ -769,7 +769,7 @@
+ 	type Body<'a> = EventBody<'a>;
+ 
+ 	fn from_message_unchecked_parts(item: ObjectRef, body: DbusBody) -> Result<Self, AtspiError> {
+-		let mut body = body.deserialize_unchecked::<Self::Body<'_>>()?;
++		let mut body = body.deserialize_ignore_signature::<Self::Body<'_>>()?;
+ 		Ok(Self {
+ 			item: item.into(),
+ 			text: body
+@@ -876,7 +876,7 @@
+ 	type Body<'a> = EventBody<'a>;
+ 
+ 	fn from_message_unchecked_parts(item: ObjectRef, body: DbusBody) -> Result<Self, AtspiError> {
+-		let mut body = body.deserialize_unchecked::<Self::Body<'_>>()?;
++		let mut body = body.deserialize_ignore_signature::<Self::Body<'_>>()?;
+ 		Ok(Self {
+ 			item: item.into(),
+ 			operation: body.kind().parse()?,
+@@ -918,7 +918,7 @@
+ 	type Body<'a> = EventBody<'a>;
+ 
+ 	fn from_message_unchecked_parts(item: ObjectRef, body: DbusBody) -> Result<Self, AtspiError> {
+-		let body = body.deserialize_unchecked::<Self::Body<'_>>()?;
++		let body = body.deserialize_ignore_signature::<Self::Body<'_>>()?;
+ 		Ok(Self { item: item.into(), position: body.detail1() })
+ 	}
+ 
+--- a/src/events/registry.rs
++++ b/src/events/registry.rs
+@@ -9,8 +9,8 @@
+ #[cfg(feature = "zbus")]
+ use zbus::message::{Body as DbusBody, Header};
+ use zbus_lockstep_macros::validate;
+-use zbus_names::{OwnedUniqueName, UniqueName};
+-use zvariant::Type;
++use zbus::names::{OwnedUniqueName, UniqueName};
++use zbus::Type;
+ 
+ use crate::{
+ 	events::{DBusInterface, DBusMatchRule, DBusMember, RegistryEventString},
+@@ -47,7 +47,7 @@
+ 	type Body<'a> = EventListeners;
+ 
+ 	fn from_message_unchecked_parts(item: ObjectRef, body: DbusBody) -> Result<Self, AtspiError> {
+-		let deregistered_event = body.deserialize_unchecked::<Self::Body<'_>>()?;
++		let deregistered_event = body.deserialize_ignore_signature::<Self::Body<'_>>()?;
+ 		Ok(Self { item: item.into(), deregistered_event })
+ 	}
+ 
+@@ -87,7 +87,7 @@
+ 		item: ObjectRef,
+ 		registered_event: DbusBody,
+ 	) -> Result<Self, AtspiError> {
+-		let registered_event = registered_event.deserialize_unchecked()?;
++		let registered_event = registered_event.deserialize_ignore_signature()?;
+ 		Ok(Self { item: item.into(), registered_event })
+ 	}
+ 
+@@ -124,7 +124,7 @@
+ #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, Hash)]
+ pub struct EventListeners {
+ 	pub bus_name: OwnedUniqueName,
+-	// TODO: `path` should be a `zvariant::ObjectPath` but that requires changing the signature with an attribute
++	// TODO: `path` should be a `zbus::ObjectPath` but that requires changing the signature with an attribute
+ 	// and `Serialize`/`Deserialize` impls.
+ 	pub path: String,
+ }
+@@ -206,7 +206,7 @@
+ 			item: ObjectRef<'_>,
+ 			body: DbusBody,
+ 		) -> Result<Self, AtspiError> {
+-			let socket = body.deserialize_unchecked::<Self::Body<'_>>()?;
++			let socket = body.deserialize_ignore_signature::<Self::Body<'_>>()?;
+ 			Ok(Self { item: item.into(), socket: socket.into() })
+ 		}
+ 
+--- a/src/events/traits.rs
++++ b/src/events/traits.rs
+@@ -5,10 +5,10 @@
+ use serde::{Deserialize, Serialize};
+ #[cfg(feature = "zbus")]
+ use zbus::message::{Body as DbusBody, Header};
+-use zbus_names::UniqueName;
+-use zvariant::ObjectPath;
+-#[cfg(feature = "zbus")]
+-use zvariant::Type;
++use zbus::names::UniqueName;
++use zbus::ObjectPath;
++#[cfg(feature = "zbus")]
++use zbus::Type;
+ 
+ /// Describes properties of a specific event _type_.
+ ///
+@@ -163,7 +163,7 @@
+ 		Ok(())
+ 	}
+ 
+-	/// Validate the body signature against the [`zvariant::Signature`] of [`MessageConversion::Body`]
++	/// Validate the body signature against the [`zbus::Signature`] of [`MessageConversion::Body`]
+ 	///
+ 	/// # Errors
+ 	///
+--- a/src/events/window.rs
++++ b/src/events/window.rs
+@@ -187,7 +187,7 @@
+ 	type Body<'a> = EventBody<'a>;
+ 
+ 	fn from_message_unchecked_parts(item: ObjectRef, body: DbusBody) -> Result<Self, AtspiError> {
+-		let mut body = body.deserialize_unchecked::<Self::Body<'_>>()?;
++		let mut body = body.deserialize_ignore_signature::<Self::Body<'_>>()?;
+ 		Ok(Self { item: item.into(), property: body.take_kind() })
+ 	}
+ 
+--- a/src/interface.rs
++++ b/src/interface.rs
+@@ -10,7 +10,7 @@
+ 	Deserialize, Serialize,
+ };
+ use std::fmt;
+-use zvariant::{Signature, Type};
++use zbus::{Signature, Type};
+ 
+ /// AT-SPI interfaces an accessible object can implement.
+ #[bitflags]
+@@ -229,19 +229,19 @@
+ #[cfg(test)]
+ mod tests {
+ 	use super::{Interface, InterfaceSet};
+-	use zvariant::serialized::Data;
+-	use zvariant::{serialized::Context, to_bytes, LE};
++	use zbus::wire::serialized::Data;
++	use zbus::wire::{serialized::Context, to_bytes, LE};
+ 
+ 	#[test]
+ 	fn serialize_empty_interface_set() {
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let encoded = to_bytes(ctxt, &InterfaceSet::empty()).unwrap();
+ 		assert_eq!(encoded.bytes(), &[0, 0, 0, 0]);
+ 	}
+ 
+ 	#[test]
+ 	fn deserialize_empty_interface_set() {
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let encoded = to_bytes(ctxt, &InterfaceSet::empty()).unwrap();
+ 		let (decoded, _) = encoded.deserialize::<InterfaceSet>().unwrap();
+ 		assert_eq!(decoded, InterfaceSet::empty());
+@@ -249,7 +249,7 @@
+ 
+ 	#[test]
+ 	fn serialize_interface_set_accessible() {
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let encoded = to_bytes(ctxt, &InterfaceSet::new(Interface::Accessible)).unwrap();
+ 		assert_eq!(
+ 			encoded.bytes(),
+@@ -262,7 +262,7 @@
+ 
+ 	#[test]
+ 	fn deserialize_interface_set_accessible() {
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let data = Data::new::<&[u8]>(
+ 			&[
+ 				30, 0, 0, 0, 25, 0, 0, 0, 111, 114, 103, 46, 97, 49, 49, 121, 46, 97, 116, 115,
+@@ -277,7 +277,7 @@
+ 
+ 	#[test]
+ 	fn can_handle_multiple_interfaces() {
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let object =
+ 			InterfaceSet::new(Interface::Accessible | Interface::Action | Interface::Component);
+ 		let encoded = to_bytes(ctxt, &object).unwrap();
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -43,7 +43,7 @@
+ pub use relation_type::RelationType;
+ 
+ use serde::{Deserialize, Serialize};
+-use zvariant::Type;
++use zbus::Type;
+ 
+ pub type Result<T> = std::result::Result<T, AtspiError>;
+ 
+@@ -207,7 +207,7 @@
+ 	use zbus_lockstep::{
+ 		method_args_signature, method_return_signature, signal_body_type_signature,
+ 	};
+-	use zvariant::Signature;
++	use zbus::Signature;
+ 
+ 	#[test]
+ 	fn convert_i32_to_live() {
+@@ -268,7 +268,7 @@
+ 
+ 	#[test]
+ 	fn validate_text_selection_signature() {
+-		let selection_signature = method_args_signature!(member: "GetTextSelections", interface: "org.a11y.atspi.Document", argument: "selections");
++		let selection_signature = method_return_signature!(member: "GetTextSelections", interface: "org.a11y.atspi.Document", argument: "selections");
+ 		let selection_signature_str = selection_signature.to_string();
+ 		let selection_signature = Signature::from_str(&selection_signature_str.as_str()[1..])
+ 			.expect("Valid signature pattern");
+--- a/src/macros.rs
++++ b/src/macros.rs
+@@ -23,14 +23,14 @@
+ macro_rules! impl_event_properties {
+ 	($type:ty) => {
+ 		impl crate::EventProperties for $type {
+-			fn sender(&self) -> zbus_names::UniqueName<'_> {
++			fn sender(&self) -> zbus::names::UniqueName<'_> {
+ 				self.item
+ 					.name()
+ 					.expect("Events are received with valid ObjetRef")
+ 					.as_ref()
+ 			}
+ 
+-			fn path(&self) -> zvariant::ObjectPath<'_> {
++			fn path(&self) -> zbus::ObjectPath<'_> {
+ 				self.item.path().as_ref()
+ 			}
+ 		}
+@@ -247,8 +247,8 @@
+ ///         event.path(),
+ ///         StateChangedEvent::DBUS_INTERFACE,
+ ///         StateChangedEvent::DBUS_MEMBER,
+-///     )?
+-///     .sender(event.sender())?
++///     )
++///     .sender(event.sender())
+ ///     .build(&event.body())?)
+ ///  }
+ /// }
+@@ -264,8 +264,8 @@
+ 					event.path(),
+ 					<$type as DBusInterface>::DBUS_INTERFACE,
+ 					<$type as DBusMember>::DBUS_MEMBER,
+-				)?
+-				.sender(event.sender().to_string())?
++				)
++				.sender(event.sender().to_string())
+ 				.build(&event.body())?)
+ 			}
+ 		}
+@@ -307,7 +307,7 @@
+ 			fn try_from(msg: &'msg zbus::Message) -> Result<Self, Self::Error> {
+ 				use crate::events::{EventBody, EventBodyQtBorrowed};
+ 				use crate::events::traits::{MessageConversion, MessageConversionExt};
+-				use zvariant::Type;
++				use zbus::Type;
+ 				use crate::ObjectRef;
+ 
+ 				let hdr = msg.header();
+@@ -369,9 +369,7 @@
+ 				event_struct.path().as_str(),
+ 				<$type as crate::events::DBusMember>::DBUS_MEMBER,
+ 			)
+-			.unwrap()
+ 			.sender(event_struct.sender().as_str())
+-			.unwrap()
+ 			.build(&(body,))
+ 			.unwrap();
+ 			let header = body2.header();
+@@ -415,8 +413,8 @@
+ 	    let possible_names: Vec<String> = xml.interfaces().iter().map(|int| int.name().as_str().to_string()).collect();
+         panic!("{} has interface name {}, but it was not found in the list of interfaces defined in the XML: {:?}", std::any::type_name::<$type>(), <$type>::DBUS_INTERFACE, possible_names);
+       };
+-        let Some(_member) = interface.signals().iter().find(|mem| mem.name() == <$type>::DBUS_MEMBER) else {
+-        let possible_names: Vec<String> = interface.signals().iter().map(|mem| mem.name().as_str().to_string()).collect();
++        let Some(_member) = interface.signals().find(|mem| mem.name() == <$type>::DBUS_MEMBER) else {
++        let possible_names: Vec<String> = interface.signals().map(|mem| mem.name().as_str().to_string()).collect();
+         panic!("{} has interface name {} and member name {}, but it was not found in the list of members defined in the corresponding interface in the XML: {:?}", std::any::type_name::<$type>(), <$type>::DBUS_INTERFACE, <$type>::DBUS_MEMBER, possible_names);
+       };
+ 		}
+@@ -441,9 +439,7 @@
+         ev.interface(),
+         ev.member(),
+       )
+-        .unwrap()
+         .sender(":0.0")
+-        .unwrap()
+         .build(&(qt,))
+         .unwrap();
+           <$type>::try_from(&msg).expect("Should be able to use an EventBodyQtOwned for any type whose BusProperties::Body = EventBodyOwned");
+@@ -464,9 +460,7 @@
+         ev.interface(),
+         ev.member(),
+       )
+-        .unwrap()
+         .sender(":0.0")
+-        .unwrap()
+         .build(&(qt,))
+         .unwrap();
+         assert_matches!(Event::try_from(&msg), Ok(_));
+@@ -518,9 +512,7 @@
+ 				"org.a11y.atspi.technically.valid",
+ 				"MadeUpMember",
+ 			)
+-			.unwrap()
+ 			.sender(":0.0")
+-			.unwrap()
+ 			.build(&())
+ 			.unwrap();
+ 			let event = <$type>::try_from(&fake_msg);
+@@ -537,9 +529,7 @@
+ 				"org.a11y.atspi.technically.valid",
+ 				"MadeUpMember",
+ 			)
+-			.unwrap()
+ 			.sender(":0.0")
+-			.unwrap()
+ 			.build(&<$type>::default().body())
+ 			.unwrap();
+ 			let hdr = fake_msg.header();
+@@ -555,9 +545,7 @@
+ 				<$type as crate::events::DBusInterface>::DBUS_INTERFACE,
+ 				"MadeUpMember",
+ 			)
+-			.unwrap()
+ 			.sender(":0.0")
+-			.unwrap()
+ 			.build(&())
+ 			.unwrap();
+ 			let event = <$type>::try_from(&fake_msg);
+@@ -572,9 +560,7 @@
+ 				<$type as crate::events::DBusInterface>::DBUS_INTERFACE,
+ 				<$type as crate::events::DBusMember>::DBUS_MEMBER,
+ 			)
+-			.unwrap()
+ 			.sender(":0.0")
+-			.unwrap()
+ 			.build(&())
+ 			.unwrap();
+ 			let event = <$type>::try_from(&fake_msg);
+@@ -591,9 +577,7 @@
+ 				<$type as crate::events::DBusInterface>::DBUS_INTERFACE,
+ 				<$type as crate::events::DBusMember>::DBUS_MEMBER,
+ 			)
+-			.unwrap()
+ 			.sender(":0.0")
+-			.unwrap()
+ 			.build(&invalid_body)
+ 			.unwrap();
+ 			let event = <$type>::try_from(&fake_msg);
+@@ -609,9 +593,7 @@
+ 				"org.a11y.atspi.accessible.technically.valid",
+ 				"FakeMember",
+ 			)
+-			.unwrap()
+ 			.sender(":0.0")
+-			.unwrap()
+ 			.build(&<$type>::default().body())
+ 			.unwrap();
+ 			let event = <$type>::try_from(&fake_msg);
+@@ -628,9 +610,7 @@
+ 				"org.a11y.atspi.accessible.technically.valid",
+ 				<$type as crate::events::DBusMember>::DBUS_MEMBER,
+ 			)
+-			.unwrap()
+ 			.sender(":0.0")
+-			.unwrap()
+ 			.build(&<$type>::default().body())
+ 			.unwrap();
+ 			let event = <$type>::try_from(&fake_msg);
+@@ -646,9 +626,7 @@
+ 				<$type as crate::events::DBusInterface>::DBUS_INTERFACE,
+ 				"MadeUpMember",
+ 			)
+-			.unwrap()
+ 			.sender(":0.0")
+-			.unwrap()
+ 			.build(&<$type>::default().body())
+ 			.unwrap();
+ 			let event = <$type>::try_from(&fake_msg);
+@@ -721,9 +699,7 @@
+ 				"org.a11y.atspi.technically.valid.lol",
+ 				<$ufet as crate::events::DBusMember>::DBUS_MEMBER,
+ 			)
+-			.unwrap()
+ 			.sender(":0.0")
+-			.unwrap()
+ 			.build(&<$ufet>::default().body())
+ 			.unwrap();
+ 
+@@ -754,9 +730,7 @@
+ 					<$ufet as crate::events::DBusInterface>::DBUS_INTERFACE,
+ 					"FakeFunctionLol",
+ 				)
+-				.unwrap()
+ 				.sender(":0.0")
+-				.unwrap()
+ 				.build(&<$ufet>::default().body())
+ 				.unwrap();
+ 				// As above, the `msg.try_into()?` is provided through the `impl_from_dbus_message` macro.
+@@ -771,9 +745,7 @@
+ 					"org.a11y.atspi.technically.allowed",
+ 					"FakeFunctionLol",
+ 				)
+-				.unwrap()
+ 				.sender(":0.0")
+-				.unwrap()
+ 				.build(&<$ufet>::default().body())
+ 				.unwrap();
+ 				// As above, the `msg.try_into()?` is provided through the `impl_from_dbus_message` macro.
+@@ -791,9 +763,7 @@
+ 					<$ufet as crate::events::DBusInterface>::DBUS_INTERFACE,
+ 					<$ufet as crate::events::DBusMember>::DBUS_MEMBER,
+ 				)
+-				.unwrap()
+ 				.sender(":0.0")
+-				.unwrap()
+ 				.build(&<$ufet>::default().body())
+ 				.unwrap();
+ 				// As above, the `msg.try_into()?` is provided through the `impl_from_dbus_message` macro.
+@@ -968,7 +938,7 @@
+ 		#[cfg(feature = "zbus")]
+ 		impl<'msg> crate::events::MessageConversionExt<'msg, crate::events::EventBody<'msg>> for $target_type {
+ 			fn try_from_message(msg: &'msg zbus::Message, header: &Header) -> Result<Self, AtspiError> {
+-				use zvariant::Type;
++				use zbus::Type;
+ 				use crate::events::traits::MessageConversion;
+ 				Self::validate_interface(header)?;
+ 				Self::validate_member(header)?;
+--- a/src/object_match.rs
++++ b/src/object_match.rs
+@@ -1,7 +1,7 @@
+ use std::{borrow::Borrow, collections::HashMap, marker::PhantomData};
+ 
+ use serde::{Deserialize, Serialize};
+-use zvariant::{Signature, Type};
++use zbus::{Signature, Type};
+ 
+ use crate::{Interface, InterfaceSet, Role, State, StateSet};
+ 
+--- a/src/object_ref.rs
++++ b/src/object_ref.rs
+@@ -2,8 +2,8 @@
+ use serde::{Deserialize, Serialize};
+ use std::hash::{Hash, Hasher};
+ use zbus_lockstep_macros::validate;
+-use zbus_names::{BusName, UniqueName};
+-use zvariant::{ObjectPath, Structure, Type};
++use zbus::names::{BusName, UniqueName};
++use zbus::{ObjectPath, Structure, Type};
+ 
+ const NULL_PATH_STR: &str = "/org/a11y/atspi/null";
+ const NULL_OBJECT_PATH: &ObjectPath<'static> =
+@@ -27,7 +27,7 @@
+ /// Emitted by `RemoveAccessible` and `Available`
+ #[validate(signal: "Available")]
+ #[derive(Clone, Debug, Eq, Type)]
+-#[zvariant(signature = "(so)")]
++#[zbus(signature = "(so)")]
+ pub enum ObjectRef<'o> {
+ 	Null,
+ 	Owned { name: UniqueName<'static>, path: ObjectPath<'static> },
+@@ -46,7 +46,7 @@
+ 	/// # Example
+ 	/// ```rust
+ 	/// use zbus::names::UniqueName;
+-	/// use zbus::zvariant::ObjectPath;
++	/// use zbus::ObjectPath;
+ 	/// use atspi_common::ObjectRef;
+ 	///
+ 	/// let name = UniqueName::from_static_str_unchecked(":1.23");
+@@ -72,7 +72,7 @@
+ 	/// # Example
+ 	/// ```rust
+ 	/// use zbus::names::UniqueName;
+-	/// use zbus::zvariant::ObjectPath;
++	/// use zbus::ObjectPath;
+ 	/// use atspi_common::ObjectRef;
+ 	///
+ 	/// let name = UniqueName::from_static_str_unchecked(":1.23");
+@@ -138,7 +138,7 @@
+ 	/// # Example
+ 	/// ```rust
+ 	/// use zbus::names::UniqueName;
+-	/// use zbus::zvariant::ObjectPath;
++	/// use zbus::ObjectPath;
+ 	/// use atspi_common::ObjectRef;
+ 	///
+ 	/// let name = UniqueName::from_static_str_unchecked(":1.23");
+@@ -163,7 +163,7 @@
+ 	/// # Example
+ 	/// ```rust
+ 	/// use zbus::names::UniqueName;
+-	/// use zbus::zvariant::ObjectPath;
++	/// use zbus::ObjectPath;
+ 	/// use atspi_common::ObjectRef;
+ 	///
+ 	/// let name = UniqueName::from_static_str_unchecked(":1.23");
+@@ -197,7 +197,7 @@
+ 	/// # Example
+ 	/// ```rust
+ 	/// use zbus::names::UniqueName;
+-	/// use zbus::zvariant::ObjectPath;
++	/// use zbus::ObjectPath;
+ 	/// use atspi_common::ObjectRef;
+ 	///
+ 	/// let name = UniqueName::from_static_str_unchecked(":1.23");
+@@ -319,7 +319,7 @@
+ 	/// # Example
+ 	/// ```rust
+ 	/// use zbus::names::UniqueName;
+-	/// use zbus::zvariant::ObjectPath;
++	/// use zbus::ObjectPath;
+ 	/// use atspi_common::ObjectRef;
+ 	///
+ 	/// let name = UniqueName::from_static_str_unchecked(":1.23");
+@@ -344,7 +344,7 @@
+ 	/// # Example
+ 	/// ```rust
+ 	/// use zbus::names::UniqueName;
+-	/// use zbus::zvariant::ObjectPath;
++	/// use zbus::ObjectPath;
+ 	/// use atspi_common::ObjectRef;
+ 	///
+ 	/// let name = UniqueName::from_static_str_unchecked(":1.23");
+@@ -574,37 +574,37 @@
+ 	}
+ }
+ 
+-impl<'v> TryFrom<zvariant::Value<'v>> for ObjectRef<'v> {
+-	type Error = zvariant::Error;
+-
+-	fn try_from(value: zvariant::Value<'v>) -> Result<Self, Self::Error> {
++impl<'v> TryFrom<zbus::Variant<'v>> for ObjectRef<'v> {
++	type Error = zbus::Error;
++
++	fn try_from(value: zbus::Variant<'v>) -> Result<Self, Self::Error> {
+ 		// Relies on the generic `Value` to tuple conversion `(UniqueName, ObjectPath)`.
+ 		let (name, path): (UniqueName, ObjectPath) = value.try_into()?;
+ 		Ok(ObjectRef::new_borrowed(name, path))
+ 	}
+ }
+ 
+-impl<'v> TryFrom<zvariant::Value<'v>> for ObjectRefOwned {
+-	type Error = zvariant::Error;
+-
+-	fn try_from(value: zvariant::Value<'v>) -> Result<Self, Self::Error> {
++impl<'v> TryFrom<zbus::Variant<'v>> for ObjectRefOwned {
++	type Error = zbus::Error;
++
++	fn try_from(value: zbus::Variant<'v>) -> Result<Self, Self::Error> {
+ 		// Relies on the generic `Value` to tuple conversion `(UniqueName, ObjectPath)`.
+ 		let (name, path): (UniqueName, ObjectPath) = value.try_into()?;
+ 		Ok(ObjectRef::new_borrowed(name, path).into())
+ 	}
+ }
+ 
+-impl TryFrom<zvariant::OwnedValue> for ObjectRef<'static> {
+-	type Error = zvariant::Error;
+-	fn try_from(value: zvariant::OwnedValue) -> Result<Self, Self::Error> {
++impl TryFrom<zbus::OwnedVariant> for ObjectRef<'static> {
++	type Error = zbus::Error;
++	fn try_from(value: zbus::OwnedVariant) -> Result<Self, Self::Error> {
+ 		let (name, path): (UniqueName<'static>, ObjectPath<'static>) = value.try_into()?;
+ 		Ok(ObjectRef::Owned { name, path })
+ 	}
+ }
+ 
+-impl TryFrom<zvariant::OwnedValue> for ObjectRefOwned {
+-	type Error = zvariant::Error;
+-	fn try_from(value: zvariant::OwnedValue) -> Result<Self, Self::Error> {
++impl TryFrom<zbus::OwnedVariant> for ObjectRefOwned {
++	type Error = zbus::Error;
++	fn try_from(value: zbus::OwnedVariant) -> Result<Self, Self::Error> {
+ 		let (name, path): (UniqueName<'static>, ObjectPath<'static>) = value.try_into()?;
+ 		let obj = ObjectRef::Owned { name, path };
+ 		Ok(ObjectRefOwned(obj))
+@@ -612,7 +612,7 @@
+ }
+ 
+ impl<'reference: 'structure, 'object: 'structure, 'structure> From<&'reference ObjectRef<'object>>
+-	for zvariant::Structure<'structure>
++	for zbus::Structure<'structure>
+ {
+ 	fn from(obj: &'reference ObjectRef<'object>) -> Self {
+ 		match obj {
+@@ -623,7 +623,7 @@
+ 	}
+ }
+ 
+-impl<'o> From<ObjectRef<'o>> for zvariant::Structure<'o> {
++impl<'o> From<ObjectRef<'o>> for zbus::Structure<'o> {
+ 	fn from(obj: ObjectRef<'o>) -> Self {
+ 		match obj {
+ 			ObjectRef::Null => Structure::from(("", NULL_OBJECT_PATH)),
+@@ -634,7 +634,7 @@
+ 	}
+ }
+ 
+-impl From<ObjectRefOwned> for zvariant::Structure<'_> {
++impl From<ObjectRefOwned> for zbus::Structure<'_> {
+ 	fn from(obj: ObjectRefOwned) -> Self {
+ 		let object_ref = obj.into_inner();
+ 		object_ref.into()
+@@ -647,9 +647,9 @@
+ 
+ 	use super::ObjectRef;
+ 	use crate::object_ref::{NULL_OBJECT_PATH, NULL_PATH_STR};
+-	use zbus::zvariant;
+-	use zbus::{names::UniqueName, zvariant::ObjectPath};
+-	use zvariant::{serialized::Context, to_bytes, OwnedValue, Value, LE};
++
++	use zbus::{names::UniqueName, ObjectPath};
++	use zbus::wire::{serialized::Context, to_bytes, OwnedVariant as OwnedValue, Variant as Value, LE};
+ 
+ 	const TEST_OBJECT_PATH: &str = "/org/a11y/atspi/path/007";
+ 
+@@ -711,7 +711,7 @@
+ 		let null_object_ref: ObjectRef = ObjectRef::Null;
+ 		assert!(null_object_ref.is_null());
+ 
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let encoded = to_bytes(ctxt, &null_object_ref).unwrap();
+ 
+ 		let (obj, _) = encoded.deserialize::<ObjectRef>().unwrap();
+@@ -728,7 +728,7 @@
+ 
+ 		let object_ref = ObjectRef::new_owned(name, path);
+ 
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let encoded = to_bytes(ctxt, &object_ref).unwrap();
+ 
+ 		let (obj, _) = encoded.deserialize::<ObjectRef>().unwrap();
+@@ -748,7 +748,7 @@
+ 			ObjectPath::from_static_str_unchecked(TEST_OBJECT_PATH),
+ 		);
+ 
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let encoded = to_bytes(ctxt, &object_ref).unwrap();
+ 
+ 		let (obj, _) = encoded.deserialize::<ObjectRef>().unwrap();
+@@ -756,6 +756,25 @@
+ 
+ 		assert_eq!(obj.name().unwrap().as_str(), ":1.23");
+ 		assert_eq!(obj.path_as_str(), TEST_OBJECT_PATH);
++	}
++
++	#[test]
++	fn rejects_invalid_names_and_paths_in_dbus_wire_data() {
++		use zbus::wire::serialized::Data;
++		let object = ObjectRef::new_borrowed(
++			UniqueName::from_static_str(":1.23").unwrap(),
++			ObjectPath::from_static_str(TEST_OBJECT_PATH).unwrap(),
++		);
++		let context = Context::new(LE, 0);
++		let encoded = to_bytes(context, &object).unwrap();
++		assert!(encoded.deserialize::<ObjectRef>().is_ok());
++		for marker in [b':', b'/'] {
++			let mut bytes = encoded.bytes().to_vec();
++			let index = bytes.iter().position(|byte| *byte == marker).unwrap();
++			bytes[index] = b'x';
++			let malformed = Data::new(bytes, context);
++			assert!(malformed.deserialize::<ObjectRef>().is_err());
++		}
+ 	}
+ 
+ 	#[test]
+@@ -823,7 +842,7 @@
+ 
+ 	#[test]
+ 	fn must_fail_test_try_from_invalid_value_for_object_ref() {
+-		let value = zvariant::Value::from((42, true));
++		let value = zbus::Variant::from((42, true));
+ 		let obj: Result<ObjectRef, _> = value.try_into();
+ 		assert!(obj.is_err());
+ 	}
+@@ -849,7 +868,7 @@
+ 	fn valid_name_null_path_object_ref() {
+ 		let object_ref = ObjectRef::from_static_str_unchecked("1.23", NULL_PATH_STR);
+ 
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let encoded = to_bytes(ctxt, &object_ref).unwrap();
+ 
+ 		let (obj, _) = encoded.deserialize::<ObjectRef>().unwrap();
+@@ -864,7 +883,7 @@
+ 	fn empty_name_valid_path_object_ref() {
+ 		let object_ref = ObjectRef::from_static_str_unchecked("", TEST_OBJECT_PATH);
+ 
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let encoded = to_bytes(ctxt, &object_ref).unwrap();
+ 
+ 		let (_obj, _) = encoded.deserialize::<ObjectRef>().unwrap();
+--- a/src/relation_type.rs
++++ b/src/relation_type.rs
+@@ -1,5 +1,5 @@
+ use serde::{Deserialize, Serialize};
+-use zvariant::Type;
++use zbus::Type;
+ 
+ /// Describes a relationship between one object and another.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type, Hash)]
+--- a/src/role.rs
++++ b/src/role.rs
+@@ -1,5 +1,5 @@
+ use serde::{Deserialize, Serialize};
+-use zvariant::Type;
++use zbus::Type;
+ 
+ use crate::AtspiError;
+ 
+@@ -620,14 +620,14 @@
+ #[cfg(test)]
+ pub mod tests {
+ 	use super::Role;
+-	use zvariant::serialized::Context;
+-	use zvariant::{to_bytes, LE};
++	use zbus::wire::serialized::Context;
++	use zbus::wire::{to_bytes, LE};
+ 
+ 	const HIGHEST_ROLE_VALUE: u32 = 129;
+ 
+ 	#[test]
+ 	fn test_serialization_matches_from_impl() {
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 
+ 		for role_num in 1..=HIGHEST_ROLE_VALUE {
+ 			let from_role = Role::try_from(role_num)
+--- a/src/state.rs
++++ b/src/state.rs
+@@ -5,7 +5,7 @@
+ 	Deserialize, Serialize,
+ };
+ use std::{convert::Infallible, fmt, str::FromStr};
+-use zvariant::{Signature, Type};
++use zbus::{Signature, Type};
+ 
+ /// Used by various interfaces indicating every possible state
+ /// of an accessibility object.
+@@ -558,19 +558,19 @@
+ #[cfg(test)]
+ mod tests {
+ 	use super::{State, StateSet};
+-	use zvariant::serialized::{Context, Data};
+-	use zvariant::{to_bytes, LE};
++	use zbus::wire::serialized::{Context, Data};
++	use zbus::wire::{to_bytes, LE};
+ 
+ 	#[test]
+ 	fn serialize_empty_state_set() {
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let encoded = to_bytes(ctxt, &StateSet::empty()).unwrap();
+ 		assert_eq!(encoded.bytes(), &[8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+ 	}
+ 
+ 	#[test]
+ 	fn deserialize_empty_state_set() {
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let data = Data::new::<&[u8]>(&[8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ctxt);
+ 		let (decoded, _) = data.deserialize::<StateSet>().unwrap();
+ 		assert_eq!(decoded, StateSet::empty());
+@@ -578,14 +578,14 @@
+ 
+ 	#[test]
+ 	fn serialize_state_set_invalid() {
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let encoded = to_bytes(ctxt, &StateSet::new(State::Invalid)).unwrap();
+ 		assert_eq!(encoded.bytes(), &[8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
+ 	}
+ 
+ 	#[test]
+ 	fn deserialize_state_set_invalid() {
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let data = Data::new::<&[u8]>(&[8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0], ctxt);
+ 		let (decoded, _) = data.deserialize::<StateSet>().unwrap();
+ 		assert_eq!(decoded, StateSet::new(State::Invalid));
+@@ -593,14 +593,14 @@
+ 
+ 	#[test]
+ 	fn serialize_state_set_manages_descendants() {
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let encoded = to_bytes(ctxt, &StateSet::new(State::ManagesDescendants)).unwrap();
+ 		assert_eq!(encoded.bytes(), &[8, 0, 0, 0, 0, 0, 0, 128, 0, 0, 0, 0]);
+ 	}
+ 
+ 	#[test]
+ 	fn deserialize_state_set_manages_descendants() {
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let data = Data::new::<&[u8]>(&[8, 0, 0, 0, 0, 0, 0, 128, 0, 0, 0, 0], ctxt);
+ 		let (decoded, _) = data.deserialize::<StateSet>().unwrap();
+ 		assert_eq!(decoded, StateSet::new(State::ManagesDescendants));
+@@ -608,14 +608,14 @@
+ 
+ 	#[test]
+ 	fn serialize_state_set_indeterminate() {
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let encoded = to_bytes(ctxt, &StateSet::new(State::Indeterminate)).unwrap();
+ 		assert_eq!(encoded.bytes(), &[8, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
+ 	}
+ 
+ 	#[test]
+ 	fn deserialize_state_set_indeterminate() {
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let data = Data::new::<&[u8]>(&[8, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0], ctxt);
+ 		let (decoded, _) = data.deserialize::<StateSet>().unwrap();
+ 		assert_eq!(decoded, StateSet::new(State::Indeterminate));
+@@ -623,14 +623,14 @@
+ 
+ 	#[test]
+ 	fn serialize_state_set_focusable_focused() {
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let encoded = to_bytes(ctxt, &StateSet::new(State::Focusable | State::Focused)).unwrap();
+ 		assert_eq!(encoded.bytes(), &[8, 0, 0, 0, 0, 24, 0, 0, 0, 0, 0, 0]);
+ 	}
+ 
+ 	#[test]
+ 	fn deserialize_state_set_focusable_focused() {
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let data = Data::new::<&[u8]>(&[8, 0, 0, 0, 0, 24, 0, 0, 0, 0, 0, 0], ctxt);
+ 		let (decoded, _) = data.deserialize::<StateSet>().unwrap();
+ 		assert_eq!(decoded, StateSet::new(State::Focusable | State::Focused));
+@@ -638,7 +638,7 @@
+ 
+ 	#[test]
+ 	fn cannot_deserialize_state_set_invalid_length() {
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let data = Data::new::<&[u8]>(&[4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ctxt);
+ 		let decode_result = data.deserialize::<StateSet>();
+ 		assert!(decode_result.is_err());
+@@ -646,7 +646,7 @@
+ 
+ 	#[test]
+ 	fn cannot_deserialize_state_set_invalid_flag() {
+-		let ctxt = Context::new_dbus(LE, 0);
++		let ctxt = Context::new(LE, 0);
+ 		let data = Data::new::<&[u8]>(&[8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32], ctxt);
+ 		let decode_result = data.deserialize::<StateSet>();
+ 		assert!(decode_result.is_err());

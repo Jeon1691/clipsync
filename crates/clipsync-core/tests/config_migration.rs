@@ -28,3 +28,23 @@ fn init_preserves_invalid_configuration_instead_of_resetting_it() {
         raw
     );
 }
+
+#[test]
+fn opening_an_unavailable_home_preserves_the_existing_path() {
+    let root = tempfile::tempdir().unwrap();
+    let blocked = root.path().join("selected-home");
+    std::fs::write(&blocked, b"preserve existing file").unwrap();
+    assert!(App::open_from(AppPaths::from_root(blocked.clone())).is_err());
+    assert_eq!(std::fs::read(blocked).unwrap(), b"preserve existing file");
+}
+
+#[test]
+fn failed_identity_persistence_preserves_the_target_and_configuration() {
+    let root = tempfile::tempdir().unwrap();
+    let app = App::open_from(AppPaths::from_root(root.path().into())).unwrap();
+    // save_identity persists its private file before touching a native keyring.
+    std::fs::create_dir(app.store.paths.identity_file()).unwrap();
+    assert!(app.init(Some("http://127.0.0.1:2".into())).is_err());
+    assert!(app.store.paths.identity_file().is_dir());
+    assert!(!app.store.paths.config_file().exists());
+}

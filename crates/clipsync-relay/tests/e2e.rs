@@ -62,6 +62,14 @@ async fn start_relay() -> (String, tokio::task::JoinHandle<()>) {
 
 fn app_in(dir: &TempDir, relay: &str) -> App {
     let app = App::open_from(AppPaths::from_root(dir.path().to_path_buf())).unwrap();
+    let identity = clipsync_crypto::DeviceIdentity::generate();
+    // File-backed test identities avoid serialized OS authorization during a
+    // parallel workspace run. Pairing still uses the real crypto and relay.
+    std::fs::write(
+        app.store.paths.identity_file(),
+        serde_json::to_vec(&identity.to_stored()).unwrap(),
+    )
+    .unwrap();
     app.init(Some(relay.to_string())).unwrap();
     app
 }
@@ -74,7 +82,6 @@ fn store_in(dir: &TempDir) -> clipsync_storage::LocalStore {
 
 // Two peers share this runtime; keep workers free for I/O during OS keychain calls.
 async fn pair_homes(relay: &str) -> (TempDir, TempDir) {
-    std::env::set_var("CLIPSYNC_NO_DAEMON", "1");
     let a_dir = TempDir::new().unwrap();
     let b_dir = TempDir::new().unwrap();
     let app_a = app_in(&a_dir, relay);

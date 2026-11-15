@@ -84,7 +84,7 @@ See [docs/mobile.md](docs/mobile.md).
 
 ### From source
 
-Requires Rust 1.88 or newer. The repository selects the stable toolchain;
+Requires Rust 1.95 or newer. The repository selects the stable toolchain;
 run `rustup update stable` before building if your installed version is older.
 
 ```bash
@@ -226,6 +226,10 @@ clipsync room create
 See [docs/security.md](docs/security.md) and [docs/protocol.md](docs/protocol.md).
 
 ## Self-hosted relay
+
+The Compose example explicitly enables HTTP on host loopback for local use.
+The relay otherwise requires TLS certificate/key files at startup; see the
+self-hosting guide for direct HTTPS/WSS and production proxy deployment.
 
 ```bash
 docker compose up

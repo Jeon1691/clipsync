@@ -19,6 +19,7 @@ clipsync-core.workspace = true
 clipsync-daemon.workspace = true
 clipsync-storage.workspace = true
 eframe.workspace = true
+winit.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]

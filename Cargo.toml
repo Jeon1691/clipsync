@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 [workspace]
 resolver = "2"
+exclude = ["vendor/*"]
 members = [
     "crates/clipsync-protocol",
     "crates/clipsync-crypto",
@@ -18,9 +19,9 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.18"
+version = "0.2.0"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.95"
 license = "MIT"
 authors = ["ClipSync contributors"]
 repository = "https://github.com/Jeon1691/clipsync"
@@ -37,7 +38,15 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 clap = { version = "4.5", features = ["derive", "env"] }
 dashmap = "6"
 directories = "6"
-eframe = "0.32.3"
+# Keep both graphics backends and native accessibility. Select the existing
+# Crossfont title renderer below instead of winit's default ab_glyph renderer.
+eframe = { version = "0.37", default-features = false, features = [
+    "accesskit", "clipboard", "default_fonts", "glow", "links",
+    "wayland", "web_screen_reader", "wgpu", "x11",
+] }
+winit = { version = "0.30.13", default-features = false, features = [
+    "rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-crossfont",
+] }
 futures-util = "0.3"
 hex = "0.4"
 hkdf = "0.12"
@@ -78,7 +87,7 @@ tower-http = { version = "0.6", features = ["trace", "limit", "timeout"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 ulid = { version = "1", features = ["serde"] }
-uniffi = "0.29"
+uniffi = "0.32.2"
 url = "2"
 which = "7"
 x25519-dalek = { version = "2", features = ["static_secrets", "getrandom", "zeroize"] }
@@ -101,3 +110,15 @@ panic = "abort"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage,coverage_nightly)'] }
+
+# Compatibility patches are source distributions with documented local maintenance.
+# See vendor/README.md for upstream provenance, exact scope and retirement criteria.
+[patch.crates-io]
+askama_derive = { path = "vendor/askama_derive" }
+uniffi_internal_macros = { path = "vendor/uniffi_internal_macros" }
+accesskit_unix = { path = "vendor/accesskit_unix" }
+accesskit_atspi_common = { path = "vendor/accesskit_atspi_common" }
+atspi-common = { path = "vendor/atspi-common" }
+atspi-proxies = { path = "vendor/atspi-proxies" }
+zbus-lockstep = { path = "vendor/zbus-lockstep" }
+zbus-lockstep-macros = { path = "vendor/zbus-lockstep-macros" }
