@@ -5,7 +5,7 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile
-    image: clipsync-relay:latest
+    image: "${CLIPSYNC_RELAY_IMAGE:-clipsync-relay:local}"
     container_name: clipsync-relay
     restart: unless-stopped
     ports:
@@ -15,6 +15,9 @@ services:
     environment:
       CLIPSYNC_RELAY_BIND: 0.0.0.0:7600
       CLIPSYNC_RELAY_PUBLIC_URL: https://clipsync.develicit.dev
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     logging:
       driver: json-file
       options:
