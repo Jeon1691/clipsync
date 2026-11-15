@@ -1,0 +1,212 @@
+# Copyright the ClipSync contributors.
+# SPDX-License-Identifier: MIT
+name: container
+
+on:
+  push:
+    tags: ['v*.*.*']
+  release:
+    types: [published]
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - '**/Cargo.toml'
+      - Cargo.lock
+      - 'crates/**'
+      - 'vendor/**'
+      - scripts/smoke-relay-container.sh
+      - .github/workflows/container.yml
+      - scripts/verify-release-source.sh
+      - scripts/tests/test_release_source.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/jeon1691/clipsync-relay
+
+jobs:
+  build:
+    name: Relay image (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            os: ubuntu-24.04
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          version: v0.39.0
+          driver-opts: image=moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb
+          buildkitd-flags: --debug
+      - name: Build native relay image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          tags: clipsync-relay:${{ matrix.arch }}
+          # Docker archive transport does not retain BuildKit attestations. The
+          # publication job signs provenance for the complete published index.
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+      - name: Smoke test the runtime image
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: bash scripts/smoke-relay-container.sh "clipsync-relay:${ARCH}"
+      - name: Export the tested image
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p dist
+          docker save "clipsync-relay:${ARCH}" --output "dist/relay-${ARCH}.tar"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: relay-image-${{ matrix.arch }}
+          path: dist/relay-*.tar
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    if: (github.event_name == 'push' || github.event_name == 'release') && github.repository == 'Jeon1691/clipsync'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Require a genuine published version release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          # A release created by release.yml's GITHUB_TOKEN does not generate a
+          # release event for another workflow. On tag pushes, wait for that
+          # workflow to publish the actual release before writing any packages.
+          for attempt in {1..30}; do
+            if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" \
+              --jq 'select(.draft == false) | .tag_name' > release-tag.txt 2>/dev/null &&
+              [[ "$(cat release-tag.txt)" == "$GITHUB_REF_NAME" ]]; then
+              exit 0
+            fi
+            sleep 30
+          done
+          echo 'No published release exists; no container will be published.' >&2
+          exit 1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: relay-image-*
+          merge-multiple: true
+          path: dist
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          version: v0.39.0
+          driver-opts: image=moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb
+          buildkitd-flags: --debug
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Revalidate the published tag and default-branch ancestry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/verify-release-source.sh
+      - name: Upload the tested architecture images and candidate OCI index
+        id: image
+        run: |
+          set -euo pipefail
+          # Version tags are immutable. Do not silently replace an existing
+          # release image with a subsequent rebuild.
+          if docker buildx imagetools inspect "${IMAGE}:${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo 'This container version already exists; refusing to replace it.' >&2
+            exit 1
+          fi
+          references=()
+          for arch in amd64 arm64; do
+            docker load --input "dist/relay-${arch}.tar"
+            tag="${IMAGE}:${GITHUB_REF_NAME}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${arch}"
+            docker tag "clipsync-relay:${arch}" "$tag"
+            docker push "$tag"
+            digest="$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            references+=("${IMAGE}@${digest}")
+          done
+          candidate="${IMAGE}:candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker buildx imagetools create --tag "$candidate" "${references[@]}"
+          digest="$(docker buildx imagetools inspect "$candidate" --format '{{.Manifest.Digest}}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Sign OCI build provenance
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: true
+      - name: Verify signed index provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          cp "$BUNDLE" dist/relay-index.sigstore.json
+          gh attestation verify "oci://${IMAGE}@${DIGEST}" \
+            --bundle dist/relay-index.sigstore.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/container.yml" \
+            --source-ref "$GITHUB_REF" \
+            --source-digest "$GITHUB_SHA" \
+            --deny-self-hosted-runners
+      - name: Revalidate source immediately before version promotion
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/verify-release-source.sh
+      - name: Publish the verified index as the immutable version
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if docker buildx imagetools inspect "${IMAGE}:${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo 'This container version already exists; refusing to replace it.' >&2
+            exit 1
+          fi
+          docker buildx imagetools create --prefer-index=false \
+            --tag "${IMAGE}:${GITHUB_REF_NAME}" "${IMAGE}@${DIGEST}"
+          published="$(docker buildx imagetools inspect "${IMAGE}:${GITHUB_REF_NAME}" --format '{{.Manifest.Digest}}')"
+          [[ "$published" == "$DIGEST" ]]
+          echo "Published verified ${IMAGE}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && steps.attest.outcome == 'success'
+        with:
+          name: relay-container-provenance
+          path: dist/relay-index.sigstore.json
+          if-no-files-found: error
+          retention-days: 90

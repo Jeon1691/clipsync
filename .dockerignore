@@ -3,6 +3,9 @@ target
 .git
 .omc
 tmp
-**/.env
+**/.env*
 **/*.secret
 deploy/proxmox/.env
+
+**/*.pem
+**/*.key
