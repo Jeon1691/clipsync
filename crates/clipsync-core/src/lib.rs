@@ -561,3 +561,8 @@ mod regression_tests {
         });
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../tests/support/facade_behavior.rs"]
+mod facade_behavior;
