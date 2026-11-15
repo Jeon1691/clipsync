@@ -159,7 +159,7 @@ jobs:
       - name: Run verified Linux binary without desktop or DBus libraries
         run: |
           set -euo pipefail
-          bin="$(realpath dist/clipsync-x86_64-unknown-linux-gnu/clipsync)"
+          bin="$(realpath clipsync-x86_64-unknown-linux-gnu/clipsync)"
           docker run --rm --platform linux/amd64 \
             --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges \

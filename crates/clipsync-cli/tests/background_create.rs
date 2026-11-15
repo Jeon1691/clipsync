@@ -79,6 +79,7 @@ async fn foreground_offer_is_flushed_before_a_peer_joins() {
     let home = TempDir::new().unwrap();
     let mut child = tokio::process::Command::new(bin())
         .args(["--json", "room", "create", "--foreground", "--no-auto-sync"])
+        .env("RUST_LOG", "error")
         .env("CLIPSYNC_HOME", home.path())
         .env("CLIPSYNC_RELAY_URL", &relay)
         .env("CLIPSYNC_NO_DAEMON", "1")
