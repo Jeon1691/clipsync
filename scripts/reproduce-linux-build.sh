@@ -19,8 +19,9 @@ cleanup() {
 }
 trap cleanup EXIT
 git -C "$repro_repo" bundle create "$repro_temporary/source.bundle" HEAD
-git -C "$repro_repo" show HEAD:Dockerfile.reproducible > "$repro_temporary/Dockerfile"
-git -C "$repro_repo" rev-parse HEAD > "$repro_report/source-commit.txt"
+git clone --quiet "$repro_temporary/source.bundle" "$repro_temporary/source"
+git -C "$repro_temporary/source" show HEAD:Dockerfile.reproducible > "$repro_temporary/Dockerfile"
+git -C "$repro_temporary/source" rev-parse HEAD > "$repro_report/source-commit.txt"
 cp "$repro_temporary/Dockerfile" "$repro_report/Dockerfile.reproducible"
 docker version > "$repro_report/docker-version.txt"
 for repro_build in first second; do

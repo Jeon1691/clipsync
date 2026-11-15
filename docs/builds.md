@@ -45,38 +45,44 @@ clipboard history, inbox files, backups or private application data.
 
 ## Repeatability and reproducibility
 
-The [Linux repeatability workflow](../.github/workflows/reproducible.yml) runs
-[the comparison script](../scripts/check-repeatable-build.sh) in a digest-pinned
-builder with Rust 1.100.0. It builds all workspace executables and mobile shared/
-static libraries twice in separate fresh source and target directories, retains
-environment/package versions and hashes, and fails on differing bytes. It shares
-downloaded registry sources, not compiled objects. This is a scoped Linux check;
-native packages are recorded rather than pinned, and it does not verify
-distributed archive metadata or all release platforms. The first [successful run](https://github.com/Jeon1691/clipsync/actions/runs/43686133672)
-compared all six outputs byte-for-byte identical: CLI, desktop, relay, bindgen,
-mobile shared library and static library. This establishes project-controlled
-Linux repeatability (Silver). It does not yet establish Gold independent
-reconstruction: the native package set is recorded but not frozen and recreated
-from the instructions by a clean external environment.
+The [Linux reproducibility workflow](../.github/workflows/reproducible.yml)
+reconstructs two environments independently from
+[Dockerfile.reproducible](../Dockerfile.reproducible). The base image is pinned
+by digest, Debian native packages resolve against authenticated dated snapshots,
+and the Rust toolchain is the numbered 1.100.0 release. BuildKit layer caches are
+disabled for each reconstruction. This freezes the native dependency closure as
+well as the Cargo lockfile, addressing the earlier check's moving apt repository.
+Snapshot metadata expiry is disabled deliberately; Debian archive signature and
+package checksum verification remain enabled.
 
-Release provenance and `Cargo.lock` establish origin and dependency integrity;
-they do not prove bit-for-bit repeatability. Current release archives do not yet have a verified independent
-reproducible-build procedure. Archive timestamps and native signing add further
-packaging considerations. Silver `build_repeatable` is supported by the Linux
-result above; Gold `build_reproducible` remains unmet pending a sufficiently
-specified and independently reconstructable build environment. The official
-criteria do not require every platform/archive to be verified before a scoped
-build claim, and this document does not invent that stronger requirement.
+To reproduce a chosen committed checkout on a Docker host:
 
-For future verification, record the exact source commit, rustc/linker versions,
-target, container/SDK digest and dependency checksums. Set a fixed
-`SOURCE_DATE_EPOCH`, normalize absolute source paths with `--remap-path-prefix`,
-and normalize archive ordering, timestamps, ownership and compression. Build
-twice in fresh directories without reusing produced object files and compare
-hashes of every distributed artifact. A fresh independently provisioned environment must be sufficiently specified
-to repeat the procedure; an outside participant can provide further corroboration.
-Publish logs, hashes and any target-specific exceptions; a
-successful cached rebuild alone is insufficient.
+```sh
+git checkout --detach <source-commit>
+bash scripts/reproduce-linux-build.sh target/reproducibility-report
+```
+
+The wrapper exports committed source in a Git bundle, without local settings or
+uncommitted changes. It builds the CLI, desktop, relay, bindgen, and mobile shared
+and static libraries in each freshly created environment, using separate source,
+Cargo and target directories. No downloaded Cargo sources or compiled objects
+are shared between the two runs. Compilation uses `--locked --offline` after
+fetching checksummed sources, a fixed source timestamp, normalized source paths,
+and disabled compiler caches. Native package manifests and all six output hashes
+must match. Reports retain the source commit, complete builder recipe, image
+metadata, native package versions, toolchain/linker versions, fetch/build logs,
+hashes and comparison result. A failure does not constitute reproducibility
+evidence. The source and recipe identify a fixed native platform; comparing
+different CPU architectures is outside this procedure's scope.
+
+The first [repeatability run](https://github.com/Jeon1691/clipsync/actions/runs/43686133672)
+already compared all six Linux outputs byte-for-byte in one environment. The
+stronger dual-environment workflow now verifies reconstruction from the frozen
+recipe; a successful run is required before claiming Gold `build_reproducible`.
+An outside participant can run the same instructions for additional corroboration.
+Release provenance establishes origin and integrity, not reproducibility.
+Distributed archive timestamps, macOS signing and Windows packaging remain
+outside this Linux output claim.
 
 ## Source-tag signatures
 
