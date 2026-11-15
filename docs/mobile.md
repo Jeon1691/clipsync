@@ -3,6 +3,9 @@
 The mobile clients are **separate repositories**. They share this repo’s E2EE
 protocol through `crates/clipsync-mobile` (UniFFI).
 
+See the [mobile API reference](interfaces.md#mobile-uniffi-api) for exported
+methods, return records, errors, clipboard callbacks, and lifecycle constraints.
+
 | App | Repository |
 | --- | --- |
 | iOS (SwiftUI) | [Jeon1691/clipsync-ios](https://github.com/Jeon1691/clipsync-ios) |

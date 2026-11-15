@@ -10,11 +10,11 @@ it is not a simple average of the checks.
 | Check | Score | Next action |
 | --- | --- | --- |
 | Signed-Releases | 0 | Publish and verify signed attestation bundles with future release archives. |
-| Branch-Protection | 4 | Add an independent reviewer before requiring approvals or last-push approval; then evaluate administrator bypass and stale-review dismissal. |
+| Branch-Protection | 4 | Administrator bypass has been removed; require CI and security results. Independent review remains a prerequisite for approval requirements. |
 | Vulnerabilities | 4 | Track the six upstream maintenance advisories in [security-alerts.md](security-alerts.md). Native audits currently report no patched-version vulnerabilities. |
 | Code-Review | 0 | Merge real changes after independent human review and approval; recent commit history currently contains no qualifying approvals. |
 | Maintained | 0 | The repository is younger than 90 days. Recheck after 2026-12-15 while continuing normal development and issue triage. |
-| CII-Best-Practices | 0 | The maintainer must register and complete an accurate [OpenSSF Best Practices assessment](https://www.bestpractices.dev/). |
+| CII-Best-Practices | 0 | Complete the prepared [evidence worksheet](best-practices-assessment.md), then register and submit accurate answers through the maintainer's account. |
 | Contributors | 0 | Reflects actual contributor/organization history. Broader contributions must be genuine; changing profile metadata is not a security improvement. |
 | Packaging | Not scored | GitHub Release archives and the Homebrew tap exist, but Scorecard does not detect a supported package-publishing workflow. This inconclusive result is excluded from the current total. |
 
@@ -47,18 +47,26 @@ replace cryptographic verification.
 
 ## Review and branch policy
 
-At the baseline, only `Jeon1691` is a repository collaborator. The current
-ruleset prevents force pushes/deletion and requires PRs, resolved threads,
-up-to-date branches, and the Linux/macOS/Windows CI checks. One maintainer
+The maintainer confirmed on 2026-11-15 that this is a solo project. The active
+[Protect master ruleset](https://github.com/Jeon1691/clipsync/rules/27029148)
+prevents force pushes/deletion and requires PRs, resolved threads,
+up-to-date branches, and the Linux/macOS/Windows CI checks. It now also requires
+the dependency audit, protocol fuzzing, and CodeQL result. Required results are
+bound to the GitHub App that actually produces them. CodeQL merge protection
+blocks security findings at medium severity or higher and code findings at error
+severity. Administrator bypass has been removed and stale approvals are
+dismissed on new commits. One maintainer
 cannot independently approve their own PR. Requiring an approver without
 first adding a trusted reviewer would block the current contribution flow.
 
 After an independent reviewer is available, consider requiring at least one
-approval, dismissing stale approvals, requiring approval of the latest push,
-and removing administrative bypass. Two independent approvals and enforced
-CODEOWNERS review are further steps for a larger team. Require the security
-audit, fuzz, minimum-Rust, and CodeQL checks once their operation is established.
-These settings change who can merge and are not changed by this patch.
+approval and approval of the latest push. Two independent approvals and enforced
+CODEOWNERS review are further steps for a larger team. The minimum-Rust check
+will be made required after its stable check name has passed on this branch.
+The settings above were applied through the repository rules API; they are
+external configuration, not automatically deployed by merging this document.
+Scorecard's review-dependent scoring tiers can keep Branch-Protection at 4 even
+after these useful controls are enabled.
 
 Code-Review is based on recent history, so a policy change alone will not erase
 the current 0/25 approved-changeset measurement. Use normal reviewed development;
@@ -72,7 +80,10 @@ or reducing audit coverage would hide the exposure rather than fix it. Prefer
 tested upstream migrations that keep supported platforms and the declared
 minimum Rust version consistent.
 
-The Best Practices badge is a separate project self-assessment. Existing
+The Best Practices badge is a separate project self-assessment. The
+[contribution guide](../CONTRIBUTING.md) and
+[criterion-by-criterion worksheet](best-practices-assessment.md) provide a
+prepared registration record, evidence, and concrete gaps. Existing
 security policy, CI, tests, fuzzing, dependency updates, and release verification
 provide evidence, but the maintainer must confirm that each requirement is met.
 Adding an unearned badge image does not satisfy the assessment.

@@ -1,5 +1,8 @@
 # ClipSync protocol v1
 
+See the [public interface reference](interfaces.md) for CLI inputs/outputs,
+HTTP request/response and error schemas, WebSocket fields, and mobile bindings.
+
 ## Limits
 
 | Item | Limit |
