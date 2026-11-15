@@ -348,6 +348,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), async {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let (consumed_tx, consumed_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
@@ -395,6 +396,10 @@ mod tests {
                 ))
                 .await
                 .unwrap();
+            // Keep the peer alive until the consumer has observed both frames.
+            // The connection emits an immediate heartbeat, so closing earlier
+            // can legitimately reset TCP before its receive task drains them.
+            consumed_rx.await.unwrap();
             socket.send(Message::Close(None)).await.unwrap();
         });
         let mut connection = RelayConnection::connect(&format!("ws://{address}/v1/ws"))
@@ -412,6 +417,7 @@ mod tests {
         assert!(
             matches!(second, Incoming::Control(ControlMessage::PeerLeft { device_id }) if device_id.as_str() == "fixture")
         );
+        consumed_tx.send(()).unwrap();
         assert!(
             tokio::time::timeout(Duration::from_secs(5), connection.incoming.recv())
                 .await
