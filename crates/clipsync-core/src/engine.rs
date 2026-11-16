@@ -943,17 +943,20 @@ async fn apply_hello_ok(
     };
     handle.peer_online.store(*peer_online, Ordering::Relaxed);
     if let Some(q) = queued_text {
-        if let Ok(item) = inbound.text(&q.routing, &q.nonce, &q.ciphertext) {
-            apply_remote(
-                clipboard,
-                guard,
-                handle,
-                notifier,
-                q.routing.message_id.as_str(),
-                item,
-                last_sig,
-            )
-            .await;
+        match inbound.text(&q.routing, &q.nonce, &q.ciphertext) {
+            Ok(item) => {
+                apply_remote(
+                    clipboard,
+                    guard,
+                    handle,
+                    notifier,
+                    q.routing.message_id.as_str(),
+                    item,
+                    last_sig,
+                )
+                .await;
+            }
+            Err(e) => warn!(error = %e, "queued text envelope rejected"),
         }
     }
     if *peer_online {

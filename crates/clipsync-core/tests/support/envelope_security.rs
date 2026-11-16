@@ -439,6 +439,22 @@ fn legacy_envelopes_are_accepted_until_the_sender_upgrades_then_refused_across_r
     // An updated receiver keeps working with a not-yet-updated sender.
     admit_text(&peer, &legacy(true), "legacy one").unwrap();
     admit_text(&peer, &legacy(true), "legacy after peer restart").unwrap();
+    // A released sender whose clock runs ahead keeps syncing, as before v2:
+    // a relay can rewrite a v1 `sent_at` anyway, so "sent in the future" adds
+    // nothing there. The same header under v2 is refused.
+    let mut ahead = legacy(true);
+    ahead.sent_at += ChronoDuration::seconds(CLOCK_SKEW_SECS + 60);
+    ahead.expires_at = ahead.sent_at + ChronoDuration::seconds(60);
+    admit_text(&peer, &ahead, "legacy sender clock ahead").unwrap();
+    let ahead_v2 = RoutingHeader {
+        version: ENVELOPE_VERSION_AUTHENTICATED,
+        message_id: MessageId::new(),
+        ..ahead
+    };
+    assert_eq!(
+        rejection(admit_text(&peer, &ahead_v2, "v2 sender clock ahead")),
+        EnvelopeRejection::NotYetValid
+    );
     // Header checks still apply to legacy envelopes.
     let mut expired = legacy(false);
     expired.expires_at = Utc::now() - ChronoDuration::minutes(10);

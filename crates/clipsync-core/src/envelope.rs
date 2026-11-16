@@ -39,9 +39,15 @@ pub enum EnvelopeRejection {
     UnknownSender,
     #[error("envelope item kind does not match its frame")]
     WrongItemKind,
-    #[error("envelope expired")]
+    #[error(
+        "envelope expired; if this repeats for fresh items, set both devices' clocks to automatic time (tolerance {skew} s)",
+        skew = CLOCK_SKEW_SECS
+    )]
     Expired,
-    #[error("envelope sent in the future")]
+    #[error(
+        "envelope sent in the future; the sender's clock is more than {skew} s ahead, set both devices' clocks to automatic time",
+        skew = CLOCK_SKEW_SECS
+    )]
     NotYetValid,
     #[error("envelope lifetime exceeds the protocol maximum")]
     LifetimeTooLong,
@@ -177,7 +183,10 @@ pub(crate) fn check_header(
         return Err(EnvelopeRejection::WrongItemKind);
     }
     let skew = Duration::seconds(CLOCK_SKEW_SECS);
-    if routing.sent_at > now + skew {
+    // Only v2 binds `sent_at`. For v1 a relay can rewrite it, so refusing an
+    // early v1 adds nothing and would stop released peers whose clock runs
+    // ahead, which synced before v2 existed. Expiry stays for both versions.
+    if routing.version == ENVELOPE_VERSION_AUTHENTICATED && routing.sent_at > now + skew {
         return Err(EnvelopeRejection::NotYetValid);
     }
     if routing.expires_at + skew < now {

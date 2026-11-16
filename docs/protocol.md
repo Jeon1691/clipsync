@@ -84,8 +84,9 @@ Every text envelope and manifest, of either version, is rejected unless:
 4. `sender_device_id` is a pinned peer of the room and not the receiver;
 5. `item_kind` is `text` for a text envelope, and a decrypted manifest
    describes the same `item_kind` as its header;
-6. `sent_at` is at most `CLOCK_SKEW_SECS` (30 s) in the future, `expires_at`
-   at most 30 s in the past, and `expires_at - sent_at` at most 300 s;
+6. `expires_at` is at most `CLOCK_SKEW_SECS` (30 s) in the past and
+   `expires_at - sent_at` is at most 300 s; for v2, `sent_at` is also at most
+   30 s in the future (not checked for v1, see [Clocks](#clocks));
 7. a v1 envelope does not come from a sender that has already delivered a v2
    envelope to this device (downgrade), and the receiver does not run with
    `sync.strict_envelopes`;
@@ -98,13 +99,33 @@ Every text envelope and manifest, of either version, is rejected unless:
 For v2, AEAD authenticates every value checks 1–6 read. For v1 the same checks
 run on values a relay can rewrite, and step 9 does not apply.
 
+Rejections are logged as warnings; the expiry and future-`sent_at` messages
+name the clock tolerance and say to set both devices to automatic time.
+
+### Clocks
+
+v2 requires the sender's and receiver's wall clocks to agree within
+`CLOCK_SKEW_SECS` (30 s). A v2 envelope whose `sent_at` is more than 30 s ahead
+of the receiver's clock is rejected, and so is one received more than 30 s
+after `expires_at`, so a receiver clock more than the TTL plus 30 s ahead of
+the sender's (90 s with the default `sync.ttl_secs` of 60) also drops fresh
+envelopes. Devices that use automatic (NTP) time are far inside this margin.
+
+For v1 the future-`sent_at` check is skipped. The relay can rewrite a v1
+`sent_at`, so the check would add no protection, and it would stop a released
+peer whose clock runs ahead, which synced before v2. The expiry check still
+applies to v1: a receiver whose clock is more than the TTL plus 30 s ahead of
+a released sender's drops that sender's envelopes. Released clients did not
+check expiry, so this is new for such pairs; it bounds how long a relay can
+hold a v1 envelope as long as it leaves `expires_at` unchanged.
+
 ### Sequence numbers and replay state
 
 Senders use `seq = max(last_sent + 1, current Unix time in microseconds)` per
 room and store it before sending. Numbers therefore keep increasing across
 restarts, a clock stepping back, a deleted state file, and a daemon and one-shot
-push sending at once. Receivers store, per room and sender, the highest accepted
-v2 `seq` and whether the sender has used v2. The same per-peer entry records
+`push` sending at once. Receivers store, per room and sender, the highest
+accepted v2 `seq` and whether the sender has used v2. The same per-peer entry records
 whether the peer advertised v2 in its Noise handshake (send side only, see
 below).
 
@@ -116,9 +137,22 @@ envelope is accepted. It also forgets which peers accept v2, so the device
 sends v1 again until the next handshake; a peer that already locked this
 device to v2 drops those envelopes as a downgrade meanwhile.
 
+The daemon and one-shot processes use the same file: `push` of an image or
+files, `push` of text when the daemon is not reachable, and `pull` when the
+daemon is not reachable or has nothing to return. Every change is a
+load-modify-save under an exclusive advisory lock on `replay-state.lock` in the
+same directory (`flock` on Unix, `LockFileEx` on Windows; created `0600`). One
+process therefore cannot overwrite another's update; without the lock, a
+concurrent save could roll back a `highest_seq` and let a replay through, or
+clear a sender's v2 flag and re-open the v1 downgrade. The OS releases the lock
+if a process dies. Readers take no lock, because every save atomically
+replaces the whole file. If the file system does not support the lock, the
+change fails with an error, as for an unreadable file.
+
 Because acceptance is strictly increasing, an older item that arrives after a
 newer one from the same sender is dropped. One relay connection delivers in
-order; this can affect two processes of one device sending concurrently.
+order; this can affect two processes of one device sending concurrently, whose
+`seq` reservations and relay sends can interleave.
 
 ### Transition from v1
 
@@ -128,9 +162,10 @@ staggered upgrade.
 - **Receive.** Updated receivers always accept v2. They accept v1 from a sender
   only until they accept a v2 envelope from that sender. That state is stored,
   so later v1 envelopes from the sender are rejected as a downgrade, including
-  after a restart. v1 envelopes still get checks 1–6 on unauthenticated values
-  and only the in-memory message-ID cache (120 s) against replay: legacy senders
-  restart `seq` at 1 every session.
+  after a restart. v1 envelopes still get checks 1–6 (without the
+  future-`sent_at` check) on unauthenticated values and only the in-memory
+  message-ID cache (120 s) against replay: legacy senders restart `seq` at 1
+  every session.
 - **Send.** An updated device sends v1 to a peer until it has positive evidence
   that the peer opens v2, then v2 to that peer for good. Evidence is either
   1. a v2 envelope from that peer that this device accepted, or
@@ -153,6 +188,10 @@ staggered upgrade.
   rejected: an updated receiver would apply the item twice or, once the sender
   is locked to v2, log the v1 copy as a downgrade, and every transfer would
   cost twice the bandwidth.
+- **Clocks.** Updated and released devices need no configuration, but the
+  expiry check is new for v1: a pair keeps syncing only while the receiver's
+  clock is no more than the TTL plus 30 s (90 s by default) ahead of the
+  sender's (see [Clocks](#clocks)). Once on v2, both clocks must agree within 30 s.
 - **Released clients** cannot decrypt v2 and never advertise it: they send an
   empty handshake payload and ignore the payload they receive (they read it
   into a 1024-byte buffer, `LEGACY_HANDSHAKE_PAYLOAD_MAX_BYTES`; the
