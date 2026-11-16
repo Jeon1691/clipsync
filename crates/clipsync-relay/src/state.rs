@@ -1,8 +1,9 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -17,7 +18,51 @@ use clipsync_protocol::{
 };
 
 use crate::auth::issue_token;
+use crate::client_ip::TrustedProxies;
 use crate::{JoinError, RelayConfig, WsOut};
+
+// Failed pairing joins are limited per client and relay-wide. The relay-wide
+// budget is what bounds guessing: with `PAIRING_TTL_SECS`-long fixed windows,
+// a pairing code's lifetime overlaps at most two windows, so at most
+// 2 * GLOBAL_FAILED_JOIN_LIMIT = 40 wrong codes are evaluated while any code
+// is live, however many addresses the attacker uses. Codes are uniform over
+// 10^6 values, so one session is guessed with probability <= 40 / 10^6 =
+// 4e-5 (4e-5 * S with S sessions open at once). This is below the 1e-4
+// implied by NIST SP 800-63B's ceiling of 100 failed attempts against a
+// 6-digit authenticator.
+
+/// Failed joins one client may make per window: enough to retype a mistyped
+/// code a few times, while one address alone tests at most 10 of 10^6 codes.
+pub(crate) const IP_FAILED_JOIN_LIMIT: u32 = 10;
+/// Per-client window; longer than a pairing session so a code cannot outlive
+/// one client's budget, short enough that a mistyping user is not locked out
+/// for long.
+const IP_FAILED_JOIN_WINDOW: Duration = Duration::from_secs(15 * 60);
+/// Relay-wide failed joins per window; see the bound above. A self-hosted relay
+/// rarely sees more than a handful of mistyped codes per pairing window.
+const GLOBAL_FAILED_JOIN_LIMIT: u32 = 20;
+/// One pairing TTL, so the per-session bound above holds if the TTL changes.
+const GLOBAL_FAILED_JOIN_WINDOW: Duration = Duration::from_secs(PAIRING_TTL_SECS);
+/// IPv6 sites are normally delegated at least a /64, so one client controls
+/// every address in it; count them as one client.
+const IPV6_CLIENT_PREFIX_LEN: u32 = 64;
+/// Values a pairing code can take: six decimal digits (see `alloc_code`).
+const PAIRING_CODE_SPACE: u64 = 1_000_000;
+/// Largest acceptable guessing success per session, as 1 in this many (1e-4).
+const NEGLIGIBLE_GUESS_ODDS: u64 = 10_000;
+/// Fixed windows per pairing lifetime in the worst case (see the bound above).
+const WINDOWS_PER_PAIRING_LIFETIME: u64 = 2;
+
+// Keep the bound above true if any of these values change.
+const _: () = {
+    assert!(GLOBAL_FAILED_JOIN_WINDOW.as_secs() >= PAIRING_TTL_SECS);
+    assert!(IP_FAILED_JOIN_WINDOW.as_secs() >= PAIRING_TTL_SECS);
+    assert!(IP_FAILED_JOIN_LIMIT < GLOBAL_FAILED_JOIN_LIMIT);
+    assert!(
+        WINDOWS_PER_PAIRING_LIFETIME * GLOBAL_FAILED_JOIN_LIMIT as u64 * NEGLIGIBLE_GUESS_ODDS
+            <= PAIRING_CODE_SPACE
+    );
+};
 
 pub struct RelayState {
     pub config: RelayConfig,
@@ -26,7 +71,11 @@ pub struct RelayState {
     rooms: DashMap<String, Room>,
     pub connections: DashMap<String, mpsc::Sender<WsOut>>,
     queue: DashMap<String, (QueuedEnvelope, DateTime<Utc>)>,
+    /// Failed joins per client key (see `rate_limit_key`): count and window start.
     ip_fails: DashMap<IpAddr, (u32, Instant)>,
+    /// Relay-wide failed joins: count and window start.
+    global_join_fails: Mutex<(u32, Instant)>,
+    trusted_proxies: TrustedProxies,
     pub connections_total: AtomicU64,
     pub frames_forwarded: AtomicU64,
     pub pairing_ok: AtomicU64,
@@ -63,8 +112,31 @@ pub struct DeviceEntry {
     pub revoked: bool,
 }
 
+/// Join attempt counted before the code lookup and refunded if the join succeeds.
+struct JoinReservation {
+    key: IpAddr,
+    ip_window: Instant,
+    global_window: Instant,
+}
+
+/// Rate-limit key for a client address: IPv4 as is, IPv6 by its /64 prefix.
+fn rate_limit_key(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) => {
+            let mask = u128::MAX << (u128::BITS - IPV6_CLIENT_PREFIX_LEN);
+            IpAddr::V6(Ipv6Addr::from(u128::from(v6) & mask))
+        }
+        v4 => v4,
+    }
+}
+
 impl RelayState {
     pub fn new(config: RelayConfig) -> Self {
+        Self::with_trusted_proxies(config, Vec::new())
+    }
+
+    /// Like [`RelayState::new`], also honoring `X-Forwarded-For` from `trusted_proxies`.
+    pub fn with_trusted_proxies(config: RelayConfig, trusted_proxies: Vec<ipnet::IpNet>) -> Self {
         Self {
             config,
             pairing_by_code: DashMap::new(),
@@ -73,6 +145,8 @@ impl RelayState {
             connections: DashMap::new(),
             queue: DashMap::new(),
             ip_fails: DashMap::new(),
+            global_join_fails: Mutex::new((0, Instant::now())),
+            trusted_proxies: TrustedProxies::new(trusted_proxies),
             connections_total: AtomicU64::new(0),
             frames_forwarded: AtomicU64::new(0),
             pairing_ok: AtomicU64::new(0),
@@ -148,12 +222,34 @@ impl RelayState {
         Err("could not allocate pairing code".into())
     }
 
+    /// Client address for per-client limits of a request received from `peer`.
+    pub fn client_ip(&self, peer: IpAddr, headers: &axum::http::HeaderMap) -> IpAddr {
+        self.trusted_proxies.client_ip(peer, headers)
+    }
+
+    /// Join a pairing session by code. Every failed join, whatever its cause,
+    /// counts against the client and the relay-wide budget; once either is
+    /// exhausted every join is refused with `Attempts`, including one with a
+    /// correct code, so the response never reveals whether a code exists.
     pub fn join_pairing(
         &self,
         req: JoinPairingRequest,
         ip: IpAddr,
     ) -> Result<JoinPairingResponse, JoinError> {
-        self.check_ip(ip)?;
+        let reservation = self.reserve_join_attempt(rate_limit_key(ip))?;
+        let result = self.join_pairing_session(req);
+        if result.is_ok() {
+            self.release_join_attempt(reservation);
+        } else {
+            self.pairing_fail.fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn join_pairing_session(
+        &self,
+        req: JoinPairingRequest,
+    ) -> Result<JoinPairingResponse, JoinError> {
         let mut session = self
             .pairing_by_code
             .get_mut(&req.pairing_code)
@@ -201,22 +297,78 @@ impl RelayState {
         })
     }
 
-    fn check_ip(&self, ip: IpAddr) -> Result<(), JoinError> {
-        let mut entry = self.ip_fails.entry(ip).or_insert((0, Instant::now()));
-        if entry.1.elapsed() > Duration::from_secs(3600) {
-            *entry = (0, Instant::now());
+    /// Count a join attempt before the code is looked up, so concurrent guesses
+    /// cannot overshoot either budget. Refused attempts are not counted.
+    fn reserve_join_attempt(&self, key: IpAddr) -> Result<JoinReservation, JoinError> {
+        let ip_window = {
+            let mut entry = self
+                .ip_fails
+                .entry(key)
+                .or_insert_with(|| (0, Instant::now()));
+            // Read the clock while holding the entry so a reset never
+            // back-dates a window past a concurrent update.
+            let now = Instant::now();
+            if now.duration_since(entry.1) > IP_FAILED_JOIN_WINDOW {
+                *entry = (0, now);
+            }
+            if entry.0 >= IP_FAILED_JOIN_LIMIT {
+                return Err(JoinError::Attempts);
+            }
+            entry.0 += 1;
+            entry.1
+        };
+        let mut global = self
+            .global_join_fails
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let now = Instant::now();
+        if now.duration_since(global.1) > GLOBAL_FAILED_JOIN_WINDOW {
+            *global = (0, now);
         }
-        if entry.0 >= 30 {
+        if global.0 >= GLOBAL_FAILED_JOIN_LIMIT {
+            drop(global);
+            self.release_ip_attempt(key, ip_window);
             return Err(JoinError::Attempts);
         }
-        Ok(())
+        global.0 += 1;
+        Ok(JoinReservation {
+            key,
+            ip_window,
+            global_window: global.1,
+        })
     }
 
-    pub fn record_ip_fail(&self, ip: IpAddr) {
-        self.ip_fails
-            .entry(ip)
-            .and_modify(|e| e.0 += 1)
-            .or_insert((1, Instant::now()));
+    /// Refund a successful join; a refund for an already-reset window is void.
+    fn release_join_attempt(&self, reservation: JoinReservation) {
+        self.release_ip_attempt(reservation.key, reservation.ip_window);
+        let mut global = self
+            .global_join_fails
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if global.1 == reservation.global_window {
+            global.0 = global.0.saturating_sub(1);
+        }
+    }
+
+    fn release_ip_attempt(&self, key: IpAddr, window: Instant) {
+        self.ip_fails.remove_if_mut(&key, |_, entry| {
+            if entry.1 == window {
+                entry.0 = entry.0.saturating_sub(1);
+            }
+            entry.0 == 0
+        });
+    }
+
+    /// Test helper: charge failed joins to one client without the relay-wide budget.
+    #[cfg(test)]
+    pub(crate) fn record_ip_fail(&self, ip: IpAddr) {
+        let now = Instant::now();
+        let mut entry = self.ip_fails.entry(rate_limit_key(ip)).or_insert((0, now));
+        if now.duration_since(entry.1) > IP_FAILED_JOIN_WINDOW {
+            *entry = (0, now);
+        }
+        entry.0 = entry.0.saturating_add(1);
+        drop(entry);
         self.pairing_fail.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -388,6 +540,8 @@ impl RelayState {
         let now = Utc::now();
         self.pairing_by_code
             .retain(|_, s| s.expires_at > now && !s.completed);
+        self.ip_fails
+            .retain(|_, (_, window)| window.elapsed() <= IP_FAILED_JOIN_WINDOW);
         self.queue.retain(|_, (_, exp)| {
             if *exp > now {
                 true

@@ -55,3 +55,22 @@ async fn handshakes_reject_capacity_overflow_and_release_cancelled_permits() {
     drop(pending);
     assert_eq!(acceptor.permits.available_permits(), MAX_HANDSHAKES);
 }
+
+#[test]
+fn trusted_proxies_default_to_none_and_parse_comma_separated_ranges() {
+    #[derive(Parser)]
+    struct Args {
+        #[command(flatten)]
+        transport: RelayTransportConfig,
+    }
+    let parse = |args: &[&str]| {
+        Args::try_parse_from(std::iter::once("clipsync-relay").chain(args.iter().copied()))
+            .map(|args| args.transport.trusted_proxies)
+    };
+    assert!(RelayTransportConfig::default().trusted_proxies.is_empty());
+    assert_eq!(
+        parse(&["--trusted-proxies", "10.0.0.0/8, 127.0.0.1,::1"]).unwrap(),
+        ["10.0.0.0/8", "127.0.0.1/32", "::1/128"].map(|net| net.parse::<ipnet::IpNet>().unwrap())
+    );
+    assert!(parse(&["--trusted-proxies", "10.0.0.0/8,proxy.example"]).is_err());
+}

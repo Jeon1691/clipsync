@@ -32,6 +32,15 @@ pub struct RelayTransportConfig {
     /// Explicitly allow plaintext HTTP behind a TLS proxy or for local development
     #[arg(long, env = "CLIPSYNC_RELAY_ALLOW_HTTP")]
     pub allow_http: bool,
+    /// Comma-separated proxy addresses/CIDRs whose X-Forwarded-For identifies
+    /// clients for pairing limits; unset uses only the TCP peer address
+    #[arg(
+        long,
+        env = "CLIPSYNC_RELAY_TRUSTED_PROXIES",
+        value_delimiter = ',',
+        value_parser = crate::client_ip::parse_trusted_proxy
+    )]
+    pub trusted_proxies: Vec<ipnet::IpNet>,
 }
 
 impl RelayTransportConfig {

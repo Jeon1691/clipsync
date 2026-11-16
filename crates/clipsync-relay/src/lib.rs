@@ -4,6 +4,7 @@
 //! Zero-knowledge ClipSync relay: pairing rendezvous and encrypted frame routing.
 
 mod auth;
+mod client_ip;
 mod state;
 mod transport;
 mod webhook;
@@ -14,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -27,6 +28,8 @@ use clipsync_protocol::{
 };
 
 pub use state::RelayState;
+#[cfg(test)]
+use state::IP_FAILED_JOIN_LIMIT;
 pub use transport::RelayTransportConfig;
 
 #[derive(Clone, Debug)]
@@ -106,7 +109,14 @@ pub async fn serve_with_transport(
     let tls = transport.tls_config(&config.public_url)?;
     let listener = std::net::TcpListener::bind(config.bind)?;
     let addr = listener.local_addr()?;
-    let app = router(config).into_make_service_with_connect_info::<SocketAddr>();
+    if !transport.trusted_proxies.is_empty() {
+        info!(
+            ranges = transport.trusted_proxies.len(),
+            "honoring X-Forwarded-For from trusted proxies for pairing limits"
+        );
+    }
+    let app = router_with_trusted_proxies(config, transport.trusted_proxies.clone())
+        .into_make_service_with_connect_info::<SocketAddr>();
     let server = axum_server::from_tcp(listener)?.first_request_timeout(Duration::from_secs(10));
     if let Some(tls) = tls {
         info!(%addr, "clipsync-relay listening with TLS 1.2/1.3");
@@ -122,7 +132,16 @@ pub async fn serve_with_transport(
 }
 
 pub fn router(config: RelayConfig) -> Router {
-    let state = Arc::new(RelayState::new(config));
+    router_with_trusted_proxies(config, Vec::new())
+}
+
+/// Like [`router`], also honoring `X-Forwarded-For` from `trusted_proxies`
+/// when identifying clients for pairing limits.
+pub fn router_with_trusted_proxies(
+    config: RelayConfig,
+    trusted_proxies: Vec<ipnet::IpNet>,
+) -> Router {
+    let state = Arc::new(RelayState::with_trusted_proxies(config, trusted_proxies));
     let janitor_state = state.clone();
     tokio::spawn(async move {
         loop {
@@ -169,6 +188,7 @@ async fn create_pairing(
 async fn join_pairing(
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
     State(state): State<Arc<RelayState>>,
+    headers: HeaderMap,
     Json(req): Json<JoinPairingRequest>,
 ) -> Result<Json<JoinPairingResponse>, (StatusCode, Json<ErrorBody>)> {
     if req.protocol_version != clipsync_protocol::PROTOCOL_VERSION {
@@ -178,7 +198,8 @@ async fn join_pairing(
             "unsupported protocol version",
         ));
     }
-    match state.join_pairing(req, addr.ip()) {
+    let client = state.client_ip(addr.ip(), &headers);
+    match state.join_pairing(req, client) {
         Ok(resp) => Ok(Json(resp)),
         Err(JoinError::NotFound) => Err(err(
             StatusCode::NOT_FOUND,

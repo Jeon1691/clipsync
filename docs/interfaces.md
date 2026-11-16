@@ -203,7 +203,7 @@ Handler-generated HTTP failures have the JSON shape
 | create / 400 | `pairing_create` | Pairing creation failed, for example code allocation failure. |
 | join / 404 | `code_invalid` | Unknown code, including expired sessions already removed by cleanup. |
 | join / 410 | `code_expired` | Session exists but has expired. |
-| join / 429 | `too_many_attempts` | Pairing attempt limit reached. |
+| join / 429 | `too_many_attempts` | Pairing attempt limit reached: the session's attempts, the client's failed joins, or the relay-wide failed-join budget. Returned even for a correct code once a failure budget is spent. |
 | join / 409 | `busy` | Session already has a joiner or is completed. |
 | join / 400 | `join_failed` | Other join rejection, including using the creator's device ID. |
 

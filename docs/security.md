@@ -17,6 +17,23 @@ SPAKE2 transcript to the protocol version, pairing session ID, and device IDs,
 then exchange HMAC confirmations. Wrong code, mutated transcript, or failed
 confirmation aborts without storing credentials.
 
+The relay limits online guessing of this password. Every failed
+`/v1/pairing/join` counts, whether the code was unknown, expired, busy or
+otherwise rejected. Each client address (IPv6 by /64 prefix) may fail 10 times
+per 15 minutes. The whole relay may fail 20 times per 120-second pairing TTL.
+A code's lifetime overlaps at most two of those relay-wide windows, so an
+attacker with any number of addresses can test at most 40 of the 10^6 codes
+while a session is open. That bounds the chance of guessing one session at
+4 × 10^-5. When either budget is spent, the relay refuses every join, including
+one with the correct code, with `429 too_many_attempts`. This response does not
+reveal whether a code exists. Successful joins are not counted, but they do not
+clear earlier failures. Behind a NAT or proxy, a legitimate user who shares an
+address with a guesser is refused until the window ends. Anyone who can spend
+the relay-wide budget can keep blocking new pairings. This is a deliberate
+trade-off: guessing becomes a denial of service instead of a room compromise.
+Per-client limits use the TCP peer address unless trusted proxies are configured;
+see [self-hosting](self-hosting.md).
+
 The relay generates this password. Pair through a trusted relay: an actively
 malicious operator who knows the password is outside the honest-but-curious
 model and may impersonate a pairing participant. HTTPS/WSS authenticates the

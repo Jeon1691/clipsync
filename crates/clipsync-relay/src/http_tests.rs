@@ -45,6 +45,7 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
     let error = join_pairing(
         ConnectInfo(address),
         State(state.clone()),
+        HeaderMap::new(),
         Json(request.clone()),
     )
     .await
@@ -54,6 +55,7 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
     let error = join_pairing(
         ConnectInfo(address),
         State(state.clone()),
+        HeaderMap::new(),
         Json(request.clone()),
     )
     .await
@@ -66,6 +68,7 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
     let error = join_pairing(
         ConnectInfo(address),
         State(state.clone()),
+        HeaderMap::new(),
         Json(request.clone()),
     )
     .await
@@ -77,6 +80,7 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
     let joined = join_pairing(
         ConnectInfo(address),
         State(state.clone()),
+        HeaderMap::new(),
         Json(request.clone()),
     )
     .await
@@ -85,6 +89,7 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
     let error = join_pairing(
         ConnectInfo(address),
         State(state.clone()),
+        HeaderMap::new(),
         Json(request.clone()),
     )
     .await
@@ -94,9 +99,14 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
     for _ in 0..30 {
         state.record_ip_fail(address.ip());
     }
-    let error = join_pairing(ConnectInfo(address), State(state), Json(request))
-        .await
-        .unwrap_err();
+    let error = join_pairing(
+        ConnectInfo(address),
+        State(state),
+        HeaderMap::new(),
+        Json(request),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(error.0, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(error.1 .0.code, "too_many_attempts");
     assert!(serde_json::to_string(&error.1 .0)
@@ -160,4 +170,230 @@ async fn server_reports_bind_failure_and_serves_health_and_metrics_on_a_local_li
         .any(|line| line == "clipsync_ws_connections 0"));
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
+}
+
+fn join_test_state() -> Arc<RelayState> {
+    Arc::new(RelayState::new(RelayConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        public_url: "http://127.0.0.1".into(),
+        token_secret: vec![33; 32],
+        webhook_url: None,
+        webhook_secret: None,
+    }))
+}
+
+async fn create_offer(state: &Arc<RelayState>) -> CreatePairingResponse {
+    create_pairing(
+        State(state.clone()),
+        Json(CreatePairingRequest {
+            protocol_version: PROTOCOL_VERSION,
+            pairing_session_id: PairingSessionId::new(),
+            device_id: DeviceId::new(),
+            device_name: "owner".into(),
+            os: "test".into(),
+            ttl_secs: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0
+}
+
+fn join_request(code: &str) -> JoinPairingRequest {
+    JoinPairingRequest {
+        protocol_version: PROTOCOL_VERSION,
+        pairing_code: code.into(),
+        device_id: DeviceId::new(),
+        device_name: "joiner".into(),
+        os: "test".into(),
+    }
+}
+
+/// Regression for unbounded pairing-code guessing: a single client sweeping
+/// wrong codes must be throttled, and must not then be able to join with the
+/// correct code.
+#[tokio::test]
+async fn sweeping_wrong_codes_from_one_ip_is_throttled_and_blocks_the_correct_code() {
+    const SWEEP: u32 = 20_000;
+    let state = join_test_state();
+    let offer = create_offer(&state).await;
+    let attacker: SocketAddr = "198.51.100.7:4000".parse().unwrap();
+    let (mut not_found, mut throttled) = (0u32, 0u32);
+    for n in 0..SWEEP {
+        let code = format!("{n:06}");
+        if code == offer.pairing_code {
+            continue;
+        }
+        let error = join_pairing(
+            ConnectInfo(attacker),
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(join_request(&code)),
+        )
+        .await
+        .unwrap_err();
+        match error.0 {
+            StatusCode::NOT_FOUND => not_found += 1,
+            StatusCode::TOO_MANY_REQUESTS => throttled += 1,
+            other => panic!("unexpected status {other}"),
+        }
+    }
+    assert!(throttled > 0, "wrong-code sweep was never throttled");
+    assert!(not_found < 100, "{not_found} guesses were evaluated");
+    let error = join_pairing(
+        ConnectInfo(attacker),
+        State(state.clone()),
+        HeaderMap::new(),
+        Json(join_request(&offer.pairing_code)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.0, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.1 .0.code, "too_many_attempts");
+}
+
+fn forwarded_for(client: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-forwarded-for", client.parse().unwrap());
+    headers
+}
+
+async fn join_status(
+    state: &Arc<RelayState>,
+    peer: SocketAddr,
+    headers: HeaderMap,
+    code: &str,
+) -> StatusCode {
+    match join_pairing(
+        ConnectInfo(peer),
+        State(state.clone()),
+        headers,
+        Json(join_request(code)),
+    )
+    .await
+    {
+        Ok(_) => StatusCode::OK,
+        Err(error) => error.0,
+    }
+}
+
+/// Wrong codes that never collide with `offer`.
+fn wrong_codes(offer: &CreatePairingResponse) -> impl Iterator<Item = String> + '_ {
+    (0..1_000_000u32)
+        .map(|n| format!("{n:06}"))
+        .filter(move |code| *code != offer.pairing_code)
+}
+
+#[tokio::test]
+async fn forwarded_for_is_honored_only_from_configured_trusted_proxies() {
+    let proxy: SocketAddr = "127.0.0.1:4000".parse().unwrap();
+    // Without configuration the header is ignored: a direct client cannot
+    // rotate spoofed addresses, and clients behind a proxy share its budget.
+    // Each run stops at the per-client limit, below the relay-wide budget, so
+    // a header that was wrongly honored would show up as extra 404s.
+    let state = join_test_state();
+    let offer = create_offer(&state).await;
+    let mut not_found = 0;
+    for (n, code) in wrong_codes(&offer).take(50).enumerate() {
+        let spoofed = forwarded_for(&format!("192.0.2.{n}"));
+        match join_status(&state, proxy, spoofed, &code).await {
+            StatusCode::NOT_FOUND => not_found += 1,
+            StatusCode::TOO_MANY_REQUESTS => break,
+            other => panic!("unexpected status {other}"),
+        }
+    }
+    assert_eq!(not_found, IP_FAILED_JOIN_LIMIT);
+    assert_eq!(
+        join_status(
+            &state,
+            proxy,
+            forwarded_for("203.0.113.5"),
+            &offer.pairing_code
+        )
+        .await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+
+    // With the proxy trusted, each forwarded client has its own budget and a
+    // client-forged entry to the left of the proxy's is ignored.
+    let state = Arc::new(RelayState::with_trusted_proxies(
+        RelayConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            public_url: "http://127.0.0.1".into(),
+            token_secret: vec![34; 32],
+            webhook_url: None,
+            webhook_secret: None,
+        },
+        vec!["127.0.0.0/8".parse().unwrap()],
+    ));
+    let offer = create_offer(&state).await;
+    let mut not_found = 0;
+    for (n, code) in wrong_codes(&offer).take(50).enumerate() {
+        let forged = forwarded_for(&format!("192.0.2.{n}, 198.51.100.9"));
+        match join_status(&state, proxy, forged, &code).await {
+            StatusCode::NOT_FOUND => not_found += 1,
+            StatusCode::TOO_MANY_REQUESTS => break,
+            other => panic!("unexpected status {other}"),
+        }
+    }
+    assert_eq!(
+        not_found, IP_FAILED_JOIN_LIMIT,
+        "forged leftmost entries evaded the client limit"
+    );
+    assert_eq!(
+        join_status(
+            &state,
+            proxy,
+            forwarded_for("203.0.113.5"),
+            &offer.pairing_code
+        )
+        .await,
+        StatusCode::OK
+    );
+    // An untrusted peer cannot use the header even when proxies are configured.
+    let direct: SocketAddr = "198.51.100.9:4000".parse().unwrap();
+    assert_eq!(
+        join_status(&state, direct, forwarded_for("203.0.113.6"), "000000").await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn exhausted_relay_wide_budget_answers_unknown_and_correct_codes_identically() {
+    let state = join_test_state();
+    let offer = create_offer(&state).await;
+    let mut refusals = 0;
+    for (n, code) in wrong_codes(&offer).take(1_000).enumerate() {
+        let client: SocketAddr = format!("10.{}.{}.1:4000", n / 256, n % 256)
+            .parse()
+            .unwrap();
+        if join_status(&state, client, HeaderMap::new(), &code).await
+            == StatusCode::TOO_MANY_REQUESTS
+        {
+            refusals += 1;
+        }
+    }
+    assert!(refusals > 0, "distributed guesses were never throttled");
+    let fresh: SocketAddr = "192.0.2.250:4000".parse().unwrap();
+    let unknown = join_pairing(
+        ConnectInfo(fresh),
+        State(state.clone()),
+        HeaderMap::new(),
+        Json(join_request("999999")),
+    )
+    .await
+    .unwrap_err();
+    let correct = join_pairing(
+        ConnectInfo(fresh),
+        State(state.clone()),
+        HeaderMap::new(),
+        Json(join_request(&offer.pairing_code)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(unknown.0, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        serde_json::to_string(&unknown.1 .0).unwrap(),
+        serde_json::to_string(&correct.1 .0).unwrap()
+    );
 }

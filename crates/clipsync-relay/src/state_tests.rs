@@ -147,3 +147,143 @@ fn queue_expiry_discards_only_expired_envelopes_and_gc_counts_them() {
     assert_eq!(state.take_queue("fresh"), Some(envelope));
     assert_eq!(state.expired.load(Ordering::Relaxed), 2);
 }
+
+#[test]
+fn gc_drops_expired_failed_join_entries() {
+    let (state, _, _, _) = fixture();
+    let stale: IpAddr = "192.0.2.10".parse().unwrap();
+    let fresh: IpAddr = "192.0.2.11".parse().unwrap();
+    state.record_ip_fail(stale);
+    state.record_ip_fail(fresh);
+    state.ip_fails.get_mut(&stale).unwrap().1 =
+        Instant::now() - IP_FAILED_JOIN_WINDOW - Duration::from_secs(1);
+    state.gc();
+    assert!(state.ip_fails.get(&stale).is_none());
+    assert!(state.ip_fails.get(&fresh).is_some());
+}
+
+/// A wrong code for `offer` that differs in its last digit.
+fn wrong_code(offer: &CreatePairingResponse, salt: u32) -> String {
+    let real: u32 = offer.pairing_code.parse().unwrap();
+    let digits = offer.pairing_code.len();
+    let modulus = 10u32.pow(digits as u32);
+    let code = (real + 1 + salt % (modulus - 1)) % modulus;
+    format!("{code:0digits$}")
+}
+
+#[test]
+fn wrong_codes_from_one_client_exhaust_its_budget_and_refuse_its_correct_code() {
+    let (state, offer, _, owner) = fixture();
+    let attacker: IpAddr = "198.51.100.1".parse().unwrap();
+    // Every failure kind counts, not only unknown codes.
+    assert!(matches!(
+        state.join_pairing(join(&offer.pairing_code, owner), attacker),
+        Err(JoinError::Other(_))
+    ));
+    for salt in 1..IP_FAILED_JOIN_LIMIT {
+        assert!(matches!(
+            state.join_pairing(join(&wrong_code(&offer, salt), DeviceId::new()), attacker),
+            Err(JoinError::NotFound)
+        ));
+    }
+    assert!(matches!(
+        state.join_pairing(join(&wrong_code(&offer, 0), DeviceId::new()), attacker),
+        Err(JoinError::Attempts)
+    ));
+    assert!(matches!(
+        state.join_pairing(join(&offer.pairing_code, DeviceId::new()), attacker),
+        Err(JoinError::Attempts)
+    ));
+    assert_eq!(
+        state.ip_fails.get(&attacker).unwrap().0,
+        IP_FAILED_JOIN_LIMIT,
+        "refused attempts must not extend the count"
+    );
+    let other: IpAddr = "198.51.100.2".parse().unwrap();
+    state
+        .join_pairing(join(&offer.pairing_code, DeviceId::new()), other)
+        .unwrap();
+    assert!(state.ip_fails.get(&other).is_none(), "success is refunded");
+    assert_eq!(
+        state.pairing_fail.load(Ordering::Relaxed),
+        u64::from(IP_FAILED_JOIN_LIMIT)
+    );
+}
+
+#[test]
+fn successful_joins_do_not_consume_failure_budgets() {
+    let state = fixture().0;
+    let client: IpAddr = "198.51.100.3".parse().unwrap();
+    for _ in 0..(GLOBAL_FAILED_JOIN_LIMIT + IP_FAILED_JOIN_LIMIT) {
+        let offer = state
+            .create_pairing(CreatePairingRequest {
+                protocol_version: clipsync_protocol::PROTOCOL_VERSION,
+                pairing_session_id: PairingSessionId::new(),
+                device_id: DeviceId::new(),
+                device_name: "owner".into(),
+                os: "test".into(),
+                ttl_secs: None,
+            })
+            .unwrap();
+        state
+            .join_pairing(join(&offer.pairing_code, DeviceId::new()), client)
+            .unwrap();
+    }
+    assert_eq!(state.global_join_fails.lock().unwrap().0, 0);
+}
+
+#[test]
+fn distributed_wrong_codes_exhaust_the_relay_wide_budget_without_revealing_codes() {
+    let (state, offer, _, _) = fixture();
+    for n in 0..GLOBAL_FAILED_JOIN_LIMIT {
+        let ip = IpAddr::from([203, 0, 113, n as u8]);
+        assert!(matches!(
+            state.join_pairing(join(&wrong_code(&offer, n), DeviceId::new()), ip),
+            Err(JoinError::NotFound)
+        ));
+    }
+    let fresh: IpAddr = "192.0.2.200".parse().unwrap();
+    // Unknown and correct codes are refused identically once the budget is spent.
+    assert!(matches!(
+        state.join_pairing(join(&wrong_code(&offer, 0), DeviceId::new()), fresh),
+        Err(JoinError::Attempts)
+    ));
+    assert!(matches!(
+        state.join_pairing(join(&offer.pairing_code, DeviceId::new()), fresh),
+        Err(JoinError::Attempts)
+    ));
+    assert!(
+        state.ip_fails.get(&fresh).is_none(),
+        "refused attempts must not allocate per-client entries"
+    );
+    state.global_join_fails.lock().unwrap().1 =
+        Instant::now() - GLOBAL_FAILED_JOIN_WINDOW - Duration::from_secs(1);
+    state
+        .join_pairing(join(&offer.pairing_code, DeviceId::new()), fresh)
+        .unwrap();
+}
+
+#[test]
+fn ipv6_clients_are_limited_per_64_prefix_and_mapped_ipv4_as_ipv4() {
+    let (state, offer, _, _) = fixture();
+    for n in 0..IP_FAILED_JOIN_LIMIT {
+        let ip = IpAddr::from([0x2001, 0xdb8, 0, 0x7, 0, 0, 0, n as u16 + 1]);
+        assert!(matches!(
+            state.join_pairing(join(&wrong_code(&offer, n), DeviceId::new()), ip),
+            Err(JoinError::NotFound)
+        ));
+    }
+    let same_prefix = IpAddr::from([0x2001, 0xdb8, 0, 0x7, 0xffff, 0, 0, 1]);
+    assert!(matches!(
+        state.join_pairing(join(&offer.pairing_code, DeviceId::new()), same_prefix),
+        Err(JoinError::Attempts)
+    ));
+    assert_eq!(
+        rate_limit_key("::ffff:192.0.2.1".parse().unwrap()),
+        "192.0.2.1".parse::<IpAddr>().unwrap()
+    );
+    let next_prefix = IpAddr::from([0x2001, 0xdb8, 0, 0x8, 0, 0, 0, 1]);
+    state
+        .join_pairing(join(&offer.pairing_code, DeviceId::new()), next_prefix)
+        .unwrap();
+}

@@ -48,8 +48,21 @@ with a five-second TLS handshake deadline and at most 128 incomplete
 handshakes. Excess attempts close immediately, without a waiting socket queue.
 The server also limits the time to its first HTTP request to ten seconds. The
 HTTP/WebSocket router still receives the actual TCP peer address for rate
-limits; proxy deployments see the immediate proxy's address. Forwarded-IP
-headers are not promoted to trusted connection metadata.
+limits. By default, proxy deployments see the immediate proxy's address, so all
+clients behind one proxy share a pairing-join budget, and forwarded-IP headers
+are ignored.
+
+To give clients behind a reverse proxy separate pairing-join budgets, set
+`CLIPSYNC_RELAY_TRUSTED_PROXIES` (or `--trusted-proxies`) to a comma-separated
+list of the proxy addresses or CIDR ranges, for example `127.0.0.1` for the
+nginx example below. The relay then reads `X-Forwarded-For` only on connections
+from those addresses, and uses the rightmost entry that is not itself a trusted
+proxy. Entries to the left of that entry are ignored because clients can write
+them. Configure the proxy to append the connecting address, as nginx's
+`$proxy_add_x_forwarded_for` and Caddy's `reverse_proxy` do. List only addresses
+that untrusted clients cannot connect from. A process that can connect from a
+trusted address can claim any client address. The setting affects pairing-join
+limits only. Leave it unset when clients connect to the relay directly.
 
 For a container, mount the certificate directory read-only and pass the paths
 at runtime. Keep private files out of the image and build context. This example
@@ -121,6 +134,7 @@ location / {
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_read_timeout 3600;
 }
 ```
@@ -134,6 +148,7 @@ location / {
 | `CLIPSYNC_RELAY_TLS_CERT_FILE` | PEM certificate chain for direct HTTPS/WSS |
 | `CLIPSYNC_RELAY_TLS_KEY_FILE` | Matching PEM private key; both TLS files are required |
 | `CLIPSYNC_RELAY_ALLOW_HTTP` | Explicit `true` for a local/TLS-proxy plaintext origin; default `false` |
+| `CLIPSYNC_RELAY_TRUSTED_PROXIES` | Optional comma-separated proxy addresses/CIDRs whose `X-Forwarded-For` identifies clients for pairing-join limits; unset uses only the TCP peer address |
 | `CLIPSYNC_RELAY_TOKEN_SECRET_FILE` | Optional private file of exact HMAC key bytes; at least 32 bytes; cannot be combined with `CLIPSYNC_RELAY_TOKEN_SECRET` |
 | `CLIPSYNC_RELAY_TOKEN_SECRET` | HMAC token key; at least 32 bytes when explicitly set. Unset, empty, or whitespace-only generates a fresh random 32-byte key. |
 | `CLIPSYNC_RELAY_WEBHOOK_URL` | Optional metadata webhook |
