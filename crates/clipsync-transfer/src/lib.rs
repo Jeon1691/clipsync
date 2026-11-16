@@ -122,11 +122,11 @@ pub fn open_chunk(
         return Err(TransferError::Chunk("chunk belongs to another transfer"));
     }
     let content_key = derive_content_key(epoch_key, frame.transfer_id.as_str())?;
-    if frame.ciphertext.len() < AEAD_NONCE_LEN {
-        return Err(TransferError::Chunk("ciphertext too short"));
-    }
-    let mut nonce = [0u8; AEAD_NONCE_LEN];
-    nonce.copy_from_slice(&frame.ciphertext[..AEAD_NONCE_LEN]);
+    // The sender's derived nonce travels in front of the ciphertext.
+    let (nonce, ciphertext) = frame
+        .ciphertext
+        .split_first_chunk::<AEAD_NONCE_LEN>()
+        .ok_or(TransferError::Chunk("ciphertext too short"))?;
     let aad = envelope_aad(
         routing,
         EnvelopeFrame::Chunk {
@@ -134,12 +134,7 @@ pub fn open_chunk(
             count: frame.chunk_count,
         },
     )?;
-    Ok(open(
-        &content_key,
-        &nonce,
-        &aad,
-        &frame.ciphertext[AEAD_NONCE_LEN..],
-    )?)
+    Ok(open(&content_key, nonce, &aad, ciphertext)?)
 }
 
 #[cfg(test)]
