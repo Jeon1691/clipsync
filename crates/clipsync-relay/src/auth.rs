@@ -1,7 +1,7 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
 use chrono::{Duration, Utc};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
@@ -68,6 +68,24 @@ pub fn verify_token(secret: &[u8], token: &str) -> Result<TokenClaims, &'static 
 mod tests {
     use super::*;
     use base64::Engine;
+
+    #[test]
+    fn token_signature_accepts_python_hmac_fixture() {
+        // Python hmac/sha256 over the literal JSON, encoded using urlsafe_b64encode without padding.
+        let token = concat!(
+            "eyJ0eXAiOiJkZXZpY2UiLCJyaWQiOiJyb29tLWZpeHR1cmUiLCJkaWQiOiJkZXZpY2UtZml4dHVyZSIs",
+            "InJvbGUiOiJvd25lciIsInNpZCI6bnVsbCwiZXhwIjoyMzAwMDAwMDAwfQ.",
+            "M3vMtUpqpB12qfOrlO1gx2F8FLT_YSuCtmUvjDv--cs"
+        );
+        let claims = verify_token(&[17; 32], token).unwrap();
+        assert_eq!(claims.typ, "device");
+        assert_eq!(claims.rid.as_str(), "room-fixture");
+        assert_eq!(claims.did.as_str(), "device-fixture");
+        assert_eq!(claims.role, DeviceRole::Owner);
+        assert_eq!(claims.sid, None);
+        assert_eq!(claims.exp, 2_300_000_000);
+        assert_eq!(verify_token(&[18; 32], token).unwrap_err(), "bad signature");
+    }
 
     #[test]
     fn malformed_or_expired_tokens_fail_at_the_correct_validation_boundary() {

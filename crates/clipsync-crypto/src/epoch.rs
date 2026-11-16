@@ -16,9 +16,11 @@ pub struct WrappedEpochKey {
 }
 
 pub fn random_epoch_key() -> [u8; KEY_LEN] {
-    use rand::RngCore;
+    use rand::TryRngCore;
     let mut key = [0u8; KEY_LEN];
-    OsRng.fill_bytes(&mut key);
+    OsRng
+        .try_fill_bytes(&mut key)
+        .expect("operating system randomness unavailable");
     key
 }
 
@@ -26,7 +28,7 @@ pub fn wrap_epoch_key(
     recipient_pk: &PublicKey,
     epoch_key: &[u8; KEY_LEN],
 ) -> Result<WrappedEpochKey> {
-    let eph = StaticSecret::random_from_rng(OsRng);
+    let eph = StaticSecret::random();
     let eph_pub = PublicKey::from(&eph);
     let shared = eph.diffie_hellman(recipient_pk);
     let wrap_key = derive_labeled(
@@ -82,11 +84,10 @@ pub fn initial_epoch_key(room_root_key: &[u8; KEY_LEN]) -> Result<[u8; KEY_LEN]>
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use rand::rngs::OsRng;
 
     #[test]
     fn wrap_roundtrip() {
-        let sk = StaticSecret::random_from_rng(OsRng);
+        let sk = StaticSecret::random();
         let pk = PublicKey::from(&sk);
         let epoch = random_epoch_key();
         let wrapped = wrap_epoch_key(&pk, &epoch).unwrap();

@@ -120,6 +120,17 @@ jobs:
       - name: Image and file formats
         shell: bash
         run: cargo test -p clipsync-relay --test e2e --locked format_matrix -- --test-threads=1 --nocapture
+      - name: Pairing persistence concurrency
+        if: matrix.platform == 'macos'
+        run: python3 scripts/test-pairing-concurrency.py
+      - name: Retain pairing concurrency logs
+        if: always() && matrix.platform == 'macos'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pairing-concurrency-macos
+          path: target/pairing-concurrency/
+          if-no-files-found: warn
+          retention-days: 30
       - name: Desktop app
         shell: bash
         run: cargo build -p clipsync-desktop --locked
@@ -138,7 +149,7 @@ jobs:
       - name: Scripts compile
         if: matrix.platform != 'windows'
         run: |
-          python3 -m py_compile scripts/e2e-brew.py scripts/check-regressions.py scripts/check-coverage.py
+          python3 -m py_compile scripts/e2e-brew.py scripts/check-regressions.py scripts/check-coverage.py scripts/test-pairing-concurrency.py
           bash -n scripts/update-homebrew-formula.sh
       - name: Script regression tests
         if: matrix.platform != 'windows'

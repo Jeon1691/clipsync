@@ -137,9 +137,9 @@ impl RelayState {
     }
 
     fn alloc_code(&self) -> Result<String, String> {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         for _ in 0..32 {
-            let n: u32 = rng.gen_range(0..1_000_000);
+            let n: u32 = rng.random_range(0..1_000_000);
             let code = format!("{n:06}");
             if !self.pairing_by_code.contains_key(&code) {
                 return Ok(code);

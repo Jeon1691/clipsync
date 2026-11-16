@@ -11,7 +11,7 @@ macro_rules! ulid_id {
 
         impl $name {
             pub fn new() -> Self {
-                Self(Ulid::new().to_string())
+                Self(Ulid::generate().to_string())
             }
 
             pub fn as_str(&self) -> &str {

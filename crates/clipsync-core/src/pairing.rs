@@ -372,11 +372,27 @@ async fn run_pairing(
                     })
                     .await?;
                     our_bind_sent = true;
-                    store.save_room_keys(
-                        &room_id,
-                        &hex::encode(k.room_root_key),
-                        &hex::encode(epoch_key),
-                    )?;
+                    let key_store = store.clone();
+                    let key_room = room_id.clone();
+                    // Keep the keys' ZeroizeOnDrop ownership in the blocking worker.
+                    // Filesystem durability and platform keychains must not stall
+                    // the runtime that services the pairing socket and watchdog.
+                    let key_material = k.clone();
+                    tokio::task::spawn_blocking(move || {
+                        // Capture the whole zeroizing owner, not its Copy key field.
+                        let keys = key_material;
+                        let epoch_key = initial_epoch_key(&keys.room_root_key)?;
+                        key_store.save_room_keys(
+                            &key_room,
+                            &hex::encode(keys.room_root_key),
+                            &hex::encode(epoch_key),
+                        )?;
+                        Ok::<(), CoreError>(())
+                    })
+                    .await
+                    .map_err(|error| {
+                        CoreError::Pairing(format!("room key persistence task failed: {error}"))
+                    })??;
                 }
             }
         }
@@ -412,19 +428,27 @@ async fn run_pairing(
                     public_key_hex: bind.static_public.clone(),
                     fingerprint: bind.fingerprint.clone(),
                 };
-                store.upsert_room(RoomRecord {
+                let room = RoomRecord {
                     room_id: room_id.clone(),
                     epoch,
                     role,
                     created_at: Utc::now(),
                     device_token,
                     peers: vec![peer],
-                })?;
-                let mut cfg = store.load_config()?;
-                cfg.sync.enabled = true;
-                cfg.sync.auto_start = true;
-                cfg.sync.direction = clipsync_protocol::SyncDirection::Both;
-                store.save_config(&cfg)?;
+                };
+                let room_store = store.clone();
+                tokio::task::spawn_blocking(move || {
+                    room_store.upsert_room(room)?;
+                    let mut cfg = room_store.load_config()?;
+                    cfg.sync.enabled = true;
+                    cfg.sync.auto_start = true;
+                    cfg.sync.direction = clipsync_protocol::SyncDirection::Both;
+                    room_store.save_config(&cfg)
+                })
+                .await
+                .map_err(|error| {
+                    CoreError::Pairing(format!("room persistence task failed: {error}"))
+                })??;
                 info!(room = %room_id, "pairing complete");
                 conn.close().await;
                 return Ok(());
