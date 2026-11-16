@@ -8,11 +8,16 @@
 //! one; a sender seen on v2 may not fall back to unauthenticated v1 envelopes.
 
 use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use clipsync_protocol::{DeviceId, RoomId};
 
+use crate::paths::set_private_file;
+#[cfg(unix)]
+use crate::paths::PRIVATE_FILE_MODE;
 use crate::store::LocalStore;
 use crate::Result;
 
@@ -78,6 +83,39 @@ pub enum SeqCheck {
     Replayed { highest_seq: u64 },
 }
 
+/// Exclusive advisory lock on the replay-state lock file, held for one
+/// read-modify-write. `File::lock` is `flock` on Unix and `LockFileEx` on
+/// Windows: it excludes other processes and other open handles in this
+/// process alike, and the OS releases it if the process dies.
+struct ReplayStateLock(File);
+
+impl ReplayStateLock {
+    fn acquire(path: &Path) -> std::io::Result<Self> {
+        let mut options = OpenOptions::new();
+        // Never truncate: the file has no content, only a lock.
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Created private, like every other file in the data directory.
+            options.mode(PRIVATE_FILE_MODE);
+        }
+        let file = options.open(path)?;
+        // Also tighten a lock file left behind by an older or foreign process.
+        set_private_file(path)?;
+        file.lock()?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for ReplayStateLock {
+    fn drop(&mut self) {
+        // Closing the handle releases the lock too, but Windows may do that
+        // lazily; unlock explicitly so the next writer is not delayed.
+        let _ = self.0.unlock();
+    }
+}
+
 impl LocalStore {
     pub fn load_replay_state(&self) -> Result<ReplayState> {
         let path = self.paths.replay_state_file();
@@ -95,6 +133,26 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Load, change and save the replay state while holding an exclusive
+    /// advisory lock, so a daemon and a one-shot process sharing the data
+    /// directory cannot overwrite each other's updates (which could roll back
+    /// a `highest_seq` or clear a downgrade flag). `update` returns its result
+    /// and whether the state changed; unchanged state is not rewritten.
+    ///
+    /// Readers need no lock: each save atomically replaces the whole file.
+    fn update_replay_state<T>(
+        &self,
+        update: impl FnOnce(&mut ReplayState) -> (T, bool),
+    ) -> Result<T> {
+        let _lock = ReplayStateLock::acquire(&self.paths.replay_state_lock_file())?;
+        let mut state = self.load_replay_state()?;
+        let (value, changed) = update(&mut state);
+        if changed {
+            self.save_replay_state(&state)?;
+        }
+        Ok(value)
+    }
+
     /// Reserve the next outgoing `seq` for `room_id` and persist it before use.
     ///
     /// The value is at least `floor` (callers pass a wall-clock reading), so a
@@ -108,13 +166,13 @@ impl LocalStore {
     /// [`Self::next_send_seq`] for an envelope of the given kind; an
     /// authenticated one also records `sent_authenticated` in the same write.
     pub fn reserve_send(&self, room_id: &RoomId, floor: u64, authenticated: bool) -> Result<u64> {
-        let mut state = self.load_replay_state()?;
-        let room = state.rooms.entry(room_id.to_string()).or_default();
-        let seq = room.last_sent_seq.saturating_add(1).max(floor);
-        room.last_sent_seq = seq;
-        room.sent_authenticated |= authenticated;
-        self.save_replay_state(&state)?;
-        Ok(seq)
+        self.update_replay_state(|state| {
+            let room = state.rooms.entry(room_id.to_string()).or_default();
+            let seq = room.last_sent_seq.saturating_add(1).max(floor);
+            room.last_sent_seq = seq;
+            room.sent_authenticated |= authenticated;
+            (seq, true)
+        })
     }
 
     /// Accept `seq` from an authenticated envelope only if it is newer than
@@ -125,23 +183,22 @@ impl LocalStore {
         sender: &DeviceId,
         seq: u64,
     ) -> Result<SeqCheck> {
-        let mut state = self.load_replay_state()?;
-        let entry = state
-            .rooms
-            .entry(room_id.to_string())
-            .or_default()
-            .senders
-            .entry(sender.to_string())
-            .or_default();
-        if entry.authenticated && seq <= entry.highest_seq {
-            return Ok(SeqCheck::Replayed {
-                highest_seq: entry.highest_seq,
-            });
-        }
-        entry.highest_seq = seq;
-        entry.authenticated = true;
-        self.save_replay_state(&state)?;
-        Ok(SeqCheck::Accepted)
+        self.update_replay_state(|state| {
+            let entry = state
+                .rooms
+                .entry(room_id.to_string())
+                .or_default()
+                .senders
+                .entry(sender.to_string())
+                .or_default();
+            if entry.authenticated && seq <= entry.highest_seq {
+                let highest_seq = entry.highest_seq;
+                return (SeqCheck::Replayed { highest_seq }, false);
+            }
+            entry.highest_seq = seq;
+            entry.authenticated = true;
+            (SeqCheck::Accepted, true)
+        })
     }
 
     /// Record that `peer` advertised authenticated envelopes over an
@@ -151,20 +208,18 @@ impl LocalStore {
         room_id: &RoomId,
         peer: &DeviceId,
     ) -> Result<bool> {
-        let mut state = self.load_replay_state()?;
-        let entry = state
-            .rooms
-            .entry(room_id.to_string())
-            .or_default()
-            .senders
-            .entry(peer.to_string())
-            .or_default();
-        if entry.advertised_authenticated {
-            return Ok(false);
-        }
-        entry.advertised_authenticated = true;
-        self.save_replay_state(&state)?;
-        Ok(true)
+        self.update_replay_state(|state| {
+            let entry = state
+                .rooms
+                .entry(room_id.to_string())
+                .or_default()
+                .senders
+                .entry(peer.to_string())
+                .or_default();
+            let changed = !entry.advertised_authenticated;
+            entry.advertised_authenticated = true;
+            (changed, changed)
+        })
     }
 
     /// Whether `sender` has already delivered an authenticated envelope here.
@@ -290,6 +345,73 @@ mod tests {
         assert!(reopened.load_replay_state().unwrap().rooms[room.as_str()].sent_authenticated);
     }
 
+    /// A daemon and a one-shot `push`/`pull` open separate stores on one data
+    /// directory. Their read-modify-write cycles must not lose each other's
+    /// updates: a lost `highest_seq` would let a replay through, and a lost
+    /// `authenticated` flag would re-open the v1 downgrade.
+    #[test]
+    fn concurrent_stores_on_one_directory_do_not_lose_replay_updates() {
+        // Enough interleaved cycles that an unlocked load-modify-save loses
+        // updates on every run (each cycle includes an fsync).
+        const ROUNDS: u64 = 200;
+        let root = tempfile::tempdir().unwrap();
+        let room = RoomId::from("room");
+        let sender = DeviceId::from("sender");
+        let start = std::sync::Barrier::new(3);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let receiver = store(root.path());
+                start.wait();
+                for seq in 1..=ROUNDS {
+                    assert_eq!(
+                        receiver
+                            .accept_authenticated_seq(&room, &sender, seq)
+                            .unwrap(),
+                        SeqCheck::Accepted
+                    );
+                }
+            });
+            scope.spawn(|| {
+                let one_shot = store(root.path());
+                start.wait();
+                for _ in 0..ROUNDS {
+                    one_shot.reserve_send(&room, 0, true).unwrap();
+                }
+            });
+            scope.spawn(|| {
+                let handshakes = store(root.path());
+                start.wait();
+                for peer in 0..ROUNDS {
+                    let peer = DeviceId::from(format!("peer-{peer}").as_str());
+                    assert!(handshakes
+                        .mark_peer_advertised_authenticated(&room, &peer)
+                        .unwrap());
+                }
+            });
+        });
+        let reopened = store(root.path());
+        let state = reopened.load_replay_state().unwrap();
+        let room_state = &state.rooms[room.as_str()];
+        assert_eq!(room_state.last_sent_seq, ROUNDS);
+        assert!(room_state.sent_authenticated);
+        assert_eq!(room_state.senders[sender.as_str()].highest_seq, ROUNDS);
+        assert!(room_state.senders[sender.as_str()].authenticated);
+        let advertised = room_state
+            .senders
+            .values()
+            .filter(|entry| entry.advertised_authenticated)
+            .count();
+        assert_eq!(u64::try_from(advertised).unwrap(), ROUNDS);
+        assert_eq!(
+            reopened
+                .accept_authenticated_seq(&room, &sender, ROUNDS)
+                .unwrap(),
+            SeqCheck::Replayed {
+                highest_seq: ROUNDS
+            }
+        );
+    }
+
     #[test]
     fn legacy_and_partial_files_load_with_defaults_and_corruption_fails_closed() {
         let root = tempfile::tempdir().unwrap();
@@ -324,7 +446,21 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = store(root.path());
         store.next_send_seq(&RoomId::from("room"), 1).unwrap();
-        let mode = std::fs::metadata(store.paths.replay_state_file())
+        for path in [
+            store.paths.replay_state_file(),
+            store.paths.replay_state_lock_file(),
+        ] {
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "{}", path.display());
+        }
+        // A lock file left with wider permissions is tightened on next use.
+        std::fs::set_permissions(
+            store.paths.replay_state_lock_file(),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        store.next_send_seq(&RoomId::from("room"), 1).unwrap();
+        let mode = std::fs::metadata(store.paths.replay_state_lock_file())
             .unwrap()
             .permissions()
             .mode();
