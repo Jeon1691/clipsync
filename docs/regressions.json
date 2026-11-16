@@ -2192,6 +2192,16 @@
         }
       ],
       "notes": "Actual hosted d86 reconstruction built both environments and passed native-package and all-six-output comparisons, then failed strict cleanup because Docker root owned the 0755 outputs directories. A real Linux Docker volume reproduced root-producer/UID1001-consumer unlink failure; the actual corrected command changes only directory ownership, preserving directory0755, root-owned file0644 and payload SHA, then UID1001 cleanup succeeds. The registered Python checks protect caller ownership handoff and malformed-ID rejection with synthetic orchestration; the separate native Docker probe and full hosted reconstruction establish actual permission behavior. No cleanup failure is ignored or success marker emitted early."
+    },
+    {
+      "id": "F107",
+      "kind": "Runtime",
+      "fixes": [
+        "bfccecc794d00618efdfe877c615b61bc4613d3d"
+      ],
+      "description": "Synchronous pairing credential persistence held runtime workers past the eight-second connection watchdog and closed an authenticated exchange",
+      "checks": [],
+      "notes": "Three concurrent real relay e2e executables reproduced both pairing_and_text_push_pull and pairing_device_bind_nonces_are_unique on unchanged source 360ebb4: room-key writes blocked 8-10 seconds and the unchanged eight-second watchdog closed the socket after successful cryptographic confirmation. The same workload passes all 30 tests after moving key and room/config persistence to blocking workers. The worker explicitly captures the whole PairingKeys owner to retain ZeroizeOnDrop. macOS CI runs the bounded workload through scripts/test-pairing-concurrency.py and retains logs. This row conservatively receives no regression credit: native keychain latency and scheduler load are not a deterministic portable focused fixture. No unrelated passing test is substituted, and no watchdog threshold is relaxed."
     }
   ]
 }

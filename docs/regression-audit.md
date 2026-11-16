@@ -1,6 +1,6 @@
-# Six-month regression-test audit — 2026-11-15
+# Six-month regression-test audit — 2026-11-16
 
-The complete ledger now registers **61 of 106 distinct corrected defects (57.55%)**,
+The complete ledger now registers **61 of 107 distinct corrected defects (57.01%)**,
 meeting the Silver requirement of at least 50%. [The machine-readable ledger](regressions.json)
 and [CI checker](../scripts/check-regressions.py) preserve the full denominator
 and derive credit from concrete test references, not a manually entered Boolean.
@@ -9,7 +9,9 @@ that an assertion reproduces a historical defect.
 
 ## Scope and counting rules
 
-- Window: 2026-05-15 through 2026-11-15; the project began on 2026-09-16. The
+- Follow-up window: 2026-05-16 through 2026-11-16. The original frozen baseline
+  used 2026-05-15 through 2026-11-15; no rows leave the denominator because the
+  project began on 2026-09-16. The
   baseline reviewed all 61 non-merge commits through
   `639000d60f1af1cc856fe20c61b60c84f9b2ab7b` and PR #16's five commits through
   `3faac58836d94457c16e890f4d1380151236e5ea`. The source-history additions below
@@ -39,9 +41,9 @@ that an assertion reproduces a historical defect.
 
 | Scope | Registered defects | Complete defects | Fraction |
 | --- | ---: | ---: | ---: |
-| Broad ledger | 61 | 106 | 57.55% |
-| Project runtime/security | 47 | 60 | 78.33% |
-| All project-authored corrections | 61 | 93 | 65.59% |
+| Broad ledger | 61 | 107 | 57.01% |
+| Project runtime/security | 47 | 61 | 77.05% |
+| All project-authored corrections | 61 | 94 | 64.89% |
 
 The original baseline increased from **24/84 (28.57%)** to **44/84 (52.38%)** without
 removing defects or treating test variants as extra bugs. The newly covered rows
@@ -130,6 +132,19 @@ without mode or content changes. Synthetic Python contracts protect the caller
 handoff and reject malformed IDs before Docker. The complete ledger is now
 **61/106 (57.55%)**; cleanup errors remain fatal and the full reconstruction
 must finish successfully before the complete workflow is called passing.
+
+F107 records the pairing persistence stall exposed while validating the remaining
+dependency updates. On unchanged `360ebb4`, three concurrent copies of the real
+relay e2e suite failed when synchronous room-key writes occupied runtime workers
+for 8–10 seconds and the existing eight-second watchdog closed the connection.
+Cryptographic confirmation had succeeded. The same workload passes all 30 tests
+with [persistence on blocking workers](https://github.com/Jeon1691/clipsync/commit/bfccecc794d00618efdfe877c615b61bc4613d3d).
+The worker owns the full zeroizing key object, and persistence errors propagate.
+The [bounded macOS CI harness](../scripts/test-pairing-concurrency.py) retains
+per-copy evidence and kills/reaps remaining processes on failure or timeout.
+This native timing/load case remains **uncredited** pending a deterministic
+focused regression; the complete total is **61/107 (57.01%)**. No watchdog
+threshold, existing regression reference or coverage threshold is relaxed.
 
 The scope table is derived from the ledger: runtime/security includes the
 `Runtime` and `Runtime-PR16` rows; project-authored corrections include every
@@ -287,6 +302,7 @@ whether the assertion meaningfully protects the stated behavior.
 | F105 | Build/CI | [8e63e94](https://github.com/Jeon1691/clipsync/commit/8e63e94894cc5a752627df975cdfc3429966fe43) | Process-locale decoding rejected valid UTF-8 regression sources on Windows | **Registered** — [strict UTF-8 evidence contracts](../scripts/tests/test_regression_policy.py) cover real ASCII-locale subprocesses, Windows1252 simulation and malformed-source rejection without modifying source bytes, all platforms. |
 
 | F106 | Build/CI | [7f6e976](https://github.com/Jeon1691/clipsync/commit/7f6e9767a28a5989c41fde1811924c2fa8058101) | Root-owned exported directories broke host cleanup after matching builds | **Registered** — [caller ownership and malformed-ID contracts](../scripts/tests/test_build_reconstruction.py), plus separate real Docker permission RED/GREEN; modes and payload hashes stay unchanged, Linux/macOS orchestration. |
+| F107 | Runtime | [bfccecc](https://github.com/Jeon1691/clipsync/commit/bfccecc794d00618efdfe877c615b61bc4613d3d) | Blocking pairing credential persistence triggered the live-connection watchdog under native keychain load | **Uncredited** — old-source concurrent e2e failure and corrected 30-test pass are retained; macOS CI runs the bounded workload, but scheduler/keychain timing is not a deterministic focused fixture. |
 
 The [official Silver criterion](https://www.bestpractices.dev/en/criteria/1#regression_tests_added50)
 defines the badge requirement. This ledger's defect taxonomy and conservative
