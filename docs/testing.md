@@ -52,7 +52,7 @@ cargo +nightly-2026-11-11 llvm-cov report --lcov --skip-functions --output-path 
 cargo +nightly-2026-11-11 llvm-cov report --html --output-dir coverage
 cargo +nightly-2026-11-11 llvm-cov report --json --summary-only --output-path coverage/summary.json
 cargo +nightly-2026-11-11 llvm-cov report > coverage/summary.txt
-python3 scripts/check-coverage.py coverage/summary.json
+python3 scripts/check-coverage.py coverage/summary.json --minimum-percent 90 --minimum-branch-percent 85
 ```
 
 On Linux, prefix the instrumented test command with `xvfb-run -a`.
@@ -61,8 +61,8 @@ Silver requires at least 80% statement coverage; Gold requires at least 90%
 statement and 80% branch coverage. LLVM reports source lines and regions rather
 than a language-independent statement count. Review both metrics and the missing
 source before using this evidence for a statement-coverage assertion. The workflow
-requires at least 90% product lines and executable regions plus 80% branches
-on both Linux and macOS after both actual hosted results passed.
+requires at least 90% product lines and executable regions plus 85% branches
+on both Linux and macOS. The branch floor is stricter than Gold's 80% minimum.
 The checker sums only validated production-file counters, rejects missing
 crates, duplicate/non-product files and inconsistent totals, and retains the
 full HTML/JSON reports even when the threshold fails.
@@ -100,7 +100,7 @@ regions (90.96%) and 856/1,000 branches (85.60%). A separate unprivileged Linux
 ARM64 container run measured 95.29%/91.04%/85.60%, with all 285 tests passing.
 Platform-specific denominators are reported separately rather than summed.
 
-Both hosted jobs exceed the 90% line/region and 80% branch Gold gate. LLVM
+Both hosted release measurements exceeded the 90% line/region and 80% branch Gold gate. LLVM
 executable-region mapping provides this project's Rust statement-coverage
 evidence, with the additional line threshold retained. Both hosted platform
 measurements meet Gold's 90% statement-evidence and 80% branch targets. Earlier
@@ -108,6 +108,19 @@ measurements meet Gold's 90% statement-evidence and 80% branch targets. Earlier
 are historical source-report baselines, not directly comparable production-only
 measurements. Do not claim an increase from changing the denominator. The new
 method provides a consistent baseline for future product-path tests.
+
+The coverage expansion exercises real Noise handshakes with the client in
+both roles, initial and repeated presence announcements, hostile queued messages,
+and cancellation before pairing. Relay tests reject duplicate authentication,
+completed or mismatched pairing sessions and superseded sockets before they can
+change routing or publish messages. Private macOS pasteboards also exercise TIFF
+decoding, empty legacy filename entries and failed preview conversion while
+preserving the file payload. These tests raise the CI branch floor from 80% to
+85%. Measurement uses the same production sources and pinned toolchain.
+
+Compare hosted measurements with the same host-clipboard opt-ins. A local run
+without those opt-ins still executes the isolated tests, but does not exercise
+every native clipboard and foreground CLI path reached on a disposable runner.
 
 The partial-write regression deliberately enforces a file-size limit in one
 child process. Its LLVM profile is discarded to `/dev/null` so exit-time

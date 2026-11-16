@@ -1,5 +1,8 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
+#[path = "ws_boundary_tests.rs"]
+mod boundary_tests;
+
 use super::*;
 use crate::{auth::issue_token, RelayConfig};
 use clipsync_protocol::{

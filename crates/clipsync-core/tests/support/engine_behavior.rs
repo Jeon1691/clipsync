@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: MIT
 //! Product behavior exercised through real loopback relay connections and isolated files.
 
+#[path = "engine_coverage.rs"]
+mod coverage_expansion;
+
 use super::*;
 use crate::{App, AppPaths};
 use clipsync_clipboard::{ClipboardBackend, MockClipboard};
