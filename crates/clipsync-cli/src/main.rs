@@ -3,6 +3,7 @@
 mod cli;
 mod output;
 mod pairing_bg;
+mod sas_prompt;
 
 use std::io::{self, Write};
 
@@ -15,6 +16,7 @@ use clipsync_storage::LocalStore;
 
 use crate::cli::{Cli, Commands, ConfigCmd, DaemonCmd, RoomCmd, SyncCmd};
 use crate::output::{emit, emit_err};
+use crate::sas_prompt::{answer_background, background_confirmer, terminal_confirmer, SasMode};
 
 #[tokio::main]
 async fn main() {
@@ -76,6 +78,7 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
             foreground,
             background: _,
             background_worker,
+            insecure_skip_sas,
         }) => {
             let app = App::open()?;
             let _ = app.identity()?;
@@ -90,30 +93,46 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
                     &app,
                     ttl_raw.as_deref(),
                     no_auto_sync,
+                    insecure_skip_sas,
                     json,
                 )
                 .await;
             }
-            let offer = app
-                .room_create(dur, no_auto_sync, json, |offer| {
-                    if json {
-                        println!(
-                            "{}",
-                            serde_json::json!({
-                                "event": "pairing_code",
-                                "pairing_code": offer.pairing_code,
-                                "room_id": offer.room_id,
-                                "expires_at": offer.expires_at,
-                            })
-                        );
-                    } else {
-                        println!("pairing code: {}", offer.pairing_code);
-                        println!("room: {}", offer.room_id);
-                        println!("expires: {}", offer.expires_at);
-                        println!("waiting for the other device to join…");
-                    }
-                    let _ = io::stdout().flush();
+            let confirm = if background_worker {
+                background_confirmer(app.store.clone(), insecure_skip_sas)
+            } else {
+                terminal_confirmer(SasMode {
+                    json,
+                    non_interactive: cli.non_interactive,
+                    skip: insecure_skip_sas,
                 })
+            };
+            let offer = app
+                .room_create(
+                    dur,
+                    no_auto_sync,
+                    json,
+                    |offer| {
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::json!({
+                                    "event": "pairing_code",
+                                    "pairing_code": offer.pairing_code,
+                                    "room_id": offer.room_id,
+                                    "expires_at": offer.expires_at,
+                                })
+                            );
+                        } else {
+                            println!("pairing code: {}", offer.pairing_code);
+                            println!("room: {}", offer.room_id);
+                            println!("expires: {}", offer.expires_at);
+                            println!("waiting for the other device to join…");
+                        }
+                        let _ = io::stdout().flush();
+                    },
+                    confirm,
+                )
                 .await?;
             emit(
                 json,
@@ -128,9 +147,18 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
             }
             Ok(())
         }
-        Commands::Room(RoomCmd::Join { code, no_auto_sync }) => {
+        Commands::Room(RoomCmd::Join {
+            code,
+            no_auto_sync,
+            insecure_skip_sas,
+        }) => {
             let app = App::open()?;
-            let room = app.room_join(&code, no_auto_sync).await?;
+            let confirm = terminal_confirmer(SasMode {
+                json: cli.json,
+                non_interactive: cli.non_interactive,
+                skip: insecure_skip_sas,
+            });
+            let room = app.room_join(&code, no_auto_sync, confirm).await?;
             emit(
                 cli.json,
                 serde_json::json!({"room_id": room.room_id, "role": room.role}),
@@ -139,6 +167,24 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
                 println!("joined room {}", room.room_id);
             }
             Ok(())
+        }
+        Commands::Room(RoomCmd::Confirm { code }) => {
+            let app = App::open()?;
+            let mode = SasMode {
+                json: cli.json,
+                non_interactive: cli.non_interactive,
+                skip: false,
+            };
+            answer_background(&app, code.as_deref(), false, mode).await
+        }
+        Commands::Room(RoomCmd::Reject) => {
+            let app = App::open()?;
+            let mode = SasMode {
+                json: cli.json,
+                non_interactive: cli.non_interactive,
+                skip: false,
+            };
+            answer_background(&app, None, true, mode).await
         }
         Commands::Room(RoomCmd::Leave { yes }) => {
             if !yes && !cli.yes && !cli.non_interactive {

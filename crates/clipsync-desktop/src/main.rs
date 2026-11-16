@@ -6,9 +6,11 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
-use clipsync_core::App;
+use clipsync_core::{App, SasDecision};
 use clipsync_daemon::connect_ipc;
-use clipsync_desktop::{create_room, join_room_code, local_status, open_app, DeskStatus};
+use clipsync_desktop::{
+    create_room, join_room_code, local_status, open_app, window_confirmer, DeskStatus, SasPrompt,
+};
 use eframe::egui;
 
 const INK: egui::Color32 = egui::Color32::from_rgb(18, 20, 22);
@@ -18,7 +20,16 @@ const MINT: egui::Color32 = egui::Color32::from_rgb(79, 227, 194);
 enum Work {
     Created(Result<String, String>),
     Joined(Result<String, String>),
+    /// Pairing reached key confirmation; the user must compare codes.
+    Verify(SasPrompt),
 }
+
+const SAS_CONFIRM_LABEL: &str = "Codes match";
+const SAS_CANCEL_LABEL: &str = "Cancel";
+const SAS_REJECTED_MESSAGE: &str =
+    "Pairing cancelled: the verification codes were not confirmed. Nothing was stored.";
+const SAS_EXPIRED_MESSAGE: &str =
+    "Pairing ended before the verification codes were confirmed. Nothing was stored.";
 
 struct DesktopApp {
     core: App,
@@ -30,6 +41,7 @@ struct DesktopApp {
     join_code: String,
     error: Option<String>,
     busy: bool,
+    sas_prompt: Option<SasPrompt>,
 }
 
 impl DesktopApp {
@@ -50,7 +62,25 @@ impl DesktopApp {
             join_code: String::new(),
             error: None,
             busy: false,
+            sas_prompt: None,
         })
+    }
+
+    fn confirmer(&self) -> clipsync_desktop::SasConfirm {
+        let tx = self.tx.clone();
+        window_confirmer(move |prompt| {
+            let _ = tx.send(Work::Verify(prompt));
+        })
+    }
+
+    fn answer_sas(&mut self, decision: SasDecision) {
+        if let Some(prompt) = self.sas_prompt.take() {
+            prompt.answer(decision);
+        }
+        if decision == SasDecision::Rejected {
+            self.pairing_code = None;
+            self.error = Some(SAS_REJECTED_MESSAGE.into());
+        }
     }
 
     fn refresh(&mut self) {
@@ -84,9 +114,10 @@ impl DesktopApp {
         self.error = None;
         let store = self.core.store.clone();
         let tx = self.tx.clone();
+        let confirm = self.confirmer();
         let handle = self.rt.handle().clone();
         std::thread::spawn(move || {
-            let result = handle.block_on(create_room(store));
+            let result = handle.block_on(create_room(store, confirm));
             let _ = tx.send(Work::Created(result));
         });
     }
@@ -97,27 +128,47 @@ impl DesktopApp {
         let app = self.core.clone();
         let code = self.join_code.clone();
         let tx = self.tx.clone();
+        let confirm = self.confirmer();
         let handle = self.rt.handle().clone();
         std::thread::spawn(move || {
-            let result = handle.block_on(join_room_code(&app, &code));
+            let result = handle.block_on(join_room_code(&app, &code, confirm));
             let _ = tx.send(Work::Joined(result));
         });
     }
 
     fn drain(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
+            if let Work::Verify(prompt) = msg {
+                // A join keeps its busy state until the pairing finishes.
+                self.sas_prompt = Some(prompt);
+                continue;
+            }
             self.busy = false;
             match msg {
+                Work::Verify(_) => {}
                 Work::Created(Ok(code)) => {
                     self.pairing_code = Some(code);
                     self.error = None;
                 }
-                Work::Created(Err(e)) | Work::Joined(Err(e)) => self.error = Some(e),
+                Work::Created(Err(e)) | Work::Joined(Err(e)) => {
+                    // The pairing behind any open prompt is over.
+                    self.sas_prompt = None;
+                    self.error = Some(e);
+                }
                 Work::Joined(Ok(room)) => {
+                    self.sas_prompt = None;
                     self.status.room_id = Some(room);
                     self.pairing_code = None;
                     self.error = None;
                 }
+            }
+        }
+        if self.sas_prompt.as_ref().is_some_and(SasPrompt::is_closed) {
+            // A background create timed out or the relay aborted it.
+            self.sas_prompt = None;
+            self.pairing_code = None;
+            if self.error.is_none() {
+                self.error = Some(SAS_EXPIRED_MESSAGE.into());
             }
         }
     }
@@ -161,8 +212,39 @@ impl DesktopApp {
             );
             ui.add_space(16.0);
 
+            if let Some(prompt) = &self.sas_prompt {
+                let peer = if prompt.check.peer_device_name.is_empty() {
+                    "the other device"
+                } else {
+                    prompt.check.peer_device_name.as_str()
+                };
+                let mut decision = None;
+                egui::Frame::NONE
+                    .fill(PANEL)
+                    .corner_radius(16.0)
+                    .inner_margin(16.0)
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("VERIFICATION CODE").color(MINT).monospace());
+                        ui.label(egui::RichText::new(prompt.check.display()).size(40.0).monospace().strong());
+                        ui.label(format!("Check that {peer} shows the same code."));
+                        ui.label("Confirm only if both devices show the same code.");
+                        ui.horizontal(|ui| {
+                            if ui.button(SAS_CONFIRM_LABEL).clicked() {
+                                decision = Some(SasDecision::Confirmed);
+                            }
+                            if ui.button(SAS_CANCEL_LABEL).clicked() {
+                                decision = Some(SasDecision::Rejected);
+                            }
+                        });
+                    });
+                if let Some(decision) = decision {
+                    self.answer_sas(decision);
+                }
+                ui.add_space(12.0);
+            }
+
             if let Some(code) = &self.pairing_code {
-                if self.status.room_id.is_none() {
+                if self.status.room_id.is_none() && self.sas_prompt.is_none() {
                     egui::Frame::NONE
                         .fill(PANEL)
                         .corner_radius(16.0)
@@ -282,6 +364,7 @@ mod tests {
             join_code: String::new(),
             error: None,
             busy: false,
+            sas_prompt: None,
         };
         (root, app)
     }
@@ -454,6 +537,110 @@ mod tests {
         assert!(text.contains("Paired · paired-r… · daemon off"));
         assert!(text.contains("Start background sync"));
         assert!(!text.contains("PAIRING CODE") && !text.contains("Create room"));
+    }
+
+    fn sas_prompt(app: &DesktopApp) -> tokio::sync::oneshot::Receiver<SasDecision> {
+        let (answer_tx, answer) = tokio::sync::oneshot::channel();
+        let confirm = app.confirmer();
+        app.rt.spawn(async move {
+            let decision = confirm(clipsync_core::SasCheck {
+                sas: "482913".into(),
+                peer_device_id: "peer".into(),
+                peer_device_name: "Work laptop".into(),
+            })
+            .await;
+            let _ = answer_tx.send(decision);
+        });
+        answer
+    }
+
+    #[test]
+    fn headless_sas_prompt_shows_code_and_peer_and_reports_the_answer() {
+        for (label, expected) in [
+            (SAS_CONFIRM_LABEL, SasDecision::Confirmed),
+            (SAS_CANCEL_LABEL, SasDecision::Rejected),
+        ] {
+            let (_root, mut app) = fixture();
+            let ui = HeadlessUi::default();
+            app.pairing_code = Some("135790".into());
+            app.busy = true;
+            let answer = sas_prompt(&app);
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while app.sas_prompt.is_none() {
+                assert!(std::time::Instant::now() < deadline, "prompt never arrived");
+                app.drain();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(
+                app.busy,
+                "a verification prompt must not end a pending join"
+            );
+            let text = ui.text(&mut app);
+            assert!(text.contains("VERIFICATION CODE") && text.contains("482 913"));
+            assert!(text.contains("Check that Work laptop shows the same code."));
+            assert!(
+                !text.contains("PAIRING CODE"),
+                "the SAS replaces the pairing code"
+            );
+            ui.click(&mut app, label);
+            assert_eq!(app.rt.block_on(answer).unwrap(), expected);
+            assert!(app.sas_prompt.is_none());
+            let text = ui.text(&mut app);
+            assert!(!text.contains("VERIFICATION CODE"));
+            if expected == SasDecision::Rejected {
+                assert!(app.pairing_code.is_none());
+                assert!(text.contains("Nothing was stored"));
+            } else {
+                assert_eq!(app.pairing_code.as_deref(), Some("135790"));
+                assert!(app.error.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn prompts_close_when_their_pairing_ends_without_an_answer() {
+        let (_root, mut app) = fixture();
+        // The pairing (here, its decision future) ends before the user answers.
+        let (reply, answer) = tokio::sync::oneshot::channel::<SasDecision>();
+        let confirm = app.confirmer();
+        let pending = app.rt.spawn(async move {
+            let _ = reply.send(
+                confirm(clipsync_core::SasCheck {
+                    sas: "482913".into(),
+                    peer_device_id: "peer".into(),
+                    peer_device_name: "Work laptop".into(),
+                })
+                .await,
+            );
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while app.sas_prompt.is_none() {
+            assert!(std::time::Instant::now() < deadline, "prompt never arrived");
+            app.drain();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        app.pairing_code = Some("135790".into());
+        pending.abort();
+        let _ = app.rt.block_on(pending);
+        drop(answer);
+        app.drain();
+        assert!(app.sas_prompt.is_none() && app.pairing_code.is_none());
+        let text = frame(&mut app);
+        assert!(!text.contains("VERIFICATION CODE"));
+        assert!(text.contains("Pairing ended before the verification codes were confirmed"));
+
+        // A join result also retires any prompt still on screen.
+        let _answer = sas_prompt(&app);
+        while app.sas_prompt.is_none() {
+            app.drain();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        app.tx
+            .send(Work::Joined(Err("pairing failed".into())))
+            .unwrap();
+        app.drain();
+        assert!(app.sas_prompt.is_none());
+        assert_eq!(app.error.as_deref(), Some("pairing failed"));
     }
 
     #[test]

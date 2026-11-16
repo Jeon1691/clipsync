@@ -28,7 +28,7 @@ required. All commands accept `-h`/`--help` and `-V`/`--version`.
 | --- | --- |
 | `--json` | Print command result objects/arrays as compact JSON, one value per line. Streaming pairing can emit multiple values. |
 | `--yes` | Confirm room removal without an interactive confirmation. |
-| `--non-interactive` | Never prompt; the current `room leave` handler also treats this as confirmation. |
+| `--non-interactive` | Never prompt; the current `room leave` handler also treats this as confirmation. A verification-code prompt fails instead (pass the code to `room confirm`, or `--insecure-skip-sas`). |
 
 Successful commands exit with `0`. Ordinary runtime errors print
 `error: <message>` to **stderr**, including with `--json`; they do not have a
@@ -45,8 +45,10 @@ output is empty; errors follow the convention above.
 | Command and inputs | Effect and normal-mode output | JSON result |
 | --- | --- | --- |
 | `init [--relay-url URL]` | Create/reuse the local identity; optionally save a relay URL. Print device ID and fingerprint. | `{device_id: string, fingerprint: string}` |
-| `room create [--ttl DURATION] [--no-auto-sync] [--foreground]` | Print a six-digit pairing code, room, and expiry. Default: detach the pairing wait and return after the offer is available. `--foreground` (alias `--wait`) waits for pairing and prints `paired` on success. | First `{event: "pairing_code", pairing_code: string, room_id: string, expires_at: time}`. Background mode adds `{background: true, pid: integer}`; foreground mode later emits `{ok: true, pairing_code: string, room_id: string}`. |
-| `room join CODE [--no-auto-sync]` | Join using the code string, preserving any leading zero. Wait for pairing and print the room ID. | `{room_id: string, role: "member"}` |
+| `room create [--ttl DURATION] [--no-auto-sync] [--foreground] [--insecure-skip-sas]` | Print a six-digit pairing code, room, and expiry. Default: detach the pairing wait and return after the offer is available; answer the verification code later with `room confirm` or `room reject`. `--foreground` (alias `--wait`) waits in this terminal, asks for the verification code like `room join`, and prints `paired` on success. | First `{event: "pairing_code", pairing_code: string, room_id: string, expires_at: time}`. Background mode adds `{background: true, pid: integer}`; foreground mode later emits the SAS event below, then `{ok: true, pairing_code: string, room_id: string}`. |
+| `room join CODE [--no-auto-sync] [--insecure-skip-sas]` | Join using the code string, preserving any leading zero. After key confirmation, print the verification code and the other device's name and read one answer line from stdin: `y`/`yes`, or the code shown on the other device, confirms; anything else or end of input rejects and stores nothing. Then wait for pairing and print the room ID. | `{event: "sas_confirmation", sas: string, peer_device_name: string}`, then `{room_id: string, role: "member"}` |
+| `room confirm [CODE]` | Answer a background `room create`. Waits for the joiner if needed, then compares `CODE` (the code shown on the other device) or prompts like `room join`. A mismatch aborts the pairing. On a match, waits for the worker and prints `paired`. | Without `CODE`, the SAS event above; then `{ok: true, room_id: string}`. |
+| `room reject` | Abort a background `room create`. At the verification step, waits until the worker has stopped, then reports that nothing was stored; fails if the code was already confirmed. Before a device joins, records the rejection (the worker stops when one joins) and lets a new `room create` start at once. | `{ok: true, rejected: true}`; before a join also `joined: false` |
 | `room leave [--yes]` | Stop/uninstall the login daemon, remove the current local room, and clear pending pairing state. Requires local/global `--yes` or global `--non-interactive`; otherwise fails rather than prompting. | `{ok: true}` |
 | `room list` | Print locally stored rooms with epoch and role. | Array of `RoomRecord` values below. |
 | `push [--type auto\|text\|image\|files] [--file PATH]...` | Read files, stdin, or the clipboard using the precedence below; print a summary. | `{ok: true, summary: string}` |
@@ -95,7 +97,7 @@ not printed. Clipboard write failures in `pull --copy` are currently best effort
 | --- | --- |
 | `PeerRecord` | `device_id`, `device_name`, `os`, `public_key_hex`, `fingerprint`: strings; `role`: `owner` or `member`. |
 | `RoomRecord` | `room_id`: string; `epoch`: unsigned integer; `role`: `owner` or `member`; `created_at`: time; `device_token`: secret string; `peers`: array of `PeerRecord`. |
-| Status without daemon | `daemon: false`, `paused`, `connected: false`, `peer_online: false`: booleans; `room_id`, `device_id`: nullable strings; `relay_url`: string. Optional `pairing` contains `status` (`waiting`, `paired`, `failed`), `pairing_code`, `room_id`, `expires_at`: strings; `pid`: integer; optional `error`: string. |
+| Status without daemon | `daemon: false`, `paused`, `connected: false`, `peer_online: false`: booleans; `room_id`, `device_id`: nullable strings; `relay_url`: string. Optional `pairing` contains `status` (`waiting`, `confirm_sas`, `paired`, `failed`), `pairing_code`, `room_id`, `expires_at`: strings; `pid`: integer; optional `error`, `sas`, `peer_device_name`, `sas_decision` (`confirmed`/`rejected`): strings. |
 | Status with daemon | `daemon: true`, `paused`, `connected`, `peer_online`: booleans; `room_id`, `device_id`, `device_name`, `relay_url`: nullable strings; `last_item_kind`: nullable `text`/`image`/`files`; `last_sync_at`: nullable string (currently always `null`). |
 | Doctor | `identity`, `daemon_socket`, `login_service`: booleans; `device_id`, `fingerprint`, `room`: nullable strings; `relay_url`: string; `clipboard`: nullable `{name, source: string, text, image, files: boolean, fallback: string\|null}`; `tools`: array of `[tool_name, found_boolean]`; `relay`: `{ok: boolean, status: integer}` or `{ok: false, error: string}`; `tls`: `{verifier: "platform", ca_file: string\|null}`; `paths`: `{config_dir, data_dir, log_file: string}`. |
 
@@ -328,8 +330,10 @@ runtime, or thread-start failures and are not stable machine error codes.
 | --- | --- | --- |
 | `ClipSyncClient::new` | `data_dir`, `relay_url`, `os`, `device_name`: strings. | Shared client object. Creates app directories and a runtime; attempts identity/config initialization with the supplied relay. `data_dir` is the root layout described under `CLIPSYNC_HOME`. Empty OS/name leave existing overrides alone. The initialization attempt's error is currently not propagated; use `status()` to confirm the stored identity/config. |
 | `status()` | None. | `MobileStatus {device_id, fingerprint, relay_url, os: string, room_id: string?}`. Creates/reuses identity; an unpaired client has a null room ID. |
-| `create_room()` | None. | `PairingOffer {pairing_code, room_id, expires_at: string}`; expiry is RFC 3339. Returns after the offer is available and waits for the joiner in a background task. The offer alone does not mean pairing completed; poll until `status().room_id` equals the offered room ID. Later pairing failures are logged rather than returned from this completed call. |
-| `join_room(code)` | Six-digit code string, preserving leading zeros. | Room ID string after the pairing handshake completes and state is saved. |
+| `create_room_verified(verifier)` | Host implementation of `SasVerifier`. | `PairingOffer {pairing_code, room_id, expires_at: string}`; expiry is RFC 3339. Returns after the offer is available and waits for the joiner in a background task, which calls `verifier.confirm_sas` before anything is sent or stored. The offer alone does not mean pairing completed; poll until `status().room_id` equals the offered room ID. Later pairing failures, including a rejected code, are logged rather than returned from this completed call. |
+| `join_room_verified(code, verifier)` | Six-digit code string, preserving leading zeros; `SasVerifier`. | Room ID string after the handshake completes, `verifier` confirmed, and state is saved. A rejected code returns an error and stores nothing. |
+| `create_room()` | None. | Same as `create_room_verified` but accepts without comparing verification codes. Kept so existing apps keep working; it cannot detect a malicious relay or a guessed code. |
+| `join_room(code)` | Six-digit code string, preserving leading zeros. | Same as `join_room_verified` but accepts without comparing verification codes. Kept for existing apps; same limitation. |
 | `start_sync(clipboard)` | Host implementation of `ClipboardBridge`. | Returns unit after starting a background thread; repeated calls on the same client return success without starting another loop. Requires paired state for useful sync. Subsequent loop failures are logged, not delivered to the caller. No stop/pause/dispose-sync method is exported. |
 
 These are synchronous FFI methods: network operations in create/join block the
@@ -339,6 +343,20 @@ OS/name/home settings are process-wide environment overrides, and OS detection
 is cached; use one active identity/client configuration per process rather
 than assuming independent instances. Neither pairing method installs an OS
 login service; native apps call `start_sync` and manage platform lifecycle.
+
+`SasVerifier.confirm_sas(sas, peer_device_name) -> bool` is called once per
+pairing on a background thread, after key confirmation. Show the six-digit
+`sas` (for example as `482 913`) and the relay-reported `peer_device_name`, ask
+whether the other device shows the same code, block until the user answers,
+and return `true` only for a match. Returning `false` aborts the pairing and
+stores nothing. The pairing deadline is 120 seconds from the offer, not from
+the prompt. If the pairing ends before the user answers (deadline, the other
+device rejected, relay error), `SasVerifier.sas_cancelled()` is called: dismiss
+the dialog and let the pending `confirm_sas` return; its answer is ignored.
+`sas_cancelled` must not block. Marshal the dialog to the UI thread; do not
+block the UI thread waiting for it. Keep the client alive until the dialog is
+dismissed, because dropping it waits for a blocked `confirm_sas`. See
+[security](security.md#verification-code-sas).
 
 Implement every callback in `ClipboardBridge`; it is a thread-safe
 (`Send + Sync`) interface called by the background sync runtime. Marshal any

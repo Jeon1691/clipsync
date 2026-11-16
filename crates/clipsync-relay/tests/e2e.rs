@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use clipsync_clipboard::{ClipboardItem, FileRef, ImageMime, MockClipboard, SystemClipboard};
-use clipsync_core::{begin_create_room, join_room, App};
+use clipsync_core::{begin_create_room, join_room, App, SasCheck, SasDecision};
 use clipsync_crypto::blake3_hex;
 use clipsync_protocol::{FILE_MAX_COUNT, FRAME_HARD_CAP, IMAGE_MAX_BYTES, TEXT_MAX_BYTES};
 use clipsync_relay::{router, RelayConfig};
@@ -80,6 +80,42 @@ fn store_in(dir: &TempDir) -> clipsync_storage::LocalStore {
         .store
 }
 
+type SasConfirm = Box<
+    dyn FnOnce(SasCheck) -> std::pin::Pin<Box<dyn std::future::Future<Output = SasDecision> + Send>>
+        + Send,
+>;
+
+/// Two confirmers that compare SAS values the way two users would: each
+/// device shows its value to the other and confirms only on a match.
+fn sas_comparison() -> (SasConfirm, SasConfirm) {
+    fn side(
+        mine: tokio::sync::oneshot::Sender<String>,
+        theirs: tokio::sync::oneshot::Receiver<String>,
+    ) -> SasConfirm {
+        Box::new(move |check: SasCheck| {
+            Box::pin(async move {
+                let _ = mine.send(check.sas.clone());
+                match theirs.await {
+                    Ok(other) if check.matches(&other) => SasDecision::Confirmed,
+                    _ => SasDecision::Rejected,
+                }
+            })
+        })
+    }
+    let (creator_tx, creator_rx) = tokio::sync::oneshot::channel();
+    let (joiner_tx, joiner_rx) = tokio::sync::oneshot::channel();
+    (side(creator_tx, joiner_rx), side(joiner_tx, creator_rx))
+}
+
+fn stored_secrets(dir: &TempDir) -> Vec<String> {
+    let store = store_in(dir);
+    std::fs::read_dir(&store.paths.data_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".secret"))
+        .collect()
+}
+
 // Two peers share this runtime; keep workers free for I/O during OS keychain calls.
 async fn pair_homes(relay: &str) -> (TempDir, TempDir) {
     let a_dir = TempDir::new().unwrap();
@@ -96,7 +132,8 @@ async fn pair_homes(relay: &str) -> (TempDir, TempDir) {
     assert_eq!(code.len(), 6);
 
     let store_a = store_in(&a_dir);
-    let wait_a = tokio::spawn(async move { pending.wait(&store_a, &id_a).await });
+    let (creator_sas, joiner_sas) = sas_comparison();
+    let wait_a = tokio::spawn(async move { pending.wait(&store_a, &id_a, creator_sas).await });
     wait_for_connection_count(relay, 1).await;
     let creator = async {
         wait_a
@@ -105,7 +142,7 @@ async fn pair_homes(relay: &str) -> (TempDir, TempDir) {
             .map_err(|error| format!("creator pairing failed: {error}"))
     };
     let joiner = async {
-        join_room(&app_b.store, &id_b, &cfg_b, &code)
+        join_room(&app_b.store, &id_b, &cfg_b, &code, joiner_sas)
             .await
             .map(|_| ())
             .map_err(|error| format!("joiner pairing failed: {error}"))
@@ -616,6 +653,140 @@ async fn format_matrix_files_roundtrip() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_relay_pairing_shows_both_devices_the_same_sas_and_names() {
+    let (relay, _h) = start_relay().await;
+    let a_dir = TempDir::new().unwrap();
+    let b_dir = TempDir::new().unwrap();
+    let app_a = app_in(&a_dir, &relay);
+    let app_b = app_in(&b_dir, &relay);
+    let (id_a, id_b) = (app_a.identity().unwrap(), app_b.identity().unwrap());
+    let cfg_a = app_a.store.load_config().unwrap();
+    let cfg_b = app_b.store.load_config().unwrap();
+    let pending = begin_create_room(&id_a, &cfg_a, 60).await.unwrap();
+    let code = pending.offer.pairing_code.clone();
+    let (seen_a_tx, seen_a) = tokio::sync::oneshot::channel();
+    let (seen_b_tx, seen_b) = tokio::sync::oneshot::channel();
+    let (creator_sas, joiner_sas) = sas_comparison();
+    let store_a = store_in(&a_dir);
+    let creator_id = id_a.clone();
+    let creator = tokio::spawn(async move {
+        pending
+            .wait(&store_a, &creator_id, move |check: SasCheck| {
+                let _ = seen_a_tx.send(check.clone());
+                creator_sas(check)
+            })
+            .await
+    });
+    wait_for_connection_count(&relay, 1).await;
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        join_room(
+            &app_b.store,
+            &id_b,
+            &cfg_b,
+            &code,
+            move |check: SasCheck| {
+                let _ = seen_b_tx.send(check.clone());
+                joiner_sas(check)
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    creator.await.unwrap().unwrap();
+    let (seen_a, seen_b) = (seen_a.await.unwrap(), seen_b.await.unwrap());
+    assert_eq!(seen_a.sas, seen_b.sas);
+    assert_eq!(seen_a.peer_device_id, id_b.device_id);
+    assert_eq!(seen_b.peer_device_id, id_a.device_id);
+    assert!(!seen_a.peer_device_name.is_empty() && !seen_b.peer_device_name.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rejected_sas_leaves_both_devices_without_room_keys_or_credentials() {
+    let (relay, _h) = start_relay().await;
+    let a_dir = TempDir::new().unwrap();
+    let b_dir = TempDir::new().unwrap();
+    let app_a = app_in(&a_dir, &relay);
+    let app_b = app_in(&b_dir, &relay);
+    let (id_a, id_b) = (app_a.identity().unwrap(), app_b.identity().unwrap());
+    let cfg_a = app_a.store.load_config().unwrap();
+    let cfg_b = app_b.store.load_config().unwrap();
+    let pending = begin_create_room(&id_a, &cfg_a, 60).await.unwrap();
+    let code = pending.offer.pairing_code.clone();
+    let (release_tx, release) = tokio::sync::oneshot::channel::<()>();
+    let store_a = store_in(&a_dir);
+    let creator_id = id_a.clone();
+    // The creator's user is slow and confirms only after the joiner refused.
+    let creator = tokio::spawn(async move {
+        pending
+            .wait(&store_a, &creator_id, move |_| async move {
+                let _ = release.await;
+                SasDecision::Confirmed
+            })
+            .await
+    });
+    wait_for_connection_count(&relay, 1).await;
+    let joined = tokio::time::timeout(
+        Duration::from_secs(20),
+        join_room(&app_b.store, &id_b, &cfg_b, &code, |_| async {
+            SasDecision::Rejected
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(joined
+        .unwrap_err()
+        .to_string()
+        .contains("verification code rejected"));
+    // Fence on the relay dropping the aborted session before the creator binds.
+    let client = loopback_http_client();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let body = client
+                .post(format!("{relay}/v1/pairing/join"))
+                .json(&clipsync_protocol::JoinPairingRequest {
+                    pairing_code: code.clone(),
+                    device_id: clipsync_protocol::DeviceId::new(),
+                    device_name: "fence".into(),
+                    os: "test".into(),
+                    protocol_version: clipsync_protocol::PROTOCOL_VERSION,
+                })
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            if body.contains("code_invalid") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("relay kept the rejected pairing session");
+    release_tx.send(()).unwrap();
+    let created = tokio::time::timeout(Duration::from_secs(20), creator)
+        .await
+        .unwrap()
+        .unwrap();
+    let refused = created.expect_err("creator must not complete a rejected pairing");
+    assert!(
+        refused
+            .to_string()
+            .contains("the other device rejected the verification code"),
+        "{refused}"
+    );
+    for dir in [&a_dir, &b_dir] {
+        let store = store_in(dir);
+        assert!(store.load_state().unwrap().rooms.is_empty());
+        assert!(store.current_room().is_err());
+        assert!(stored_secrets(dir).is_empty(), "{:?}", stored_secrets(dir));
+    }
+}
+
 #[tokio::test]
 async fn wrong_pairing_code_rejected() {
     let (relay, _h) = start_relay().await;
@@ -623,9 +794,11 @@ async fn wrong_pairing_code_rejected() {
     let app = app_in(&dir, &relay);
     let id = app.identity().unwrap();
     let cfg = app.store.load_config().unwrap();
-    let err = join_room(&app.store, &id, &cfg, "000000")
-        .await
-        .unwrap_err();
+    let err = join_room(&app.store, &id, &cfg, "000000", |_| async {
+        SasDecision::Confirmed
+    })
+    .await
+    .unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("join failed") || msg.contains("code"),

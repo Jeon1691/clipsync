@@ -6,6 +6,8 @@ To disclose a vulnerability privately, follow the [security policy](../SECURITY.
 
 - Honest-but-curious relay operator
 - Pairing-code guessing
+- A relay that runs one SPAKE2 session with each device during pairing, within
+  the limit described under [Verification code](#verification-code-sas)
 - Replay, truncation, and chunk reordering
 - Path traversal on received files
 - Oversized payloads and connection floods
@@ -17,11 +19,68 @@ SPAKE2 transcript to the protocol version, pairing session ID, and device IDs,
 then exchange HMAC confirmations. Wrong code, mutated transcript, or failed
 confirmation aborts without storing credentials.
 
-The relay generates this password. Pair through a trusted relay: an actively
-malicious operator who knows the password is outside the honest-but-curious
-model and may impersonate a pairing participant. HTTPS/WSS authenticates the
-chosen relay and protects traffic in transit; it does not establish that the
-operator is honest.
+The relay generates this password and sees it in the create response and the
+join request. HTTPS/WSS authenticates the chosen relay and protects traffic in
+transit; it does not establish that the operator is honest. A relay that knows
+the password can run one SPAKE2 session with each device. Key confirmation
+then succeeds on both devices, because each device really did agree a key with
+the relay. The verification code below is the check that catches this.
+
+### Verification code (SAS)
+
+After key confirmation, each device derives a 6-digit short authentication
+string from its own SPAKE2 result:
+
+```
+HKDF-SHA-256(ikm = SPAKE2 secret, salt = transcript hash,
+             info = "clipsync/v1/sas")[0..8] as u64be mod 10^6
+```
+
+Both devices show the code and the other device's relay-reported name. The
+user confirms only if the two screens show the same code. Two devices show the
+same code only when they ran SPAKE2 with each other:
+
+- **Relay in the middle.** Each device ran SPAKE2 with the relay, so each
+  derived a different secret and transcript, and the codes differ.
+- **Guessed code.** A joiner who guessed the pairing code completed SPAKE2
+  with the creator. The device the user meant to pair never joined, so it
+  shows no matching code, and the creator's user rejects.
+
+Until the user confirms, the device sends no `device_bind` and stores no room
+keys, room record, or device token. A rejection, an unanswered prompt, or the
+pairing deadline aborts with nothing stored. The deadline runs from when the
+code was created, not from when the prompt appears: the relay keeps a pairing
+session for 120 seconds after `room create`, so joining and comparing must both
+fit in that window. On rejection the device sends an `error` frame (`sas_rejected`), and
+the relay drops the pairing session. If the other device has not answered yet,
+its later `device_bind` is refused. If it already confirmed, it stores nothing
+and fails at its pairing deadline. The peer name comes from the relay and is
+not authenticated; only the code is.
+
+Users must actually compare the codes. Typing the code shown on the other
+device is the most reliable comparison; answering "yes" relies on the user
+having looked.
+
+**Limit: offline search by a relay.** There is no commitment step: a device
+sends its SPAKE2 message before it sees the peer's. A relay in the middle sees
+both honest messages before it picks its own message toward each device. It can
+therefore search offline for a pair of its own messages that make the two
+devices derive the same 6-digit code. This is a birthday search of roughly
+2^10 cheap trials per side, so a relay that is built to do this can defeat the
+comparison. The code fully stops a guessed-code joiner and any relay that does
+not run this search, and it makes an attack an explicit, targeted change to
+the relay. Closing the gap needs a commitment to the SPAKE2 messages, which is
+a protocol change and is not part of this version. Until then, pair through a
+relay you trust.
+
+**Older peers.** The code is computed locally, so the wire format is unchanged
+and an updated device still pairs with an older one. The older device shows no
+code, so the comparison cannot be made. Treat such a pairing as unverified, or
+update both devices first.
+
+**Skipping the comparison.** `clipsync room create|join --insecure-skip-sas`
+and the mobile `create_room()` / `join_room()` calls, kept for existing apps,
+accept without comparing. They provide none of the protection above.
 
 Device-binding messages share a session wrapping key but use sender-specific
 nonce domains (A: index 2, B: index 3). Index 1 is reserved for legacy senders;
@@ -102,7 +161,7 @@ to implementations and tests and records unresolved limits.
 A compromised or unlocked authorized endpoint can read clipboard contents and
 keys. Same-user local malware and administrators are outside the confidentiality
 guarantee. Pairing codes must be shared through an authenticated separate
-channel. Use HTTPS/WSS with trusted certificates for public deployments; the
+channel, and users must compare the verification code on both devices. Use HTTPS/WSS with trusted certificates for public deployments; the
 relay requires a TLS certificate/key pair by default and permits only TLS
 1.2/1.3. Its explicit HTTP opt-in requires TLS termination and network
 restrictions for public deployments; see [self-hosting](self-hosting.md).

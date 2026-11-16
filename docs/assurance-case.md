@@ -22,9 +22,10 @@ a correctly authenticated out-of-band pairing-code exchange, private local data
 directories and correctly configured HTTPS/WSS for public transport. Attackers
 may control the network, malformed protocol/file inputs or a webhook
 destination. The relay generates the pairing password, so a malicious relay
-operator during pairing is outside the confidentiality guarantee: knowing the
-password can enable impersonation of a pairing participant. Use a trusted relay
-for pairing. TLS authenticates the selected service; it does not make a malicious
+operator can run one SPAKE2 session with each device. Users compare a
+verification code (SAS) before anything is stored, which detects this unless
+the relay searches offline for colliding codes; see
+[security](security.md#verification-code-sas). Use a trusted relay for pairing. TLS authenticates the selected service; it does not make a malicious
 service operator trustworthy. This is the honest-but-curious relay model already
 stated in the security requirements. An authorized malicious peer can intentionally send content; the
 receiver still treats its filenames, manifests and sizes as untrusted. Relay

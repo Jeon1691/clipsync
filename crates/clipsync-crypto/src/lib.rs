@@ -21,8 +21,9 @@ pub use kdf::{
 };
 pub use noise::{NoiseHandshake, NoiseSession, NOISE_PATTERN};
 pub use pairing::{
-    confirm_mac, finish_pairing, pairing_transcript, start_pairing_a, start_pairing_b,
-    verify_confirm_mac, PairingKeys, PairingRole, PairingState,
+    confirm_mac, finish_pairing, pairing_transcript, short_authentication_string, start_pairing_a,
+    start_pairing_b, verify_confirm_mac, PairingKeys, PairingRole, PairingState, SAS_DIGITS,
+    SAS_LABEL,
 };
 
 #[derive(Debug, thiserror::Error)]

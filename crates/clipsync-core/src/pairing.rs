@@ -1,5 +1,6 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
+use std::future::Future;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -7,8 +8,8 @@ use chrono::Utc;
 use tracing::{info, warn};
 
 use clipsync_crypto::{
-    confirm_mac, finish_pairing, initial_epoch_key, open, seal, start_pairing_a, start_pairing_b,
-    verify_confirm_mac, DeviceIdentity, PairingRole,
+    confirm_mac, finish_pairing, initial_epoch_key, open, seal, short_authentication_string,
+    start_pairing_a, start_pairing_b, verify_confirm_mac, DeviceIdentity, PairingRole,
 };
 use clipsync_protocol::{
     ClientRole, ControlMessage, CreatePairingRequest, CreatePairingResponse,
@@ -19,6 +20,71 @@ use clipsync_storage::{AppConfig, LocalStore, PeerRecord, RoomRecord};
 use clipsync_transport::{join_ws, Incoming, RelayConnection};
 
 use crate::{current_os, device_name, http_client, CoreError};
+
+/// Advisory error code sent to the relay when the local user rejects the SAS.
+/// The relay aborts the pairing session on any client `Error` frame.
+const SAS_REJECTED_CODE: &str = "sas_rejected";
+/// How long a rejecting client keeps reading after queueing its `Error` and
+/// `Close` frames. The transport stops forwarding, and drops queued frames,
+/// once nobody reads incoming frames, so a late peer frame could otherwise
+/// cancel the abort notice. Two queued frames flush in milliseconds on a live
+/// socket; the bound keeps a stuck relay from holding the caller.
+const SAS_REJECT_FLUSH: Duration = Duration::from_secs(2);
+
+/// What the local user must compare with the other device before a pairing
+/// is committed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SasCheck {
+    /// Short authentication string. Both devices show the same value only if
+    /// they ran SPAKE2 with each other.
+    pub sas: String,
+    pub peer_device_id: DeviceId,
+    /// Name the relay reported for the peer. It is not authenticated and is
+    /// shown for context only; the SAS is what proves the peer's identity.
+    pub peer_device_name: String,
+}
+
+impl SasCheck {
+    /// Compare with the value a user read from the other device, ignoring the
+    /// spaces or dashes used to group digits on screen.
+    pub fn matches(&self, shown_on_other_device: &str) -> bool {
+        let entered = normalize_sas(shown_on_other_device);
+        !entered.is_empty() && entered == self.sas
+    }
+
+    /// Digits grouped for reading aloud, such as `482 913`.
+    pub fn display(&self) -> String {
+        display_sas(&self.sas)
+    }
+}
+
+/// Keep only the digits of user-entered SAS text.
+pub fn normalize_sas(raw: &str) -> String {
+    raw.chars().filter(char::is_ascii_digit).collect()
+}
+
+/// Group SAS digits in threes for display. Grouping is presentation only;
+/// [`SasCheck::matches`] ignores it.
+pub fn display_sas(sas: &str) -> String {
+    // Three-digit groups keep a six-digit value readable without looking like
+    // the ungrouped pairing code.
+    const SAS_DISPLAY_GROUP: usize = 3;
+    let digits: Vec<char> = sas.chars().collect();
+    digits
+        .chunks(SAS_DISPLAY_GROUP)
+        .map(|group| group.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The local user's answer to a [`SasCheck`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SasDecision {
+    /// The other device shows the same SAS: send our binding and store the room.
+    Confirmed,
+    /// The values differ, or the user cancelled: abort and store nothing.
+    Rejected,
+}
 
 pub struct RoomOffer {
     pub pairing_code: String,
@@ -34,15 +100,22 @@ pub struct PendingCreate {
 }
 
 impl PendingCreate {
+    /// Wait for a joiner, then ask `confirm` to compare the SAS before
+    /// anything is sent to the peer or stored locally.
     #[expect(
         clippy::result_large_err,
         reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
     )]
-    pub async fn wait(
+    pub async fn wait<C, F>(
         self,
         store: &LocalStore,
         identity: &DeviceIdentity,
-    ) -> Result<(), CoreError> {
+        confirm: C,
+    ) -> Result<(), CoreError>
+    where
+        C: FnOnce(SasCheck) -> F + Send,
+        F: Future<Output = SasDecision> + Send,
+    {
         run_pairing(
             store,
             identity,
@@ -52,8 +125,10 @@ impl PendingCreate {
             self.session_id,
             identity.device_id.clone(),
             DeviceId::from(""),
+            None,
             self.offer.room_id.clone(),
             DeviceRole::Owner,
+            confirm,
         )
         .await
     }
@@ -124,19 +199,24 @@ pub async fn begin_create_room(
     clippy::result_large_err,
     reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
 )]
-pub async fn create_room(
+pub async fn create_room<C, F>(
     store: &LocalStore,
     identity: &DeviceIdentity,
     cfg: &AppConfig,
     ttl_secs: u64,
-) -> Result<RoomOffer, CoreError> {
+    confirm: C,
+) -> Result<RoomOffer, CoreError>
+where
+    C: FnOnce(SasCheck) -> F + Send,
+    F: Future<Output = SasDecision> + Send,
+{
     let pending = begin_create_room(identity, cfg, ttl_secs).await?;
     let offer = RoomOffer {
         pairing_code: pending.offer.pairing_code.clone(),
         room_id: pending.offer.room_id.clone(),
         expires_at: pending.offer.expires_at,
     };
-    pending.wait(store, identity).await?;
+    pending.wait(store, identity, confirm).await?;
     Ok(offer)
 }
 
@@ -144,12 +224,17 @@ pub async fn create_room(
     clippy::result_large_err,
     reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
 )]
-pub async fn join_room(
+pub async fn join_room<C, F>(
     store: &LocalStore,
     identity: &DeviceIdentity,
     cfg: &AppConfig,
     code: &str,
-) -> Result<RoomRecord, CoreError> {
+    confirm: C,
+) -> Result<RoomRecord, CoreError>
+where
+    C: FnOnce(SasCheck) -> F + Send,
+    F: Future<Output = SasDecision> + Send,
+{
     let req = JoinPairingRequest {
         pairing_code: code.to_string(),
         device_id: identity.device_id.clone(),
@@ -201,8 +286,10 @@ pub async fn join_room(
         joined.pairing_session_id,
         joined.peer.device_id.clone(),
         identity.device_id.clone(),
+        Some(joined.peer.device_name.clone()),
         joined.room_id,
         DeviceRole::Member,
+        confirm,
     )
     .await?;
     store.current_room().map_err(Into::into)
@@ -216,7 +303,7 @@ pub async fn join_room(
     clippy::result_large_err,
     reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
 )]
-async fn run_pairing(
+async fn run_pairing<C, F>(
     store: &LocalStore,
     identity: &DeviceIdentity,
     mut conn: RelayConnection,
@@ -225,9 +312,16 @@ async fn run_pairing(
     session_id: PairingSessionId,
     device_a: DeviceId,
     device_b: DeviceId,
+    mut peer_name: Option<String>,
     room_id: clipsync_protocol::RoomId,
     our_role: DeviceRole,
-) -> Result<(), CoreError> {
+    confirm: C,
+) -> Result<(), CoreError>
+where
+    C: FnOnce(SasCheck) -> F + Send,
+    F: Future<Output = SasDecision> + Send,
+{
+    // The overall deadline also bounds how long the user may take to compare.
     let timeout = tokio::time::sleep(Duration::from_secs(clipsync_protocol::PAIRING_TTL_SECS + 5));
     tokio::pin!(timeout);
 
@@ -244,10 +338,41 @@ async fn run_pairing(
     let mut complete: Option<ControlMessage> = None;
     let mut our_bind_sent = false;
     let mut confirm_sent = false;
+    let mut confirm = Some(confirm);
+    let mut decision: Option<std::pin::Pin<Box<F>>> = None;
+    let mut sas_confirmed = false;
 
     loop {
         tokio::select! {
             _ = &mut timeout => return Err(CoreError::Timeout),
+            verdict = async {
+                match decision.as_mut() {
+                    Some(pending) => pending.await,
+                    None => std::future::pending().await,
+                }
+            }, if decision.is_some() => {
+                decision = None;
+                if verdict == SasDecision::Rejected {
+                    // Nothing has been sent to the peer or stored yet.
+                    let _ = conn
+                        .send_control(ControlMessage::Error {
+                            code: SAS_REJECTED_CODE.into(),
+                            message: "verification code rejected".into(),
+                        })
+                        .await;
+                    conn.close().await;
+                    // Keep the receiver alive until the transport has sent
+                    // both frames and closed (`recv` then yields `None`).
+                    let _ = tokio::time::timeout(SAS_REJECT_FLUSH, async {
+                        while conn.incoming.recv().await.is_some() {}
+                    })
+                    .await;
+                    return Err(CoreError::Pairing(
+                        "verification code rejected; nothing was stored".into(),
+                    ));
+                }
+                sas_confirmed = true;
+            }
             incoming = conn.incoming.recv() => {
                 let Some(incoming) = incoming else {
                     return Err(CoreError::Pairing("relay closed during pairing".into()));
@@ -256,6 +381,7 @@ async fn run_pairing(
                     Incoming::Control(ControlMessage::HelloOk { .. }) => {}
                     Incoming::Control(ControlMessage::PeerJoined { device }) => {
                         peer_id = Some(device.device_id.clone());
+                        peer_name = Some(device.device_name.clone());
                     }
                     Incoming::Control(ControlMessage::Spake2Msg { message, .. }) => {
                         inbound_spake = Some(b64_decode(&message)?);
@@ -270,6 +396,13 @@ async fn run_pairing(
                         complete = Some(msg);
                     }
                     Incoming::Control(ControlMessage::Error { code, message }) => {
+                        if our_bind_sent {
+                            // The relay drops the session when the other device
+                            // rejects, so our binding is refused afterwards.
+                            return Err(CoreError::Pairing(format!(
+                                "the other device rejected the verification code or the pairing expired; nothing was stored ({code}: {message})"
+                            )));
+                        }
                         return Err(CoreError::Pairing(format!("{code}: {message}")));
                     }
                     Incoming::Pong | Incoming::Binary(_) => {}
@@ -345,7 +478,17 @@ async fn run_pairing(
                         .await;
                     return Err(CoreError::Pairing(e.to_string()));
                 }
-                if !our_bind_sent {
+                if let Some(ask) = confirm.take() {
+                    let check = SasCheck {
+                        sas: short_authentication_string(k),
+                        peer_device_id: peer_id
+                            .clone()
+                            .ok_or_else(|| CoreError::Pairing("missing peer identity".into()))?,
+                        peer_device_name: peer_name.clone().unwrap_or_default(),
+                    };
+                    decision = Some(Box::pin(ask(check)));
+                }
+                if sas_confirmed && !our_bind_sent {
                     let epoch_key = initial_epoch_key(&k.room_root_key)?;
                     let plain = BindPlain {
                         device_id: identity.device_id.clone(),
@@ -372,31 +515,15 @@ async fn run_pairing(
                     })
                     .await?;
                     our_bind_sent = true;
-                    let key_store = store.clone();
-                    let key_room = room_id.clone();
-                    // Keep the keys' ZeroizeOnDrop ownership in the blocking worker.
-                    // Filesystem durability and platform keychains must not stall
-                    // the runtime that services the pairing socket and watchdog.
-                    let key_material = k.clone();
-                    tokio::task::spawn_blocking(move || {
-                        // Capture the whole zeroizing owner, not its Copy key field.
-                        let keys = key_material;
-                        let epoch_key = initial_epoch_key(&keys.room_root_key)?;
-                        key_store.save_room_keys(
-                            &key_room,
-                            &hex::encode(keys.room_root_key),
-                            &hex::encode(epoch_key),
-                        )?;
-                        Ok::<(), CoreError>(())
-                    })
-                    .await
-                    .map_err(|error| {
-                        CoreError::Pairing(format!("room key persistence task failed: {error}"))
-                    })??;
                 }
             }
         }
 
+        // Commit only after the local user confirmed the SAS and our binding
+        // went out; until then a peer binding just waits in `peer_bind`.
+        if !our_bind_sent {
+            continue;
+        }
         if let (Some(k), Some((nonce_hex, ct_hex))) = (&keys, peer_bind.clone()) {
             let nonce_bytes =
                 hex::decode(&nonce_hex).map_err(|e| CoreError::Pairing(e.to_string()))?;
@@ -413,6 +540,7 @@ async fn run_pairing(
                 &ct,
             )?;
             let bind: BindPlain = serde_json::from_slice(&pt)?;
+            let key_room = room_id.clone();
             if let Some(ControlMessage::PairingComplete {
                 room_id,
                 epoch,
@@ -437,13 +565,26 @@ async fn run_pairing(
                     peers: vec![peer],
                 };
                 let room_store = store.clone();
+                // Keep the keys' ZeroizeOnDrop ownership in the blocking worker.
+                // Filesystem durability and platform keychains must not stall
+                // the runtime that services the pairing socket and watchdog.
+                let key_material = k.clone();
                 tokio::task::spawn_blocking(move || {
+                    // Capture the whole zeroizing owner, not its Copy key field.
+                    let keys = key_material;
+                    let epoch_key = initial_epoch_key(&keys.room_root_key)?;
+                    room_store.save_room_keys(
+                        &key_room,
+                        &hex::encode(keys.room_root_key),
+                        &hex::encode(epoch_key),
+                    )?;
                     room_store.upsert_room(room)?;
                     let mut cfg = room_store.load_config()?;
                     cfg.sync.enabled = true;
                     cfg.sync.auto_start = true;
                     cfg.sync.direction = clipsync_protocol::SyncDirection::Both;
-                    room_store.save_config(&cfg)
+                    room_store.save_config(&cfg)?;
+                    Ok::<(), CoreError>(())
                 })
                 .await
                 .map_err(|error| {
@@ -520,11 +661,404 @@ fn b64_decode(s: &str) -> Result<Vec<u8>, CoreError> {
         .map_err(|e| CoreError::Pairing(e.to_string()))
 }
 
+/// Test-only pair of confirmers that compare SAS values the way two users
+/// would: each side shows its value to the other and confirms only on a match.
+#[cfg(test)]
+pub(crate) type SasPeerConfirm =
+    Box<dyn FnOnce(SasCheck) -> std::pin::Pin<Box<dyn Future<Output = SasDecision> + Send>> + Send>;
+
+#[cfg(test)]
+pub(crate) fn sas_comparison() -> (SasPeerConfirm, SasPeerConfirm) {
+    fn side(
+        mine: tokio::sync::oneshot::Sender<String>,
+        theirs: tokio::sync::oneshot::Receiver<String>,
+    ) -> SasPeerConfirm {
+        Box::new(move |check: SasCheck| {
+            Box::pin(async move {
+                let _ = mine.send(check.sas.clone());
+                match theirs.await {
+                    Ok(other) if check.matches(&other) => SasDecision::Confirmed,
+                    _ => SasDecision::Rejected,
+                }
+            })
+        })
+    }
+    let (creator_tx, creator_rx) = tokio::sync::oneshot::channel();
+    let (joiner_tx, joiner_rx) = tokio::sync::oneshot::channel();
+    (side(creator_tx, joiner_rx), side(joiner_tx, creator_rx))
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use clipsync_crypto::{derive_nonce, PairingKeys};
+
+    /// Real-clock budget for a scripted relay that answers immediately.
+    const SCRIPT_DEADLINE: Duration = Duration::from_secs(8);
+
+    async fn accept(_: SasCheck) -> SasDecision {
+        SasDecision::Confirmed
+    }
+
+    fn secret_files(store: &LocalStore) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(&store.paths.data_dir)
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.unwrap().path())
+                    .filter(|path| path.extension().is_some_and(|ext| ext == "secret"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Scripted relay plus honest joiner (role B). It reports the SAS it
+    /// derived, then either sends its binding at once like a pre-SAS peer, or
+    /// waits for ours. Returns the frame the client sent after key confirmation.
+    async fn honest_joiner(
+        local: DeviceId,
+        sid: PairingSessionId,
+        room: clipsync_protocol::RoomId,
+        bind_first: bool,
+        script_deadline: Duration,
+    ) -> (
+        crate::test_relay::Server,
+        tokio::sync::oneshot::Receiver<String>,
+        tokio::sync::oneshot::Receiver<ControlMessage>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        use crate::test_relay::{receive, send, Server};
+        let (sas_tx, sas_rx) = tokio::sync::oneshot::channel();
+        let (frame_tx, frame_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release) = tokio::sync::oneshot::channel::<()>();
+        let peer = DeviceId::from("sas-peer-remote");
+        let server = Server::websocket_with_deadline(
+            axum::Router::new(),
+            script_deadline,
+            move |mut socket| async move {
+                send(
+                    &mut socket,
+                    ControlMessage::PeerJoined {
+                        device: clipsync_protocol::PeerInfo {
+                            device_id: peer.clone(),
+                            device_name: "Pixel of the joiner".into(),
+                            os: "android".into(),
+                            role: DeviceRole::Member,
+                            online: true,
+                        },
+                    },
+                )
+                .await;
+                let ControlMessage::Spake2Msg { message, .. } = receive(&mut socket).await else {
+                    panic!("client did not initiate SPAKE2")
+                };
+                let state = start_pairing_b("123456", sid.clone(), local, peer.clone()).unwrap();
+                let outbound = state.outbound.clone();
+                let keys = finish_pairing(state, &b64_decode(&message).unwrap()).unwrap();
+                let _ = sas_tx.send(short_authentication_string(&keys));
+                send(
+                    &mut socket,
+                    ControlMessage::Spake2Msg {
+                        pairing_session_id: sid.clone(),
+                        message: b64_encode(&outbound),
+                    },
+                )
+                .await;
+                let ControlMessage::KeyConfirm { mac, .. } = receive(&mut socket).await else {
+                    panic!("client did not confirm key")
+                };
+                verify_confirm_mac(&keys, PairingRole::A, &b64_decode(&mac).unwrap()).unwrap();
+                send(
+                    &mut socket,
+                    ControlMessage::KeyConfirm {
+                        pairing_session_id: sid.clone(),
+                        mac: b64_encode(&confirm_mac(&keys, PairingRole::B)),
+                    },
+                )
+                .await;
+                let bind = {
+                    let plain = BindPlain {
+                        device_id: peer.clone(),
+                        static_public: hex::encode([7; 32]),
+                        device_name: "Pixel of the joiner".into(),
+                        os: "android".into(),
+                        fingerprint: "fixture fingerprint".into(),
+                        epoch: 1,
+                        epoch_key: hex::encode(initial_epoch_key(&keys.room_root_key).unwrap()),
+                        role: DeviceRole::Member,
+                    };
+                    let nonce = device_bind_nonce(&keys.pairing_wrap_key, PairingRole::B).unwrap();
+                    ControlMessage::DeviceBind {
+                        pairing_session_id: sid.clone(),
+                        nonce: hex::encode(nonce),
+                        ciphertext: hex::encode(
+                            seal(
+                                &keys.pairing_wrap_key,
+                                &nonce,
+                                sid.as_str().as_bytes(),
+                                &serde_json::to_vec(&plain).unwrap(),
+                            )
+                            .unwrap(),
+                        ),
+                    }
+                };
+                let complete = ControlMessage::PairingComplete {
+                    room_id: room,
+                    epoch: 1,
+                    device_token: "synthetic-device-token".into(),
+                    role: DeviceRole::Owner,
+                };
+                if bind_first {
+                    // A pre-SAS peer binds immediately; a hostile relay may also
+                    // announce completion early. Neither may commit the pairing.
+                    send(&mut socket, bind.clone()).await;
+                    send(&mut socket, complete.clone()).await;
+                }
+                // No receive deadline here: the timeout test pauses the clock
+                // while the client waits for an answer that never comes.
+                let after_confirm = loop {
+                    match socket.recv().await {
+                        Some(Ok(axum::extract::ws::Message::Text(text))) => {
+                            match ControlMessage::decode(&text).unwrap() {
+                                ControlMessage::Ping { ts } => {
+                                    send(&mut socket, ControlMessage::Pong { ts }).await;
+                                }
+                                message => break Some(message),
+                            }
+                        }
+                        Some(Ok(_)) => {}
+                        _ => break None,
+                    }
+                };
+                if let Some(after_confirm) = after_confirm {
+                    let bound = matches!(after_confirm, ControlMessage::DeviceBind { .. });
+                    let _ = frame_tx.send(after_confirm);
+                    if bound && !bind_first {
+                        send(&mut socket, bind).await;
+                        send(&mut socket, complete).await;
+                    }
+                }
+                let _ = release.await;
+            },
+        )
+        .await;
+        (server, sas_rx, frame_rx, release_tx)
+    }
+
+    #[tokio::test]
+    async fn pairing_commits_only_after_the_user_confirms_a_matching_sas() {
+        for bind_first in [false, true] {
+            let directory = tempfile::TempDir::new().unwrap();
+            let store =
+                LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+            let identity = DeviceIdentity::from_bytes("sas-confirm-local".into(), [36; 32]);
+            let sid = PairingSessionId::new();
+            let room = clipsync_protocol::RoomId::new();
+            let (mut server, peer_sas, mut frame, release) = honest_joiner(
+                identity.device_id.clone(),
+                sid.clone(),
+                room.clone(),
+                bind_first,
+                SCRIPT_DEADLINE,
+            )
+            .await;
+            let connection = RelayConnection::connect(&join_ws(&server.url, "/v1/ws"))
+                .await
+                .unwrap();
+            let (shown_tx, shown) = tokio::sync::oneshot::channel();
+            let (answer, answered) = tokio::sync::oneshot::channel();
+            let pairing = run_pairing(
+                &store,
+                &identity,
+                connection,
+                PairingRole::A,
+                "123456",
+                sid,
+                identity.device_id.clone(),
+                DeviceId::new(),
+                None,
+                room.clone(),
+                DeviceRole::Owner,
+                move |check: SasCheck| async move {
+                    shown_tx.send(check).unwrap();
+                    answered.await.unwrap()
+                },
+            );
+            let driver = async {
+                let check = tokio::time::timeout(Duration::from_secs(5), shown)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(check.sas, peer_sas.await.unwrap(), "honest peers agree");
+                assert!(check.matches(&check.display()));
+                assert_eq!(check.peer_device_id, DeviceId::from("sas-peer-remote"));
+                assert_eq!(check.peer_device_name, "Pixel of the joiner");
+                // While the user is still comparing, nothing is bound or stored.
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(200), &mut frame)
+                        .await
+                        .is_err(),
+                    "DeviceBind sent before SAS confirmation"
+                );
+                assert!(store.load_state().unwrap().rooms.is_empty());
+                assert!(secret_files(&store).is_empty());
+                answer.send(SasDecision::Confirmed).unwrap();
+            };
+            let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+                tokio::join!(pairing, driver)
+            })
+            .await
+            .unwrap();
+            result.unwrap();
+            assert!(matches!(
+                frame.await.unwrap(),
+                ControlMessage::DeviceBind { .. }
+            ));
+            let _ = release.send(());
+            server.finish().await;
+            let stored = store.current_room().unwrap();
+            assert_eq!(stored.room_id, room);
+            assert_eq!(stored.peers[0].device_id, DeviceId::from("sas-peer-remote"));
+            assert!(store.load_epoch_key(&room).is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_sas_sends_no_binding_and_stores_no_room_keys_or_credentials() {
+        for bind_first in [false, true] {
+            let directory = tempfile::TempDir::new().unwrap();
+            let store =
+                LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+            let identity = DeviceIdentity::from_bytes("sas-reject-local".into(), [37; 32]);
+            let sid = PairingSessionId::new();
+            let room = clipsync_protocol::RoomId::new();
+            let (mut server, _peer_sas, frame, release) = honest_joiner(
+                identity.device_id.clone(),
+                sid.clone(),
+                room.clone(),
+                bind_first,
+                SCRIPT_DEADLINE,
+            )
+            .await;
+            let connection = RelayConnection::connect(&join_ws(&server.url, "/v1/ws"))
+                .await
+                .unwrap();
+            let error = tokio::time::timeout(
+                Duration::from_secs(10),
+                run_pairing(
+                    &store,
+                    &identity,
+                    connection,
+                    PairingRole::A,
+                    "123456",
+                    sid,
+                    identity.device_id.clone(),
+                    DeviceId::new(),
+                    None,
+                    room.clone(),
+                    DeviceRole::Owner,
+                    |_| async { SasDecision::Rejected },
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("verification code rejected"),
+                "{error}"
+            );
+            let ControlMessage::Error { code, .. } = frame.await.unwrap() else {
+                panic!("rejection must abort the relay session instead of binding")
+            };
+            assert_eq!(code, SAS_REJECTED_CODE);
+            let _ = release.send(());
+            server.finish().await;
+            assert!(store.load_state().unwrap().rooms.is_empty());
+            assert!(
+                secret_files(&store).is_empty(),
+                "{:?}",
+                secret_files(&store)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unanswered_sas_prompt_times_out_without_storing_anything() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let store =
+            LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+        let identity = DeviceIdentity::from_bytes("sas-timeout-local".into(), [38; 32]);
+        let sid = PairingSessionId::new();
+        let room = clipsync_protocol::RoomId::new();
+        let (mut server, _peer_sas, _frame, release) = honest_joiner(
+            identity.device_id.clone(),
+            sid.clone(),
+            room.clone(),
+            true,
+            // Outlive the client's paused-clock pairing deadline.
+            Duration::from_secs(clipsync_protocol::PAIRING_TTL_SECS * 2),
+        )
+        .await;
+        let connection = RelayConnection::connect(&join_ws(&server.url, "/v1/ws"))
+            .await
+            .unwrap();
+        let (shown_tx, shown) = tokio::sync::oneshot::channel();
+        let pairing = tokio::spawn({
+            let store = store.clone();
+            async move {
+                run_pairing(
+                    &store,
+                    &identity,
+                    connection,
+                    PairingRole::A,
+                    "123456",
+                    sid,
+                    identity.device_id.clone(),
+                    DeviceId::new(),
+                    None,
+                    room,
+                    DeviceRole::Owner,
+                    move |_| async move {
+                        shown_tx.send(()).unwrap();
+                        std::future::pending::<SasDecision>().await
+                    },
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), shown)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::pause();
+        let result = tokio::time::timeout(Duration::from_secs(150), pairing)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::resume();
+        let _ = release.send(());
+        server.finish().await;
+        assert!(matches!(result, Err(CoreError::Timeout)), "{result:?}");
+        assert!(store.load_state().unwrap().rooms.is_empty());
+        assert!(secret_files(&store).is_empty());
+    }
+
+    #[test]
+    fn sas_check_matching_ignores_grouping_and_rejects_empty_input() {
+        let check = SasCheck {
+            sas: "482913".into(),
+            peer_device_id: DeviceId::from("peer"),
+            peer_device_name: "peer".into(),
+        };
+        assert_eq!(check.display(), "482 913");
+        for same in ["482913", "482 913", "482-913", " 48 29 13 "] {
+            assert!(check.matches(same), "{same}");
+        }
+        for different in ["", "yes", "482914", "4829130", "48291"] {
+            assert!(!check.matches(different), "{different}");
+        }
+        assert_eq!(normalize_sas("4a8-2 9"), "4829");
+    }
 
     fn paired_keys() -> (PairingSessionId, PairingKeys, PairingKeys) {
         let session = PairingSessionId::new();
@@ -664,7 +1198,7 @@ mod tests {
             };
             let create = begin_create_room(&identity, &cfg, 60).await.err().unwrap();
             assert!(create.to_string().contains("create failed: maintenance"));
-            let join = join_room(&store, &identity, &cfg, "123456")
+            let join = join_room(&store, &identity, &cfg, "123456", accept)
                 .await
                 .unwrap_err();
             if body.starts_with("code_") {
@@ -687,7 +1221,7 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("relay create"));
-        assert!(join_room(&store, &identity, &cfg, "123456")
+        assert!(join_room(&store, &identity, &cfg, "123456", accept)
             .await
             .unwrap_err()
             .to_string()
@@ -718,11 +1252,11 @@ mod tests {
         };
         let identity = DeviceIdentity::from_bytes("malformed-response".into(), [32; 32]);
         assert!(matches!(
-            create_room(&store, &identity, &cfg, 60).await,
+            create_room(&store, &identity, &cfg, 60, accept).await,
             Err(CoreError::Http(_))
         ));
         assert!(matches!(
-            join_room(&store, &identity, &cfg, "123456").await,
+            join_room(&store, &identity, &cfg, "123456", accept).await,
             Err(CoreError::Http(_))
         ));
         assert!(store.load_state().unwrap().rooms.is_empty());
@@ -768,8 +1302,10 @@ mod tests {
                 PairingSessionId::new(),
                 identity.device_id.clone(),
                 DeviceId::new(),
+                None,
                 clipsync_protocol::RoomId::new(),
                 DeviceRole::Owner,
+                accept,
             )
             .await
             .unwrap_err();
@@ -822,8 +1358,10 @@ mod tests {
                 PairingSessionId::new(),
                 identity.device_id.clone(),
                 DeviceId::new(),
+                None,
                 clipsync_protocol::RoomId::new(),
                 DeviceRole::Owner,
+                accept,
             ),
         )
         .await
@@ -919,6 +1457,16 @@ mod tests {
                     let _ = release.await;
                     return;
                 }
+                // Confirm honestly so the client reaches its SAS prompt and
+                // then parses the hostile binding.
+                send(
+                    &mut socket,
+                    ControlMessage::KeyConfirm {
+                        pairing_session_id: session.clone(),
+                        mac: b64_encode(&confirm_mac(&keys, PairingRole::B)),
+                    },
+                )
+                .await;
                 send(
                     &mut socket,
                     ControlMessage::DeviceBind {
@@ -949,8 +1497,10 @@ mod tests {
                     sid,
                     identity.device_id.clone(),
                     peer,
+                    None,
                     clipsync_protocol::RoomId::new(),
                     DeviceRole::Owner,
+                    accept,
                 ),
             )
             .await

@@ -49,6 +49,15 @@ pub struct PairingWait {
     pub pid: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// SAS the background worker asks the user to compare (status `confirm_sas`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sas: Option<String>,
+    /// Relay-reported name of the joining device, shown next to the SAS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_device_name: Option<String>,
+    /// The user's answer, written by `clipsync room confirm` or `room reject`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sas_decision: Option<String>,
 }
 
 #[derive(Clone)]
@@ -145,7 +154,9 @@ impl LocalStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension("json.tmp");
+        // The background worker and `room confirm`/`room reject` both write
+        // this file; a per-process temporary name keeps their renames whole.
+        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
         std::fs::write(&tmp, serde_json::to_vec_pretty(wait)?)?;
         set_private_file(&tmp)?;
         std::fs::rename(tmp, path)?;
@@ -298,6 +309,9 @@ mod failure_tests {
             expires_at: "2026-11-15T00:00:00Z".into(),
             pid: 1,
             error: None,
+            sas: None,
+            peer_device_name: None,
+            sas_decision: None,
         }
     }
 
@@ -351,8 +365,12 @@ mod failure_tests {
         assert!(store.save_pairing_wait(&waiting()).is_err());
         assert!(store.paths.pairing_file().is_dir());
         std::fs::remove_dir(store.paths.pairing_file()).unwrap();
-        std::fs::remove_file(store.paths.pairing_file().with_extension("json.tmp")).unwrap();
-        std::fs::create_dir(store.paths.pairing_file().with_extension("json.tmp")).unwrap();
+        let tmp = store
+            .paths
+            .pairing_file()
+            .with_extension(format!("json.{}.tmp", std::process::id()));
+        std::fs::remove_file(&tmp).unwrap();
+        std::fs::create_dir(&tmp).unwrap();
         assert!(store.save_pairing_wait(&waiting()).is_err());
     }
 

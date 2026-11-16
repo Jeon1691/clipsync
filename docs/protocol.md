@@ -54,9 +54,31 @@ HKDF-SHA-256 labels:
 - `clipsync/v1/confirm-b`
 - `clipsync/v1/pairing-wrap`
 - `clipsync/v1/room-root`
+- `clipsync/v1/sas`
 - `clipsync/v1/epoch/1`
 - `clipsync/v1/content/{transferId}`
 - `clipsync/v1/nonce/{chunkIndex}`
+
+## Pairing verification code (SAS)
+
+Computed locally on each device from its SPAKE2 secret; nothing is added to
+the wire:
+
+```
+sas_key = HKDF-SHA-256(ikm = spake2_secret, salt = SHA-256(transcript),
+                       info = "clipsync/v1/sas")
+sas     = decimal(u64be(sas_key[0..8]) mod 10^6), zero-padded to 6 digits
+```
+
+After verifying the peer's `key_confirm`, a client shows the SAS and waits for
+the local user. It sends its `device_bind` only after the user confirms. It
+stores room keys, the room record, and the device token only after its own
+`device_bind` went out and the peer's `device_bind` and `pairing_complete`
+arrived. On rejection it sends `error` with code `sas_rejected`; the relay
+aborts the pairing session on any client `error`. Pre-SAS clients send
+`device_bind` right after key confirmation; a SAS client buffers it until its
+user confirms. See [security](security.md#verification-code-sas) for what the
+comparison covers.
 
 ## Reconnect
 

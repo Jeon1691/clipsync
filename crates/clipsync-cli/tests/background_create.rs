@@ -129,6 +129,91 @@ fn json_out(out: &std::process::Output) -> serde_json::Value {
     })
 }
 
+/// Start a CLI process whose stdin and stdout the test drives, so it can
+/// compare verification codes between two devices the way a user would.
+fn spawn_cli(home: &Path, relay: &str, args: &[&str]) -> tokio::process::Child {
+    use std::process::Stdio;
+    tokio::process::Command::new(bin())
+        .args(args)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("RUST_LOG", "error")
+        .env("CLIPSYNC_HOME", home)
+        .env("CLIPSYNC_RELAY_URL", relay)
+        .env("CLIPSYNC_NO_DAEMON", "1")
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost")
+        .env_remove("CLIPSYNC_LISTEN")
+        .env_remove("CLIPSYNC_CA_FILE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("run clipsync")
+}
+
+/// Read stdout lines until one starts with `prefix`; return the remainder.
+async fn line_with_prefix(
+    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    prefix: &str,
+) -> String {
+    use tokio::io::AsyncBufReadExt;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let mut line = String::new();
+            assert_ne!(
+                reader.read_line(&mut line).await.unwrap(),
+                0,
+                "stdout closed before {prefix:?}"
+            );
+            if let Some(rest) = line.trim_end().strip_prefix(prefix) {
+                return rest.to_string();
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no {prefix:?} line"))
+}
+
+fn digits(text: &str) -> String {
+    text.chars().filter(char::is_ascii_digit).collect()
+}
+
+fn waiting_store(home: &Path) -> clipsync_storage::LocalStore {
+    clipsync_storage::LocalStore::open_from(clipsync_storage::AppPaths::from_root(home.into()))
+        .unwrap()
+}
+
+/// Poll the background worker's pairing file until it asks for the SAS.
+async fn background_sas(home: &Path) -> clipsync_storage::PairingWait {
+    let store = waiting_store(home);
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Ok(Some(wait)) = store.load_pairing_wait() {
+                if wait.status == "confirm_sas" && wait.sas.is_some() {
+                    return wait;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("background worker never asked to confirm the verification code")
+}
+
+fn secrets_in(home: &Path) -> Vec<String> {
+    let store = waiting_store(home);
+    std::fs::read_dir(&store.paths.data_dir)
+        .map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".secret"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn kill_pid(pid: u32) {
     #[cfg(unix)]
     {
@@ -156,12 +241,13 @@ async fn foreground_offer_is_flushed_before_a_peer_joins() {
         .env("CLIPSYNC_NO_DAEMON", "1")
         .env_remove("CLIPSYNC_LISTEN")
         .env_remove("CLIPSYNC_CA_FILE")
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .unwrap();
+    let mut creator_input = child.stdin.take().unwrap();
     let mut output = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
     tokio::time::timeout(Duration::from_secs(30), output.read_line(&mut line))
@@ -193,7 +279,7 @@ async fn foreground_offer_is_flushed_before_a_peer_joins() {
     }
     let peer = TempDir::new().unwrap();
     seed_identity_file(peer.path());
-    let joined = clipsync(
+    let mut joiner = spawn_cli(
         peer.path(),
         &relay,
         &[
@@ -204,12 +290,48 @@ async fn foreground_offer_is_flushed_before_a_peer_joins() {
             "--no-auto-sync",
         ],
     );
-    assert!(
-        joined.status.success(),
-        "{}",
-        String::from_utf8_lossy(&joined.stderr)
-    );
-    let joined = json_out(&joined);
+    let mut joiner_input = joiner.stdin.take().unwrap();
+    let mut joiner_output = BufReader::new(joiner.stdout.take().unwrap());
+    let joiner_sas: serde_json::Value =
+        serde_json::from_str(&line_with_prefix(&mut joiner_output, "").await).unwrap();
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(20), output.read_line(&mut line))
+        .await
+        .unwrap()
+        .unwrap();
+    let creator_sas: serde_json::Value = serde_json::from_str(&line).unwrap();
+    for event in [&creator_sas, &joiner_sas] {
+        assert_eq!(event["event"], "sas_confirmation");
+        assert_eq!(event["sas"].as_str().unwrap().len(), 6);
+        assert!(!event["peer_device_name"].as_str().unwrap().is_empty());
+    }
+    assert_eq!(creator_sas["sas"], joiner_sas["sas"]);
+    // Each user types the code the other device shows.
+    use tokio::io::AsyncWriteExt;
+    for (input, other) in [
+        (&mut creator_input, &joiner_sas),
+        (&mut joiner_input, &creator_sas),
+    ] {
+        input
+            .write_all(format!("{}\n", other["sas"].as_str().unwrap()).as_bytes())
+            .await
+            .unwrap();
+        input.flush().await.unwrap();
+    }
+    let mut joined = String::new();
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        joiner_output.read_to_string(&mut joined),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(10), joiner.wait())
+        .await
+        .unwrap()
+        .unwrap()
+        .success());
+    let joined: serde_json::Value = serde_json::from_str(joined.trim()).unwrap();
     let mut completed = String::new();
     tokio::time::timeout(
         Duration::from_secs(10),
@@ -315,16 +437,54 @@ async fn room_create_background_returns_then_pairs() {
         "second background create should fail while first is waiting"
     );
 
-    let join = clipsync(b.path(), &relay, &["room", "join", code, "--no-auto-sync"]);
+    let mut joiner = spawn_cli(b.path(), &relay, &["room", "join", code, "--no-auto-sync"]);
+    let mut joiner_input = joiner.stdin.take().unwrap();
+    let mut joiner_output = tokio::io::BufReader::new(joiner.stdout.take().unwrap());
+    let joiner_sas = digits(&line_with_prefix(&mut joiner_output, "verification code: ").await);
+    let creator_wait = background_sas(a.path()).await;
+    assert_eq!(creator_wait.sas.as_deref(), Some(joiner_sas.as_str()));
+    assert!(!creator_wait
+        .peer_device_name
+        .as_deref()
+        .unwrap_or_default()
+        .is_empty());
+    let status = json_out(&clipsync(a.path(), &relay, &["--json", "status"]));
+    assert_eq!(status["pairing"]["status"], "confirm_sas");
+    assert_eq!(status["pairing"]["sas"], joiner_sas.as_str());
+    // The joiner's user types the creator's code; the creator's user passes
+    // the joiner's code to `room confirm`.
+    use tokio::io::AsyncWriteExt;
+    joiner_input
+        .write_all(format!("{}\n", creator_wait.sas.as_deref().unwrap()).as_bytes())
+        .await
+        .unwrap();
+    joiner_input.flush().await.unwrap();
+    let confirm = clipsync(a.path(), &relay, &["room", "confirm", &joiner_sas]);
+    if !confirm.status.success() {
+        kill_pid(pid);
+        panic!(
+            "confirm failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&confirm.stdout),
+            String::from_utf8_lossy(&confirm.stderr)
+        );
+    }
+    assert!(String::from_utf8_lossy(&confirm.stdout).contains("paired"));
+    let join = tokio::time::timeout(Duration::from_secs(20), joiner.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut join_stdout = String::new();
+    tokio::io::AsyncReadExt::read_to_string(&mut joiner_output, &mut join_stdout)
+        .await
+        .unwrap();
     if !join.status.success() {
         kill_pid(pid);
         panic!(
-            "join failed: stdout={} stderr={}",
-            String::from_utf8_lossy(&join.stdout),
+            "join failed: stdout={join_stdout} stderr={}",
             String::from_utf8_lossy(&join.stderr)
         );
     }
-    assert!(String::from_utf8_lossy(&join.stdout).contains("joined room"));
+    assert!(join_stdout.contains("joined room"));
 
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut room = None;
@@ -353,7 +513,91 @@ async fn room_create_background_returns_then_pairs() {
         panic!("creator never recorded the room after background pairing");
     }
     assert_eq!(room.as_deref(), Some(waiting.room_id.as_str()));
-    assert!(String::from_utf8_lossy(&join.stdout).contains(&waiting.room_id));
+    assert!(join_stdout.contains(&waiting.room_id));
+    relay_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mismatched_or_rejected_verification_codes_store_nothing_on_either_device() {
+    let (relay, relay_task) = start_relay().await;
+    for reject_command in [false, true] {
+        let a = TempDir::new().unwrap();
+        let b = TempDir::new().unwrap();
+        seed_identity_file(a.path());
+        seed_identity_file(b.path());
+        let create = clipsync(
+            a.path(),
+            &relay,
+            &["--json", "room", "create", "--no-auto-sync"],
+        );
+        assert!(
+            create.status.success(),
+            "{}",
+            String::from_utf8_lossy(&create.stderr)
+        );
+        let offer = json_out(&create);
+        let code = offer["pairing_code"].as_str().unwrap();
+        let pid = offer["pid"].as_u64().unwrap() as u32;
+        let mut joiner = spawn_cli(b.path(), &relay, &["room", "join", code, "--no-auto-sync"]);
+        let joiner_input = joiner.stdin.take().unwrap();
+        let mut joiner_output = tokio::io::BufReader::new(joiner.stdout.take().unwrap());
+        let joiner_sas = digits(&line_with_prefix(&mut joiner_output, "verification code: ").await);
+        let creator_wait = background_sas(a.path()).await;
+        assert_eq!(creator_wait.sas.as_deref(), Some(joiner_sas.as_str()));
+        let answer = if reject_command {
+            clipsync(a.path(), &relay, &["room", "reject"])
+        } else {
+            // A code that differs from the creator's in every digit.
+            let wrong: String = joiner_sas
+                .chars()
+                .map(|digit| if digit == '0' { '1' } else { '0' })
+                .collect();
+            clipsync(a.path(), &relay, &["room", "confirm", &wrong])
+        };
+        let answer_stderr = String::from_utf8_lossy(&answer.stderr).into_owned();
+        if reject_command {
+            assert!(answer.status.success(), "{answer_stderr}");
+            assert!(String::from_utf8_lossy(&answer.stdout).contains("nothing was stored"));
+        } else {
+            assert!(!answer.status.success());
+            assert!(answer_stderr.contains("does not match"), "{answer_stderr}");
+        }
+        // The joiner's user also sees no matching code and gives up.
+        drop(joiner_input);
+        let join = tokio::time::timeout(Duration::from_secs(20), joiner.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!join.status.success());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let wait = waiting_store(a.path())
+                .load_pairing_wait()
+                .unwrap()
+                .unwrap();
+            if wait.status == "failed" {
+                assert!(
+                    wait.error
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("rejected"),
+                    "{:?}",
+                    wait.error
+                );
+                break;
+            }
+            if Instant::now() > deadline {
+                kill_pid(pid);
+                panic!("background worker did not abort: {}", wait.status);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        for home in [a.path(), b.path()] {
+            let rooms = json_out(&clipsync(home, &relay, &["--json", "room", "list"]));
+            assert_eq!(rooms, serde_json::json!([]));
+            assert!(secrets_in(home).is_empty(), "{:?}", secrets_in(home));
+        }
+    }
     relay_task.abort();
 }
 
@@ -363,10 +607,17 @@ async fn room_create_auto_inits_without_explicit_init() {
     let a = TempDir::new().unwrap();
     let b = TempDir::new().unwrap();
     let started = Instant::now();
+    // Scripted setups may opt out of the comparison explicitly on both sides.
     let create = clipsync(
         a.path(),
         &relay,
-        &["--json", "room", "create", "--no-auto-sync"],
+        &[
+            "--json",
+            "room",
+            "create",
+            "--no-auto-sync",
+            "--insecure-skip-sas",
+        ],
     );
     assert!(
         started.elapsed() < Duration::from_secs(10),
@@ -384,7 +635,14 @@ async fn room_create_auto_inits_without_explicit_init() {
     let join = clipsync(
         b.path(),
         &relay,
-        &["--json", "room", "join", code, "--no-auto-sync"],
+        &[
+            "--json",
+            "room",
+            "join",
+            code,
+            "--no-auto-sync",
+            "--insecure-skip-sas",
+        ],
     );
     if !join.status.success() {
         kill_pid(pid);
@@ -393,4 +651,63 @@ async fn room_create_auto_inits_without_explicit_init() {
             String::from_utf8_lossy(&join.stderr)
         );
     }
+    assert!(String::from_utf8_lossy(&join.stderr).contains("--insecure-skip-sas"));
+    assert_eq!(json_out(&join)["role"], "member");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejecting_before_a_join_lets_a_new_room_create_replace_the_pairing() {
+    let (relay, relay_task) = start_relay().await;
+    let a = TempDir::new().unwrap();
+    seed_identity_file(a.path());
+    let first = clipsync(
+        a.path(),
+        &relay,
+        &["--json", "room", "create", "--no-auto-sync"],
+    );
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first = json_out(&first);
+    let first_pid = first["pid"].as_u64().unwrap() as u32;
+    let blocked = clipsync(a.path(), &relay, &["room", "create", "--no-auto-sync"]);
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("room join"));
+
+    let rejected = clipsync(a.path(), &relay, &["--json", "room", "reject"]);
+    assert!(
+        rejected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert_eq!(json_out(&rejected)["joined"], false);
+
+    let second = clipsync(
+        a.path(),
+        &relay,
+        &["--json", "room", "create", "--no-auto-sync"],
+    );
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second = json_out(&second);
+    let second_pid = second["pid"].as_u64().unwrap() as u32;
+    assert_ne!(second_pid, first_pid);
+    assert_ne!(second["pairing_code"], first["pairing_code"]);
+    let wait = waiting_store(a.path())
+        .load_pairing_wait()
+        .unwrap()
+        .unwrap();
+    assert_eq!((wait.status.as_str(), wait.pid), ("waiting", second_pid));
+    assert!(
+        wait.sas_decision.is_none(),
+        "the new pairing starts unanswered"
+    );
+    kill_pid(first_pid);
+    kill_pid(second_pid);
+    relay_task.abort();
 }

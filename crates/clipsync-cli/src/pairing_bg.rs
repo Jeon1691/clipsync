@@ -17,13 +17,22 @@ pub async fn spawn_background_create(
     app: &App,
     ttl: Option<&str>,
     no_auto_sync: bool,
+    insecure_skip_sas: bool,
     json: bool,
 ) -> Result<(), CoreError> {
     if let Ok(Some(existing)) = app.store.load_pairing_wait() {
-        if existing.status == "waiting" && pid_alive(existing.pid) {
+        let active = existing.status == "waiting"
+            || existing.status == crate::sas_prompt::STATUS_CONFIRM_SAS;
+        if active && !crate::sas_prompt::replaceable(&existing) {
+            let next = if existing.status == "waiting" {
+                format!("join with: clipsync room join {}", existing.pairing_code)
+            } else {
+                "a device joined; compare codes with: clipsync room confirm (or clipsync room reject)"
+                    .into()
+            };
             return Err(CoreError::Message(format!(
-                "pairing already waiting in background (pid {}); join with: clipsync room join {}",
-                existing.pid, existing.pairing_code
+                "pairing already waiting in background (pid {}); {next}",
+                existing.pid
             )));
         }
     }
@@ -46,6 +55,9 @@ pub async fn spawn_background_create(
     }
     if no_auto_sync {
         cmd.arg("--no-auto-sync");
+    }
+    if insecure_skip_sas {
+        cmd.arg("--insecure-skip-sas");
     }
     if let Ok(home) = std::env::var("CLIPSYNC_HOME") {
         cmd.env("CLIPSYNC_HOME", home);
@@ -122,6 +134,7 @@ fn print_offer(wait: &PairingWait, pid: u32, json: bool) {
             "join from another device: clipsync room join {}",
             wait.pairing_code
         );
+        println!("then compare verification codes here: clipsync room confirm");
     }
 }
 
@@ -135,7 +148,7 @@ fn extract_error_line(text: &str) -> Option<String> {
 }
 
 #[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
+pub(crate) fn pid_alive(pid: u32) -> bool {
     extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
     }
@@ -143,7 +156,7 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 #[cfg(windows)]
-fn pid_alive(pid: u32) -> bool {
+pub(crate) fn pid_alive(pid: u32) -> bool {
     extern "system" {
         fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
         fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
@@ -161,7 +174,7 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn pid_alive(_pid: u32) -> bool {
+pub(crate) fn pid_alive(_pid: u32) -> bool {
     false
 }
 

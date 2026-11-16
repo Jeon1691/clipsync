@@ -1217,6 +1217,10 @@ fn regression_f98_late_creator_completes_real_core_pairing_and_persists_matching
                     clipsync_crypto::DeviceIdentity::from_bytes("late-creator".into(), [81; 32]);
                 let member =
                     clipsync_crypto::DeviceIdentity::from_bytes("early-joiner".into(), [82; 32]);
+                // Each side shows its verification code to the other and
+                // confirms only on a match, as two users comparing screens would.
+                let (owner_sas_tx, owner_sas_rx) = tokio::sync::oneshot::channel::<String>();
+                let (member_sas_tx, member_sas_rx) = tokio::sync::oneshot::channel::<String>();
                 let owner_task = {
                     let store = owner_store.clone();
                     tokio::spawn(async move {
@@ -1225,6 +1229,15 @@ fn regression_f98_late_creator_completes_real_core_pairing_and_persists_matching
                             &owner,
                             &store.load_config().unwrap(),
                             60,
+                            move |check: clipsync_core::SasCheck| async move {
+                                let _ = owner_sas_tx.send(check.sas.clone());
+                                match member_sas_rx.await {
+                                    Ok(other) if check.matches(&other) => {
+                                        clipsync_core::SasDecision::Confirmed
+                                    }
+                                    _ => clipsync_core::SasDecision::Rejected,
+                                }
+                            },
                         )
                         .await
                     })
@@ -1239,6 +1252,15 @@ fn regression_f98_late_creator_completes_real_core_pairing_and_persists_matching
                             &member,
                             &store.load_config().unwrap(),
                             &code,
+                            move |check: clipsync_core::SasCheck| async move {
+                                let _ = member_sas_tx.send(check.sas.clone());
+                                match owner_sas_rx.await {
+                                    Ok(other) if check.matches(&other) => {
+                                        clipsync_core::SasDecision::Confirmed
+                                    }
+                                    _ => clipsync_core::SasDecision::Rejected,
+                                }
+                            },
                         )
                         .await
                     })

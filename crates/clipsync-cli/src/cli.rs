@@ -73,7 +73,8 @@ pub enum Commands {
 
 #[derive(Debug, Subcommand)]
 pub enum RoomCmd {
-    /// Create a pairing room and print a 6-digit join code (waits in the background)
+    /// Create a pairing room and print a 6-digit join code (waits in the background;
+    /// confirm the verification code with `clipsync room confirm`)
     Create {
         /// How long the code stays valid (e.g. 2m)
         #[arg(long)]
@@ -90,12 +91,30 @@ pub enum RoomCmd {
         /// Internal worker used by background room create
         #[arg(long, hide = true)]
         background_worker: bool,
+        /// Pair without comparing the verification code. This removes the
+        /// protection against a malicious relay or a guessed pairing code;
+        /// use it only for scripted setups on a network and relay you trust.
+        #[arg(long)]
+        insecure_skip_sas: bool,
     },
+    /// Join with a 6-digit code, then confirm the verification code both devices show
     Join {
         code: String,
         #[arg(long)]
         no_auto_sync: bool,
+        /// Pair without comparing the verification code. This removes the
+        /// protection against a malicious relay or a guessed pairing code;
+        /// use it only for scripted setups on a network and relay you trust.
+        #[arg(long)]
+        insecure_skip_sas: bool,
     },
+    /// Confirm the verification code of a background `room create`
+    Confirm {
+        /// Code shown on the other device; prompts when omitted
+        code: Option<String>,
+    },
+    /// Reject a background `room create` whose verification code does not match
+    Reject,
     Leave {
         #[arg(long)]
         yes: bool,

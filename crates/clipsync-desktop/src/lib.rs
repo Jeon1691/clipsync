@@ -3,9 +3,47 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 //! Desktop pairing and daemon control shared by the window.
 
-use clipsync_core::{begin_create_room, join_room, App};
+use std::future::Future;
+use std::pin::Pin;
+
+use clipsync_core::{begin_create_room, join_room, App, SasCheck, SasDecision};
 use clipsync_daemon::install_and_start;
 use clipsync_storage::LocalStore;
+
+/// A verification code the window must show next to Confirm and Cancel
+/// buttons. Dropping it unanswered rejects the pairing.
+#[derive(Debug)]
+pub struct SasPrompt {
+    pub check: SasCheck,
+    reply: tokio::sync::oneshot::Sender<SasDecision>,
+}
+
+impl SasPrompt {
+    pub fn answer(self, decision: SasDecision) {
+        let _ = self.reply.send(decision);
+    }
+
+    /// The pairing behind this prompt already ended (timeout, peer
+    /// rejection, relay error); the window should stop showing it.
+    pub fn is_closed(&self) -> bool {
+        self.reply.is_closed()
+    }
+}
+
+pub type SasConfirm =
+    Box<dyn FnOnce(SasCheck) -> Pin<Box<dyn Future<Output = SasDecision> + Send>> + Send>;
+
+/// Forward the SAS check to the window through `show` and wait for the
+/// user's answer. A window that drops the prompt rejects the pairing.
+pub fn window_confirmer(show: impl FnOnce(SasPrompt) + Send + 'static) -> SasConfirm {
+    Box::new(move |check: SasCheck| {
+        Box::pin(async move {
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            show(SasPrompt { check, reply });
+            answer.await.unwrap_or(SasDecision::Rejected)
+        })
+    })
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeskStatus {
@@ -45,7 +83,9 @@ pub fn normalize_join_code(raw: &str) -> Option<String> {
     }
 }
 
-pub async fn create_room(store: LocalStore) -> Result<String, String> {
+/// Create a room and return its code. Pairing continues in the background
+/// and commits only after `confirm` accepts the verification code.
+pub async fn create_room(store: LocalStore, confirm: SasConfirm) -> Result<String, String> {
     let app = App {
         store: store.clone(),
     };
@@ -56,18 +96,18 @@ pub async fn create_room(store: LocalStore) -> Result<String, String> {
         .map_err(|e| e.to_string())?;
     let code = pending.offer.pairing_code.clone();
     tokio::spawn(async move {
-        if pending.wait(&store, &identity).await.is_ok() {
+        if pending.wait(&store, &identity, confirm).await.is_ok() {
             let _ = install_and_start(&store.paths);
         }
     });
     Ok(code)
 }
 
-pub async fn join_room_code(app: &App, code: &str) -> Result<String, String> {
+pub async fn join_room_code(app: &App, code: &str, confirm: SasConfirm) -> Result<String, String> {
     let code = normalize_join_code(code).ok_or_else(|| "enter a 6-digit code".to_string())?;
     let identity = app.identity().map_err(|e| e.to_string())?;
     let cfg = app.store.load_config().map_err(|e| e.to_string())?;
-    join_room(&app.store, &identity, &cfg, &code)
+    join_room(&app.store, &identity, &cfg, &code, confirm)
         .await
         .map_err(|e| e.to_string())?;
     let room = app.store.current_room().map_err(|e| e.to_string())?;
@@ -79,6 +119,36 @@ pub async fn join_room_code(app: &App, code: &str) -> Result<String, String> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn window_confirmer_forwards_the_check_and_rejects_unanswered_prompts() {
+        let check = SasCheck {
+            sas: "482913".into(),
+            peer_device_id: "peer".into(),
+            peer_device_name: "Laptop".into(),
+        };
+        for answer in [
+            Some(SasDecision::Confirmed),
+            Some(SasDecision::Rejected),
+            None,
+        ] {
+            let (shown_tx, shown) = std::sync::mpsc::channel();
+            let confirm = window_confirmer(move |prompt| shown_tx.send(prompt).unwrap());
+            let decision = tokio::spawn(confirm(check.clone()));
+            let prompt = tokio::task::spawn_blocking(move || shown.recv().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(prompt.check, check);
+            match answer {
+                Some(decision) => prompt.answer(decision),
+                None => drop(prompt),
+            }
+            assert_eq!(
+                decision.await.unwrap(),
+                answer.unwrap_or(SasDecision::Rejected)
+            );
+        }
+    }
 
     #[test]
     fn join_code_keeps_six_digits() {
@@ -94,6 +164,31 @@ mod command_tests {
     use super::*;
     use clipsync_crypto::DeviceIdentity;
     use clipsync_storage::{AppConfig, AppPaths};
+
+    fn accept() -> SasConfirm {
+        Box::new(|_| Box::pin(async { SasDecision::Confirmed }))
+    }
+
+    /// Confirmers for two windows whose users compare the codes they see.
+    fn sas_comparison() -> (SasConfirm, SasConfirm) {
+        fn side(
+            mine: tokio::sync::oneshot::Sender<String>,
+            theirs: tokio::sync::oneshot::Receiver<String>,
+        ) -> SasConfirm {
+            Box::new(move |check: SasCheck| {
+                Box::pin(async move {
+                    let _ = mine.send(check.sas.clone());
+                    match theirs.await {
+                        Ok(other) if check.matches(&other) => SasDecision::Confirmed,
+                        _ => SasDecision::Rejected,
+                    }
+                })
+            })
+        }
+        let (creator_tx, creator_rx) = tokio::sync::oneshot::channel();
+        let (joiner_tx, joiner_rx) = tokio::sync::oneshot::channel();
+        (side(creator_tx, joiner_rx), side(joiner_tx, creator_rx))
+    }
 
     fn fixture() -> (tempfile::TempDir, App) {
         let root = tempfile::tempdir().unwrap();
@@ -138,23 +233,23 @@ mod command_tests {
     async fn commands_reject_invalid_codes_and_unavailable_relay_without_launching_services() {
         let (_root, app) = fixture();
         assert_eq!(
-            join_room_code(&app, "123").await.unwrap_err(),
+            join_room_code(&app, "123", accept()).await.unwrap_err(),
             "enter a 6-digit code"
         );
-        assert!(join_room_code(&app, "482913")
+        assert!(join_room_code(&app, "482913", accept())
             .await
             .unwrap_err()
             .contains("relay join"));
-        assert!(create_room(app.store.clone())
+        assert!(create_room(app.store.clone(), accept())
             .await
             .unwrap_err()
             .contains("relay create"));
         std::fs::write(app.store.paths.config_file(), "broken = [").unwrap();
-        assert!(create_room(app.store.clone())
+        assert!(create_room(app.store.clone(), accept())
             .await
             .unwrap_err()
             .contains("toml"));
-        assert!(join_room_code(&app, "482913")
+        assert!(join_room_code(&app, "482913", accept())
             .await
             .unwrap_err()
             .contains("toml"));
@@ -184,7 +279,7 @@ mod command_tests {
         let mut cfg = app.store.load_config().unwrap();
         cfg.relay_url = format!("http://{address}");
         app.store.save_config(&cfg).unwrap();
-        let code = create_room(app.store.clone()).await.unwrap();
+        let code = create_room(app.store.clone(), accept()).await.unwrap();
         assert_eq!(code.len(), 6);
         assert!(code.bytes().all(|byte| byte.is_ascii_digit()));
         assert!(
@@ -266,11 +361,12 @@ mod command_tests {
                 cfg.relay_url = format!("http://{address}");
                 app.store.save_config(&cfg).unwrap();
             }
-            let code = create_room(first.store.clone()).await.unwrap();
+            let (creator_sas, joiner_sas) = sas_comparison();
+            let code = create_room(first.store.clone(), creator_sas).await.unwrap();
             let formatted = format!("{} {}-{}", &code[..2], &code[2..4], &code[4..]);
             let room = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
-                join_room_code(&second, &formatted),
+                join_room_code(&second, &formatted, joiner_sas),
             )
             .await
             .unwrap()

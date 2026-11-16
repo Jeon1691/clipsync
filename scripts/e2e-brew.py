@@ -68,6 +68,62 @@ def spawn_create(home: Path) -> tuple[int, int]:
     return pid, fd
 
 
+def env_for(home: Path) -> dict:
+    env = os.environ.copy()
+    env["CLIPSYNC_HOME"] = str(home)
+    env["CLIPSYNC_NO_DAEMON"] = "1"
+    env["CLIPSYNC_RELAY_URL"] = RELAY
+    return env
+
+
+def join_comparing_sas(a: Path, b: Path, code: str) -> str:
+    """Join from B and compare verification codes the way two users would.
+
+    B prints its code and reads an answer on stdin; A's background worker
+    publishes its code in `status`. Each side is given the other's code.
+    """
+    join = subprocess.Popen(
+        [CS, "room", "join", code, "--no-auto-sync"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env_for(b),
+        text=True,
+    )
+    try:
+        joiner_sas = None
+        deadline = time.time() + TIMEOUT
+        assert join.stdout is not None and join.stdin is not None
+        while time.time() < deadline and joiner_sas is None:
+            line = join.stdout.readline()
+            if not line:
+                break
+            if line.startswith("verification code: "):
+                joiner_sas = "".join(ch for ch in line if ch.isdigit())
+        if not joiner_sas:
+            raise Fail(f"joiner printed no verification code: {join.stderr.read() if join.stderr else ''}")
+        creator_sas = None
+        while time.time() < deadline:
+            pairing = run_json(a, "status", timeout=5).get("pairing") or {}
+            if pairing.get("status") == "confirm_sas" and pairing.get("sas"):
+                creator_sas = pairing["sas"]
+                break
+            time.sleep(0.2)
+        if creator_sas != joiner_sas:
+            raise Fail(f"verification codes differ: creator={creator_sas} joiner={joiner_sas}")
+        log(f"verification codes match ({creator_sas})")
+        join.stdin.write(creator_sas + "\n")
+        join.stdin.flush()
+        log(run(a, "room", "confirm", joiner_sas, timeout=TIMEOUT).strip())
+        out, err = join.communicate(timeout=TIMEOUT)
+        if join.returncode != 0:
+            raise Fail(f"join rc={join.returncode}\nstdout:\n{out}\nstderr:\n{err}")
+        return out
+    finally:
+        if join.poll() is None:
+            join.kill()
+
+
 def read_until_code(fd: int, deadline: float) -> str:
     buf = ""
     while time.time() < deadline:
@@ -164,7 +220,11 @@ def main() -> int:
         if not code:
             raise Fail(f"no pairing code: {offer}")
         log(f"pairing code={code} background={offer.get('background')}")
-        join_out = run(b, "room", "join", code, "--no-auto-sync", timeout=TIMEOUT)
+        room_help = subprocess.check_output([CS, "room", "--help"], text=True)
+        if "confirm" in room_help:
+            join_out = join_comparing_sas(a, b, code)
+        else:
+            join_out = run(b, "room", "join", code, "--no-auto-sync", timeout=TIMEOUT)
         log(join_out.strip())
         deadline = time.time() + TIMEOUT
         while time.time() < deadline:

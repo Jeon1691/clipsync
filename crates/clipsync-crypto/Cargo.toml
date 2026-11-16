@@ -29,6 +29,8 @@ zeroize.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+# spake2 0.4 draws scalars through rand_core 0.6; seeded tests pin SAS vectors.
+spake2_rand_core = { package = "rand_core", version = "0.6" }
 
 [lints]
 workspace = true

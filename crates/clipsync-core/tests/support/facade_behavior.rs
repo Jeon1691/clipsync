@@ -229,20 +229,27 @@ fn explicit_pairing_without_auto_sync_returns_matching_rooms_and_installs_no_ser
             let offer_channel = Arc::new(Mutex::new(Some(sent)));
             let store = creator.store.clone();
             let create_app = creator.clone();
+            let (creator_sas, joiner_sas) = crate::pairing::sas_comparison();
             let create = tokio::spawn(async move {
                 create_app
-                    .room_create(None, true, false, move |offer| {
-                        let waiting = store.load_pairing_wait().unwrap().unwrap();
-                        assert_eq!(waiting.status, "waiting");
-                        assert_eq!(waiting.pairing_code, offer.pairing_code);
-                        offer_channel
-                            .lock()
-                            .unwrap()
-                            .take()
-                            .unwrap()
-                            .send(offer.pairing_code.clone())
-                            .unwrap();
-                    })
+                    .room_create(
+                        None,
+                        true,
+                        false,
+                        move |offer| {
+                            let waiting = store.load_pairing_wait().unwrap().unwrap();
+                            assert_eq!(waiting.status, "waiting");
+                            assert_eq!(waiting.pairing_code, offer.pairing_code);
+                            offer_channel
+                                .lock()
+                                .unwrap()
+                                .take()
+                                .unwrap()
+                                .send(offer.pairing_code.clone())
+                                .unwrap();
+                        },
+                        creator_sas,
+                    )
                     .await
             });
             let code = received.await.unwrap();
@@ -274,7 +281,7 @@ fn explicit_pairing_without_auto_sync_returns_matching_rooms_and_installs_no_ser
             })
             .await
             .unwrap();
-            let joined = joiner.room_join(&code, true).await.unwrap();
+            let joined = joiner.room_join(&code, true, joiner_sas).await.unwrap();
             let created = create.await.unwrap().unwrap();
             assert_eq!(created.room_id, joined.room_id);
             assert_eq!(

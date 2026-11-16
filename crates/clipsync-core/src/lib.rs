@@ -20,7 +20,8 @@ pub use engine::{
 };
 pub use error::{CoreError, ExitCode};
 pub use pairing::{
-    begin_create_room, create_room, join_room, leave_room, PendingCreate, RoomOffer,
+    begin_create_room, create_room, display_sas, join_room, leave_room, normalize_sas,
+    PendingCreate, RoomOffer, SasCheck, SasDecision,
 };
 
 use std::io::{IsTerminal, Read};
@@ -81,13 +82,18 @@ impl App {
         self.init(None)
     }
 
-    pub async fn room_create(
+    pub async fn room_create<C, F>(
         &self,
         ttl: Option<std::time::Duration>,
         no_auto_sync: bool,
         json: bool,
         print_code: impl Fn(&RoomOffer),
-    ) -> Result<RoomOffer, CoreError> {
+        confirm: C,
+    ) -> Result<RoomOffer, CoreError>
+    where
+        C: FnOnce(SasCheck) -> F + Send,
+        F: std::future::Future<Output = SasDecision> + Send,
+    {
         let identity = self.identity()?;
         let cfg = self.store.load_config()?;
         let ttl_secs = ttl
@@ -106,12 +112,27 @@ impl App {
             expires_at: offer.expires_at.to_rfc3339(),
             pid: std::process::id(),
             error: None,
+            sas: None,
+            peer_device_name: None,
+            sas_decision: None,
         };
         let _ = self.store.save_pairing_wait(&wait_file);
         print_code(&pending.offer);
-        match pending.wait(&self.store, &identity).await {
+        // A rejected background pairing may be replaced by a newer `room
+        // create` while this one winds down; never overwrite that file.
+        let finish = |result: PairingWait| {
+            let replaced = matches!(
+                self.store.load_pairing_wait(),
+                Ok(Some(current))
+                    if current.pid != result.pid || current.room_id != result.room_id
+            );
+            if !replaced {
+                let _ = self.store.save_pairing_wait(&result);
+            }
+        };
+        match pending.wait(&self.store, &identity, confirm).await {
             Ok(()) => {
-                let _ = self.store.save_pairing_wait(&PairingWait {
+                finish(PairingWait {
                     status: "paired".into(),
                     ..wait_file
                 });
@@ -122,7 +143,7 @@ impl App {
                 Ok(offer)
             }
             Err(e) => {
-                let _ = self.store.save_pairing_wait(&PairingWait {
+                finish(PairingWait {
                     status: "failed".into(),
                     error: Some(e.to_string()),
                     ..wait_file
@@ -132,14 +153,19 @@ impl App {
         }
     }
 
-    pub async fn room_join(
+    pub async fn room_join<C, F>(
         &self,
         code: &str,
         no_auto_sync: bool,
-    ) -> Result<clipsync_storage::RoomRecord, CoreError> {
+        confirm: C,
+    ) -> Result<clipsync_storage::RoomRecord, CoreError>
+    where
+        C: FnOnce(SasCheck) -> F + Send,
+        F: std::future::Future<Output = SasDecision> + Send,
+    {
         let identity = self.identity()?;
         let cfg = self.store.load_config()?;
-        let room = join_room(&self.store, &identity, &cfg, code).await?;
+        let room = join_room(&self.store, &identity, &cfg, code, confirm).await?;
         if !no_auto_sync {
             maybe_start_daemon(&self.store)?;
         }

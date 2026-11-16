@@ -1731,9 +1731,15 @@ async fn create_failure_retains_the_offer_and_error_for_background_status() {
     let offer = printed.clone();
     let error = peer
         .app
-        .room_create(Some(Duration::from_secs(999)), true, false, move |value| {
-            *offer.lock() = Some(value.pairing_code.clone());
-        })
+        .room_create(
+            Some(Duration::from_secs(999)),
+            true,
+            false,
+            move |value| {
+                *offer.lock() = Some(value.pairing_code.clone());
+            },
+            |_| async { crate::SasDecision::Confirmed },
+        )
         .await
         .err()
         .unwrap();
@@ -1766,25 +1772,34 @@ fn app_pairing_enables_sync_and_supports_one_shot_pull_without_installing_a_serv
         let (sent, received) = tokio::sync::oneshot::channel();
         let offer_channel = Arc::new(Mutex::new(Some(sent)));
         let app = pair.a.app.clone();
+        let (creator_sas, joiner_sas) = crate::pairing::sas_comparison();
         let creator = tokio::spawn(async move {
-            app.room_create(Some(Duration::from_secs(60)), false, true, move |offer| {
-                let _ = offer_channel
-                    .lock()
-                    .take()
-                    .unwrap()
-                    .send(offer.pairing_code.clone());
-            })
+            app.room_create(
+                Some(Duration::from_secs(60)),
+                false,
+                true,
+                move |offer| {
+                    let _ = offer_channel
+                        .lock()
+                        .take()
+                        .unwrap()
+                        .send(offer.pairing_code.clone());
+                },
+                creator_sas,
+            )
             .await
         });
         let code = tokio::time::timeout(Duration::from_secs(5), received)
             .await
             .unwrap()
             .unwrap();
-        let joined =
-            tokio::time::timeout(Duration::from_secs(10), pair.b.app.room_join(&code, false))
-                .await
-                .unwrap()
-                .unwrap();
+        let joined = tokio::time::timeout(
+            Duration::from_secs(10),
+            pair.b.app.room_join(&code, false, joiner_sas),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let created = tokio::time::timeout(Duration::from_secs(10), creator)
             .await
             .unwrap()
@@ -1905,10 +1920,20 @@ fn command_facade_reports_corrupt_config_and_state_without_replacing_them() {
         assert!(peer.app.status().await.is_err());
         assert!(peer
             .app
-            .room_create(None, true, false, |_| {})
+            .room_create(
+                None,
+                true,
+                false,
+                |_| {},
+                |_| async { crate::SasDecision::Confirmed }
+            )
             .await
             .is_err());
-        assert!(peer.app.room_join("123456", true).await.is_err());
+        assert!(peer
+            .app
+            .room_join("123456", true, |_| async { crate::SasDecision::Confirmed })
+            .await
+            .is_err());
         assert_eq!(std::fs::read(&config).unwrap(), b"invalid = [");
         peer.app.store.save_config(&AppConfig::default()).unwrap();
         let state = peer.app.store.paths.state_file();
