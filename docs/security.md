@@ -51,11 +51,16 @@ keys, room record, or device token. A rejection, an unanswered prompt, or the
 pairing deadline aborts with nothing stored. The deadline runs from when the
 code was created, not from when the prompt appears: the relay keeps a pairing
 session for 120 seconds after `room create`, so joining and comparing must both
-fit in that window. On rejection the device sends an `error` frame (`sas_rejected`), and
-the relay drops the pairing session. If the other device has not answered yet,
-its later `device_bind` is refused. If it already confirmed, it stores nothing
-and fails at its pairing deadline. The peer name comes from the relay and is
-not authenticated; only the code is.
+fit in that window. On rejection the device first sends a `key_confirm` with
+an empty MAC as an abort notice, then an `error` frame (`sas_rejected`), and
+the relay drops the pairing session. The relay forwards the notice but not the
+`error`, so the other device stops at once with nothing stored, whether its
+user is still comparing or already confirmed. A device that predates the code
+fails key confirmation on the notice instead. If the notice is lost, the other
+device's later `device_bind` is refused, or it fails at its pairing deadline.
+The notice is unauthenticated, but a relay that forges it gains nothing it
+could not get by dropping the session. The peer name comes from the relay and
+is not authenticated; only the code is.
 
 Users must actually compare the codes. Typing the code shown on the other
 device is the most reliable comparison; answering "yes" relies on the user
@@ -70,8 +75,8 @@ devices derive the same 6-digit code. This is a birthday search of roughly
 comparison. The code fully stops a guessed-code joiner and any relay that does
 not run this search, and it makes an attack an explicit, targeted change to
 the relay. Closing the gap needs a commitment to the SPAKE2 messages, which is
-a protocol change and is not part of this version. Until then, pair through a
-relay you trust.
+a protocol change; relay SAS grinding is addressed in a follow-up PR. Until
+that ships, pair through a relay you trust.
 
 **Older peers.** The code is computed locally, so the wire format is unchanged
 and an updated device still pairs with an older one. The older device shows no

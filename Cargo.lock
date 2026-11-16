@@ -1014,6 +1014,7 @@ dependencies = [
  "infer",
  "keyring",
  "parking_lot 0.13.0",
+ "rand 0.9.5",
  "reqwest",
  "serde",
  "serde_json",

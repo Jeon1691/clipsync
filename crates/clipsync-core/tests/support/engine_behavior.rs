@@ -1929,9 +1929,12 @@ fn command_facade_reports_corrupt_config_and_state_without_replacing_them() {
             )
             .await
             .is_err());
+        // The invalid config fails the join before the code is used.
+        const PAIRING_CODE_SPACE: u32 = 1_000_000;
+        let code = format!("{:06}", rand::random_range(0..PAIRING_CODE_SPACE));
         assert!(peer
             .app
-            .room_join("123456", true, |_| async { crate::SasDecision::Confirmed })
+            .room_join(&code, true, |_| async { crate::SasDecision::Confirmed })
             .await
             .is_err());
         assert_eq!(std::fs::read(&config).unwrap(), b"invalid = [");

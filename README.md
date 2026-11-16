@@ -120,10 +120,10 @@ clipsync room confirm
 
 Check that the two codes are the same, then confirm on both devices (type the
 code shown on the other device, or `yes`). If they differ, answer anything
-else, or run `clipsync room reject` on A: pairing stops and nothing is stored.
-A mismatch means something other than your device joined, for example a relay
-in the middle or someone who guessed the code. With `--foreground`, device A
-asks in the same terminal instead of `room confirm`.
+else, or run `clipsync room reject` on A: pairing stops on both devices and
+nothing is stored. A mismatch means something other than your device joined,
+for example a relay in the middle or someone who guessed the code. With
+`--foreground`, device A asks in the same terminal instead of `room confirm`.
 
 For scripts, `clipsync room confirm <CODE>` compares non-interactively, and
 `room join` reads its answer from stdin. `--insecure-skip-sas` on

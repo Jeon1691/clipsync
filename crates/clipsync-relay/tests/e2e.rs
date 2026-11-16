@@ -767,7 +767,9 @@ async fn rejected_sas_leaves_both_devices_without_room_keys_or_credentials() {
     })
     .await
     .expect("relay kept the rejected pairing session");
-    release_tx.send(()).unwrap();
+    // The joiner's abort notice usually ends the creator while its prompt is
+    // still open; a late confirmation must then be refused by the relay.
+    let _ = release_tx.send(());
     let created = tokio::time::timeout(Duration::from_secs(20), creator)
         .await
         .unwrap()
@@ -783,18 +785,81 @@ async fn rejected_sas_leaves_both_devices_without_room_keys_or_credentials() {
         let store = store_in(dir);
         assert!(store.load_state().unwrap().rooms.is_empty());
         assert!(store.current_room().is_err());
-        assert!(stored_secrets(dir).is_empty(), "{:?}", stored_secrets(dir));
+        assert!(stored_secrets(dir).is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn joiner_rejection_after_creator_confirmed_ends_the_creator_promptly() {
+    // Lets the creator's binding reach the relay before the joiner answers,
+    // so the creator is already waiting for a commit that will never come.
+    const CREATOR_BIND_GRACE: Duration = Duration::from_millis(300);
+    // Far below the ~125 s pairing deadline a confirmed creator used to wait.
+    const PROMPT_ABORT_BUDGET: Duration = Duration::from_secs(10);
+    let (relay, _h) = start_relay().await;
+    let a_dir = TempDir::new().unwrap();
+    let b_dir = TempDir::new().unwrap();
+    let app_a = app_in(&a_dir, &relay);
+    let app_b = app_in(&b_dir, &relay);
+    let (id_a, id_b) = (app_a.identity().unwrap(), app_b.identity().unwrap());
+    let cfg_a = app_a.store.load_config().unwrap();
+    let cfg_b = app_b.store.load_config().unwrap();
+    let pending = begin_create_room(&id_a, &cfg_a, 60).await.unwrap();
+    let code = pending.offer.pairing_code.clone();
+    let (confirmed_tx, confirmed) = tokio::sync::oneshot::channel::<()>();
+    let store_a = store_in(&a_dir);
+    let creator_id = id_a.clone();
+    let creator = tokio::spawn(async move {
+        pending
+            .wait(&store_a, &creator_id, move |_| async move {
+                let _ = confirmed_tx.send(());
+                SasDecision::Confirmed
+            })
+            .await
+    });
+    wait_for_connection_count(&relay, 1).await;
+    let joined = join_room(&app_b.store, &id_b, &cfg_b, &code, move |_| async move {
+        let _ = confirmed.await;
+        tokio::time::sleep(CREATOR_BIND_GRACE).await;
+        SasDecision::Rejected
+    });
+    let joined = tokio::time::timeout(PROMPT_ABORT_BUDGET, joined)
+        .await
+        .unwrap();
+    assert!(joined
+        .unwrap_err()
+        .to_string()
+        .contains("verification code rejected"));
+    let created = tokio::time::timeout(PROMPT_ABORT_BUDGET, creator)
+        .await
+        .expect("a confirmed creator must learn of the rejection before its deadline")
+        .unwrap();
+    let refused = created.expect_err("creator must not complete a rejected pairing");
+    assert!(
+        refused
+            .to_string()
+            .contains("the other device rejected the verification code"),
+        "{refused}"
+    );
+    for dir in [&a_dir, &b_dir] {
+        let store = store_in(dir);
+        assert!(store.load_state().unwrap().rooms.is_empty());
+        assert!(stored_secrets(dir).is_empty());
     }
 }
 
 #[tokio::test]
 async fn wrong_pairing_code_rejected() {
+    // Six decimal digits, the relay's pairing-code format.
+    const PAIRING_CODE_SPACE: u32 = 1_000_000;
     let (relay, _h) = start_relay().await;
     let dir = TempDir::new().unwrap();
     let app = app_in(&dir, &relay);
     let id = app.identity().unwrap();
     let cfg = app.store.load_config().unwrap();
-    let err = join_room(&app.store, &id, &cfg, "000000", |_| async {
+    // No room exists on this relay, so every code is wrong.
+    let unknown_code = format!("{:06}", rand::random_range(0..PAIRING_CODE_SPACE));
+    let err = join_room(&app.store, &id, &cfg, &unknown_code, |_| async {
         SasDecision::Confirmed
     })
     .await

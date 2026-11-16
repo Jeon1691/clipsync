@@ -74,8 +74,11 @@ After verifying the peer's `key_confirm`, a client shows the SAS and waits for
 the local user. It sends its `device_bind` only after the user confirms. It
 stores room keys, the room record, and the device token only after its own
 `device_bind` went out and the peer's `device_bind` and `pairing_complete`
-arrived. On rejection it sends `error` with code `sas_rejected`; the relay
-aborts the pairing session on any client `error`. Pre-SAS clients send
+arrived. On rejection it sends a `key_confirm` whose `mac` is empty, then
+`error` with code `sas_rejected`; the relay forwards the `key_confirm` to the
+peer and aborts the pairing session on any client `error`. A SAS client that
+receives a second `key_confirm` after the peer's first one stops with nothing
+stored; a pre-SAS client fails key confirmation on it. Pre-SAS clients send
 `device_bind` right after key confirmation; a SAS client buffers it until its
 user confirms. See [security](security.md#verification-code-sas) for what the
 comparison covers.
