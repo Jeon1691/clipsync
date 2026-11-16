@@ -86,6 +86,9 @@ pub struct RelayState {
     pub(crate) member_routes: DashMap<MemberKey, Vec<MemberRoute>>,
     next_connection_id: AtomicU64,
     live_connections: Arc<AtomicU64>,
+    // How long a socket may send nothing before the relay closes it
+    // (`ws::READ_IDLE_TIMEOUT`); a field only so tests can shorten it.
+    pub(crate) read_idle_timeout: Duration,
     queue: DashMap<MemberKey, (QueuedEnvelope, DateTime<Utc>)>,
     ip_fails: DashMap<IpAddr, (u32, Instant)>,
     pub connections_total: AtomicU64,
@@ -134,6 +137,7 @@ impl RelayState {
             member_routes: DashMap::new(),
             next_connection_id: AtomicU64::new(0),
             live_connections: Arc::new(AtomicU64::new(0)),
+            read_idle_timeout: crate::ws::READ_IDLE_TIMEOUT,
             queue: DashMap::new(),
             ip_fails: DashMap::new(),
             connections_total: AtomicU64::new(0),

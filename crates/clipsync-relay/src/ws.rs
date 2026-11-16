@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
+use futures_util::future::join_all;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::sync::mpsc::error::SendTimeoutError;
@@ -15,7 +16,7 @@ use tracing::{debug, warn};
 
 use clipsync_protocol::{
     AckStatus, ClientRole, ControlMessage, DeviceId, DeviceRole, ItemKind, MessageId, PeerInfo,
-    QueuedEnvelope, FRAME_HARD_CAP,
+    QueuedEnvelope, FRAME_HARD_CAP, HEARTBEAT_SECS,
 };
 
 use crate::auth::verify_token;
@@ -43,6 +44,25 @@ pub async fn ws_handler(
         .max_frame_size(FRAME_HARD_CAP)
         .on_upgrade(move |socket| handle_socket(socket, state, q.token))
 }
+
+/// Client heartbeats a socket may miss before the relay treats it as dead.
+/// Clients send a control `Ping` and a WebSocket ping every `HEARTBEAT_SECS`
+/// and reconnect on their own after about two silent heartbeats, so three
+/// tolerates a late beat and never closes a socket its client still trusts.
+const READ_IDLE_HEARTBEATS: u64 = 3;
+
+/// How long a socket may send nothing before the relay closes it and drops its
+/// route. A half-open socket (laptop sleep, network change) never delivers a
+/// FIN; without this it would keep its member online and swallow the text
+/// that should have been queued for it.
+pub(crate) const READ_IDLE_TIMEOUT: Duration =
+    Duration::from_secs(HEARTBEAT_SECS * READ_IDLE_HEARTBEATS);
+
+/// How long a closing socket's writer may take to flush its queue and close
+/// frame. A peer that still reads needs far less; a writer still blocked after
+/// this writes to a peer that stopped reading, so it is aborted, which frees
+/// the queue and closes the TCP connection.
+const WRITER_CLOSE_GRACE: Duration = Duration::from_secs(5);
 
 struct ConnCtx {
     device_id: String,
@@ -140,7 +160,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::channel::<WsOut>(256);
 
-    let writer = tokio::spawn(async move {
+    let mut writer = tokio::spawn(async move {
         while let Some(out) = rx.recv().await {
             let r = match out {
                 WsOut::Text(t) => sink.send(Message::Text(t.into())).await,
@@ -166,9 +186,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
             .and_then(|c| c.member_conn.as_ref())
             .map(|m| m.evicted.clone());
         let msg = tokio::select! {
-            msg = stream.next() => match msg {
-                Some(Ok(msg)) => msg,
-                _ => break,
+            msg = tokio::time::timeout(state.read_idle_timeout, stream.next()) => match msg {
+                Ok(Some(Ok(msg))) => msg,
+                Ok(_) => break,
+                Err(_) => {
+                    debug!("closing a socket that missed its heartbeats");
+                    break;
+                }
             },
             // An evicted or revoked member socket lost its route. Stop reading
             // so it closes even if the client never answers the close frame.
@@ -209,16 +233,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
         }
     }
 
-    // `c` (and its live-connection count) is dropped only after any leave
-    // notice is queued, so observers of the metric also see that notice.
-    if let Some(c) = ctx {
+    if let Some(c) = &ctx {
         if let Some(member) = &c.member_conn {
             state.unregister_conn(&c.room_id, &c.device_id, member.id);
             // The member may still have other sockets (its daemon, a newer
             // reconnect). Its peers must keep seeing it online until the last
             // one closes.
             if !state.is_online(&c.room_id, &c.device_id) {
-                notify_peers_left(&state, &c).await;
+                notify_peers_left(&state, c).await;
             }
         }
         if let (Some(sid), Some(side)) = (&c.pairing_sid, c.pairing_side) {
@@ -233,8 +255,20 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
             }
         }
     }
-    let _ = tx.send(WsOut::Close).await;
-    let _ = writer.await;
+    // An evicted socket may have a full queue behind a writer blocked on a
+    // peer that stopped reading, so the close is queued without waiting.
+    let close_queued = tx.try_send(WsOut::Close).is_ok();
+    if !close_queued
+        || tokio::time::timeout(WRITER_CLOSE_GRACE, &mut writer)
+            .await
+            .is_err()
+    {
+        writer.abort();
+        let _ = writer.await;
+    }
+    // The live-connection count drops only now: after any leave notice was
+    // queued and after the writer, its queue and its sink are gone.
+    drop(ctx);
 }
 
 const MEMBER_CONNECTION_REQUIRED: &str = "room member connection required";
@@ -691,16 +725,18 @@ async fn fanout_except(state: &Arc<RelayState>, room_id: &str, except: &str, msg
 /// How long an older socket of a member may hold up delivery while its
 /// outbound queue is full before the relay evicts it. A healthy socket frees
 /// a slot once its writer hands one frame (at most `FRAME_HARD_CAP`, 384 KiB)
-/// to the kernel; 30 s covers that on a link of about 100 kbit/s. Only a
-/// stalled socket reaches it, typically a half-open one whose client already
-/// reconnected, which would otherwise block delivery to the member's live
-/// sockets until TCP gave up on it.
+/// to the kernel; 30 s covers that on a link of about 105 kbit/s or faster
+/// (384 KiB × 8 / 30 s). Only a stalled socket reaches it, typically a
+/// half-open one whose client already reconnected, which would otherwise block
+/// delivery to the member's live sockets until the read-idle timeout closed it.
 const STALLED_MEMBER_SOCKET_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Sends `out` to every routed socket of `peer` in `room_id` and returns
 /// whether the member had any. The newest socket keeps plain backpressure, as
 /// a member's only socket always had; an older socket that stays full for
 /// `STALLED_MEMBER_SOCKET_TIMEOUT` is evicted instead of stalling the sender.
+/// All of the member's sockets are sent to at once, so stalled older sockets
+/// delay one delivery by at most one `STALLED_MEMBER_SOCKET_TIMEOUT` in total.
 async fn deliver(state: &RelayState, room_id: &str, peer: &str, out: WsOut) -> bool {
     deliver_within(state, room_id, peer, out, STALLED_MEMBER_SOCKET_TIMEOUT).await
 }
@@ -716,20 +752,24 @@ async fn deliver_within(
     let Some(((_, newest), older)) = sockets.split_last() else {
         return false;
     };
-    for (id, sender) in older {
-        match sender.send_timeout(out.clone(), stall_timeout).await {
-            Ok(()) => {
-                state.frames_forwarded.fetch_add(1, Ordering::Relaxed);
+    let older_sends = join_all(older.iter().map(|(id, sender)| {
+        let out = out.clone();
+        async move {
+            match sender.send_timeout(out, stall_timeout).await {
+                Ok(()) => {
+                    state.frames_forwarded.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(SendTimeoutError::Timeout(_)) => {
+                    warn!("evicting a member socket whose outbound queue stalled");
+                    state.evict_conn(room_id, peer, *id);
+                }
+                // The socket is already closing; its cleanup unregisters it.
+                Err(SendTimeoutError::Closed(_)) => {}
             }
-            Err(SendTimeoutError::Timeout(_)) => {
-                warn!("evicting a member socket whose outbound queue stalled");
-                state.evict_conn(room_id, peer, *id);
-            }
-            // The socket is already closing; its cleanup unregisters it.
-            Err(SendTimeoutError::Closed(_)) => {}
         }
-    }
-    if newest.send(out).await.is_ok() {
+    }));
+    let (_, newest_result) = tokio::join!(older_sends, newest.send(out));
+    if newest_result.is_ok() {
         state.frames_forwarded.fetch_add(1, Ordering::Relaxed);
     }
     true

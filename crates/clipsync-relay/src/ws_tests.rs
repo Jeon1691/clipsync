@@ -1533,3 +1533,275 @@ async fn a_stalled_older_member_socket_is_evicted_instead_of_blocking_delivery()
     assert!(!state.owns_route(rid.as_str(), member.as_str(), stalled.id));
     assert!(state.owns_route(rid.as_str(), member.as_str(), live.id));
 }
+
+mod liveness {
+    //! A member's sockets are routed only while they are alive and closed for
+    //! real once they are not: a silent socket times out, stalled sockets cost
+    //! one stall timeout per delivery, and an evicted socket frees its queue.
+    use super::*;
+    use tokio_tungstenite::tungstenite::Message as ClientMessage;
+
+    type Client = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    // Stands in for `READ_IDLE_TIMEOUT` so a silent socket is dropped quickly.
+    const TEST_READ_IDLE_TIMEOUT: Duration = Duration::from_millis(800);
+    // Stands in for the client's `HEARTBEAT_SECS`, well inside the idle timeout.
+    const TEST_HEARTBEAT: Duration = Duration::from_millis(100);
+    // Bounds every wait, so a regression fails instead of hanging.
+    const FIXTURE_DEADLINE: Duration = Duration::from_secs(10);
+    // Large enough that a few hundred frames fill the loopback socket buffers.
+    const TEST_FILL_FRAME_BYTES: usize = 64 * 1024;
+    // A send blocked this long means the writer stopped and the queue is full.
+    const TEST_QUEUE_FULL_PROBE: Duration = Duration::from_millis(200);
+    const METRICS_POLL: Duration = Duration::from_millis(5);
+
+    fn state_with_read_idle_timeout(timeout: Duration) -> Arc<RelayState> {
+        let _ = product_logs();
+        let mut state = RelayState::new(RelayConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            public_url: "http://127.0.0.1".into(),
+            token_secret: vec![42; 32],
+            webhook_url: None,
+            webhook_secret: None,
+        });
+        state.read_idle_timeout = timeout;
+        Arc::new(state)
+    }
+
+    async fn serve(state: Arc<RelayState>) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new()
+                    .route("/v1/ws", axum::routing::get(ws_handler))
+                    .with_state(state),
+            )
+            .await
+            .unwrap();
+        });
+        (address, server)
+    }
+
+    /// The next control frame, while heartbeating like a real client so the
+    /// relay keeps this socket alive. Pongs answer those heartbeats.
+    async fn control(socket: &mut Client) -> ControlMessage {
+        loop {
+            match tokio::time::timeout(TEST_HEARTBEAT, socket.next()).await {
+                Err(_) => socket
+                    .send(ClientMessage::Text(
+                        ControlMessage::Ping { ts: 0 }.encode().unwrap().into(),
+                    ))
+                    .await
+                    .unwrap(),
+                Ok(frame) => match frame.unwrap().unwrap() {
+                    ClientMessage::Text(text) => match ControlMessage::decode(&text).unwrap() {
+                        ControlMessage::Pong { .. } => {}
+                        other => return other,
+                    },
+                    ClientMessage::Ping(bytes) => {
+                        socket.send(ClientMessage::Pong(bytes)).await.unwrap()
+                    }
+                    // The relay answers a WebSocket ping with an empty binary frame.
+                    ClientMessage::Binary(bytes) if bytes.is_empty() => {}
+                    other => panic!("expected a control frame, got {other:?}"),
+                },
+            }
+        }
+    }
+
+    async fn connect(
+        address: std::net::SocketAddr,
+        device: &DeviceId,
+        room: &RoomId,
+        token: &str,
+    ) -> (Client, ControlMessage) {
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/v1/ws"))
+            .await
+            .unwrap();
+        socket
+            .send(ClientMessage::Text(
+                hello(device, room, token).encode().unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        let hello_ok = control(&mut socket).await;
+        assert!(matches!(hello_ok, ControlMessage::HelloOk { .. }));
+        (socket, hello_ok)
+    }
+
+    fn text_envelope(room: &RoomId, sender: &DeviceId, ciphertext: &str) -> ControlMessage {
+        ControlMessage::TextEnvelope {
+            routing: RoutingHeader {
+                version: clipsync_protocol::PROTOCOL_VERSION,
+                message_id: MessageId::new(),
+                transfer_id: TransferId::new(),
+                room_id: room.clone(),
+                sender_device_id: sender.clone(),
+                recipient: Recipient::Broadcast,
+                sent_at: chrono::Utc::now(),
+                expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+                item_kind: ItemKind::Text,
+                seq: 1,
+            },
+            nonce: "opaque-nonce".into(),
+            ciphertext: ciphertext.into(),
+        }
+    }
+
+    async fn wait_for_live_connections(state: &RelayState, expected: u64) {
+        let line = format!("clipsync_ws_connections {expected}\n");
+        while !state.metrics_text().starts_with(&line) {
+            tokio::time::sleep(METRICS_POLL).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_silent_socket_is_dropped_so_text_is_queued_once_the_live_socket_quits() {
+        tokio::time::timeout(FIXTURE_DEADLINE, async {
+            let state = state_with_read_idle_timeout(TEST_READ_IDLE_TIMEOUT);
+            let (rid, owner, member, owner_token, member_token) = room(&state);
+            let (address, server) = serve(state.clone()).await;
+            let (mut peer, _) = connect(address, &member, &rid, &member_token).await;
+            // The daemon's first socket goes half-open (laptop sleep, network
+            // change): the relay sees no FIN, and the client sends nothing more.
+            let (stale, _) = connect(address, &owner, &rid, &owner_token).await;
+            assert!(matches!(control(&mut peer).await,
+                ControlMessage::PeerJoined { device } if device.device_id == owner));
+            // The client watchdog reconnects, and later the daemon quits cleanly.
+            let (mut live, _) = connect(address, &owner, &rid, &owner_token).await;
+            assert!(matches!(control(&mut peer).await,
+                ControlMessage::PeerJoined { device } if device.device_id == owner));
+            let live_sender = state.member_senders(rid.as_str(), owner.as_str())[1]
+                .1
+                .clone();
+            live.close(None).await.unwrap();
+            live_sender.closed().await;
+
+            // The silent socket must not keep the device online: the relay
+            // drops it and announces the device left.
+            assert!(
+                matches!(control(&mut peer).await,
+                ControlMessage::PeerLeft { device_id } if device_id == owner),
+                "the silent socket kept the device online"
+            );
+            assert!(!state.is_online(rid.as_str(), owner.as_str()));
+
+            // Text for the device is now queued, not acked into a dead socket.
+            peer.send(ClientMessage::Text(
+                text_envelope(&rid, &member, "for-the-returning-daemon")
+                    .encode()
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            assert!(matches!(
+                control(&mut peer).await,
+                ControlMessage::Ack {
+                    status: AckStatus::Accepted,
+                    ..
+                }
+            ));
+            let (back, hello_ok) = connect(address, &owner, &rid, &owner_token).await;
+            assert!(matches!(hello_ok,
+                ControlMessage::HelloOk { queued_text: Some(queued), .. }
+                    if queued.ciphertext == "for-the-returning-daemon"));
+            drop((stale, back, peer));
+            server.abort();
+        })
+        .await
+        .expect("silent-socket liveness fixture exceeded its deadline");
+    }
+
+    // Stands in for `STALLED_MEMBER_SOCKET_TIMEOUT`, long enough that
+    // scheduling jitter is small beside it.
+    const TEST_STALL_TIMEOUT: Duration = Duration::from_millis(300);
+
+    #[tokio::test]
+    async fn stalled_older_sockets_delay_one_delivery_by_one_stall_timeout_in_total() {
+        let state = state();
+        let (rid, _, member, _, _) = room(&state);
+        let mut stalled = Vec::new();
+        for _ in 1..MAX_MEMBER_SOCKETS {
+            let (tx, rx) = mpsc::channel(1);
+            tx.try_send(WsOut::Text("unsent".into()))
+                .expect("fill the stalled queue");
+            let registration = state
+                .register_conn(rid.as_str(), member.as_str(), tx)
+                .unwrap();
+            stalled.push((registration, rx));
+        }
+        let (live_tx, mut live_rx) = mpsc::channel(1);
+        let live = state
+            .register_conn(rid.as_str(), member.as_str(), live_tx)
+            .unwrap();
+
+        let started = tokio::time::Instant::now();
+        assert!(
+            deliver_within(
+                &state,
+                rid.as_str(),
+                member.as_str(),
+                WsOut::Binary(vec![7, 8, 9]),
+                TEST_STALL_TIMEOUT,
+            )
+            .await
+        );
+        let waited = started.elapsed();
+        // Waiting on the stalled sockets one after another takes at least one
+        // stall timeout each.
+        let one_after_another = TEST_STALL_TIMEOUT * u32::try_from(stalled.len()).unwrap();
+        assert!(
+            waited < one_after_another,
+            "{} stalled sockets delayed delivery by {waited:?}, not one stall timeout",
+            stalled.len()
+        );
+        assert!(matches!(live_rx.recv().await, Some(WsOut::Binary(bytes)) if bytes == [7, 8, 9]));
+        for (registration, _) in &stalled {
+            assert!(!state.owns_route(rid.as_str(), member.as_str(), registration.id));
+        }
+        assert!(state.owns_route(rid.as_str(), member.as_str(), live.id));
+    }
+
+    #[tokio::test]
+    async fn an_evicted_socket_with_a_full_queue_closes_and_frees_its_resources() {
+        let state = state();
+        let (rid, _, member, _, member_token) = room(&state);
+        let (address, server) = serve(state.clone()).await;
+        // A client that stopped reading: its writer blocks once the socket
+        // buffers fill, and then its outbound queue fills too.
+        let (mut stuck, _) = connect(address, &member, &rid, &member_token).await;
+        let (id, sender) = state.member_senders(rid.as_str(), member.as_str())[0].clone();
+        loop {
+            match sender
+                .send_timeout(
+                    WsOut::Binary(vec![0; TEST_FILL_FRAME_BYTES]),
+                    TEST_QUEUE_FULL_PROBE,
+                )
+                .await
+            {
+                Ok(()) => {}
+                Err(SendTimeoutError::Timeout(_)) => break,
+                Err(SendTimeoutError::Closed(_)) => panic!("the socket closed before it stalled"),
+            }
+        }
+        wait_for_live_connections(&state, 1).await;
+
+        assert!(state.evict_conn(rid.as_str(), member.as_str(), id));
+        tokio::time::timeout(FIXTURE_DEADLINE, async {
+            // The writer and its queued frames are released...
+            sender.closed().await;
+            // ...the metric stops counting the socket only once that happened...
+            wait_for_live_connections(&state, 0).await;
+            // ...and the TCP connection is closed: the client reads to the end.
+            while let Some(Ok(_)) = stuck.next().await {}
+        })
+        .await
+        .expect("an evicted socket with a full queue was never closed");
+        server.abort();
+    }
+}

@@ -68,17 +68,22 @@ room cannot shadow the same device ID in another room. A member may hold up to
 four routed sockets at once, such as its sync daemon beside a CLI `push` or
 `pull`, and the relay delivers the member's room traffic to each of them. A
 fifth socket evicts the member's oldest, and an older socket whose outbound
-queue stays full for 30 seconds is evicted instead of stalling delivery. Only a
-routed socket may send room traffic, and closing one socket removes only its own
-registration. Revocation removes all of the member's routes and closes every one
-of its sockets. A socket checks that it is still routed before it forwards each
-frame, and the check and forward are not atomic, so a frame that passed the
-check just before the revocation is still forwarded: at most one frame per
-socket of the revoked member, because each socket handles its frames one at a
-time. After that none of its sockets can send room traffic. Pairing requests
-that name a device ID already connected to a room are not rejected: such a
-check would reveal presence to unauthenticated callers and stop a device from
-pairing into another room, while routing no longer depends on it.
+queue stays full for 30 seconds is evicted instead of stalling delivery. The
+relay sends to all of a member's sockets at once, so stalled sockets delay a
+delivery by at most 30 seconds in total. A socket that sends nothing for 60
+seconds, three missed client heartbeats, is closed and loses its route. A
+half-open socket left behind by a reconnect therefore stops counting the member
+as online within that time: text is queued for it again and its peers see it
+leave. Only a routed socket may send room traffic, and closing one socket
+removes only its own registration. Revocation removes all of the member's routes
+and closes every one of its sockets. A socket checks that it is still routed
+before it forwards each frame, and the check and forward are not atomic, so a
+frame that passed the check just before the revocation is still forwarded: at
+most one frame per socket of the revoked member, because each socket handles its
+frames one at a time. After that none of its sockets can send room traffic.
+Pairing requests that name a device ID already connected to a room are not
+rejected: such a check would reveal presence to unauthenticated callers and stop
+a device from pairing into another room, while routing no longer depends on it.
 
 Webhooks carry metadata only: opaque IDs, item kind, encrypted size, timestamp,
 status. Destination checks must include DNS results, IPv4/IPv6 special ranges,
