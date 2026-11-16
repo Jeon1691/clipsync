@@ -443,7 +443,7 @@ async fn proxmox_cloudflare_tunnel_chain_gives_each_visitor_its_own_join_budget(
             RelayConfig {
                 bind: "127.0.0.1:0".parse().unwrap(),
                 public_url: "http://127.0.0.1".into(),
-                token_secret: vec![35; 32],
+                token_secret: rand::random::<[u8; 32]>().to_vec(),
                 webhook_url: None,
                 webhook_secret: None,
             },
@@ -484,7 +484,7 @@ async fn invalid_join_limits_stop_the_relay_from_starting() {
     let config = RelayConfig {
         bind: "127.0.0.1:0".parse().unwrap(),
         public_url: "http://127.0.0.1".into(),
-        token_secret: vec![36; 32],
+        token_secret: rand::random::<[u8; 32]>().to_vec(),
         webhook_url: None,
         webhook_secret: None,
     };

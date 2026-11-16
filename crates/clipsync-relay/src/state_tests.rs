@@ -302,7 +302,7 @@ fn limited_state(limits: PairingJoinLimits) -> RelayState {
         RelayConfig {
             bind: "127.0.0.1:0".parse().unwrap(),
             public_url: "http://127.0.0.1".into(),
-            token_secret: vec![22; 32],
+            token_secret: rand::random::<[u8; 32]>().to_vec(),
             webhook_url: None,
             webhook_secret: None,
         },
@@ -369,7 +369,7 @@ fn join_limits_that_weaken_the_guessing_bound_are_refused() {
     let config = RelayConfig {
         bind: "127.0.0.1:0".parse().unwrap(),
         public_url: "http://127.0.0.1".into(),
-        token_secret: vec![23; 32],
+        token_secret: rand::random::<[u8; 32]>().to_vec(),
         webhook_url: None,
         webhook_secret: None,
     };
