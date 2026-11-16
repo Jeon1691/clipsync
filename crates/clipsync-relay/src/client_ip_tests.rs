@@ -97,3 +97,24 @@ fn trusted_proxy_entries_accept_cidrs_and_single_addresses_only() {
     assert!(trusted.contains(ip("10.200.0.1")));
     assert!(!trusted.contains(ip("11.0.0.1")));
 }
+
+/// Regression: a client-written non-UTF-8 byte in `X-Forwarded-For` used to
+/// discard the whole header value, including the hop a trusted proxy appended
+/// to it, so the client was charged to the proxy's address instead of its own.
+#[test]
+fn opaque_client_written_hop_does_not_hide_the_hop_its_proxy_appended() {
+    let trusted = proxies(&["127.0.0.1"]);
+    // nginx's `$proxy_add_x_forwarded_for` appends to the client's own value.
+    let appended = forwarded(&[b"\xff\xfe, 203.0.113.9"]);
+    assert_eq!(
+        trusted.client_ip(ip("127.0.0.1"), &appended),
+        ip("203.0.113.9")
+    );
+    // Only the opaque hop itself is malformed: the walk still stops there.
+    let behind_two = proxies(&["127.0.0.1", "10.0.0.0/8"]);
+    let opaque_middle = forwarded(&[b"203.0.113.9, \xff, 10.0.0.3"]);
+    assert_eq!(
+        behind_two.client_ip(ip("127.0.0.1"), &opaque_middle),
+        ip("10.0.0.3")
+    );
+}

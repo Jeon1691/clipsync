@@ -13,6 +13,8 @@ use axum::http::HeaderMap;
 use ipnet::IpNet;
 
 const X_FORWARDED_FOR: &str = "x-forwarded-for";
+/// Separates hops within one `X-Forwarded-For` value (comma-separated list).
+const HOP_SEPARATOR: u8 = b',';
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TrustedProxies(Vec<IpNet>);
@@ -34,18 +36,17 @@ impl TrustedProxies {
         }
         // Each proxy appends the address it received the request from, so walk
         // from the right. A malformed hop ends the walk at the nearest trusted
-        // proxy: nothing to its left can be attributed reliably.
-        let hops: Vec<Option<&str>> = headers
+        // proxy: nothing to its left can be attributed reliably. Split the raw
+        // bytes and decode each hop on its own, so an opaque client-written
+        // hop cannot hide the hop a proxy appended to the same header value.
+        let hops: Vec<&[u8]> = headers
             .get_all(X_FORWARDED_FOR)
             .iter()
-            .flat_map(|value| match value.to_str() {
-                Ok(list) => list.split(',').map(Some).collect::<Vec<_>>(),
-                Err(_) => vec![None],
-            })
+            .flat_map(|value| value.as_bytes().split(|byte| *byte == HOP_SEPARATOR))
             .collect();
         let mut client = peer;
         for hop in hops.into_iter().rev() {
-            let Some(ip) = hop.and_then(parse_hop) else {
+            let Some(ip) = std::str::from_utf8(hop).ok().and_then(parse_hop) else {
                 break;
             };
             client = ip.to_canonical();
