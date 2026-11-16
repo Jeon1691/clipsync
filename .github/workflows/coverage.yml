@@ -89,10 +89,10 @@ jobs:
             echo 'Full source report: download the coverage artifact and open html/index.html.'
             echo 'Inline test-only modules/helpers are excluded from product metrics; all production workspace sources remain included.'
             echo 'Historical-defect regression coverage is checked separately by the 50% ledger gate in ci.yml.'
-            echo 'Gold gate on each platform: at least 90% product lines/regions and 80% branches. Product sources remain included.'
+            echo 'Project gate on each platform: at least 90% product lines/regions and 85% branches. Product sources remain included.'
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Require Gold product coverage
-        run: python3 scripts/check-coverage.py coverage/summary.json --minimum-percent 90 --minimum-branch-percent 80
+      - name: Require product coverage and branch regression floor
+        run: python3 scripts/check-coverage.py coverage/summary.json --minimum-percent 90 --minimum-branch-percent 85
       - name: Upload LCOV, HTML, and line/branch summaries
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -653,6 +653,10 @@ mod behavior_tests {
         );
     }
     #[test]
+    #[expect(
+        deprecated,
+        reason = "Test malformed legacy filename pasteboard input."
+    )]
     fn private_pasteboard_child() {
         let Ok(case) = std::env::var("CLIPSYNC_PRIVATE_BOARD_CASE") else {
             return;
@@ -660,6 +664,61 @@ mod behavior_tests {
         let root = PathBuf::from(std::env::var_os("CLIPSYNC_NATIVE_FIXTURE").unwrap());
         let pb = NSPasteboard::pasteboardWithUniqueName();
         match case.as_str() {
+            "legacy-empty" => {
+                let ty = unsafe { NSFilenamesPboardType };
+                let path = root.join("legacy.txt");
+                std::fs::write(&path, b"legacy content").unwrap();
+                let empty = NSString::from_str("");
+                let valid = NSString::from_str(path.to_str().unwrap());
+                let names = NSArray::<NSString>::from_slice(&[empty.as_ref(), valid.as_ref()]);
+                pb.clearContents();
+                assert!(unsafe { pb.setPropertyList_forType(&names, ty) });
+                assert_eq!(paths_from_filenames(&pb), vec![path]);
+                let Some(ClipboardItem::Files { files }) = read_pasteboard(&pb).unwrap() else {
+                    panic!("valid file was discarded with empty legacy entries");
+                };
+                assert_eq!(files.len(), 1);
+                assert_eq!(files[0].bytes, b"legacy content");
+            }
+            "tiff" => {
+                let original = image();
+                for bytes in [png_or_raw_to_tiff(&original).unwrap(), original] {
+                    pb.clearContents();
+                    assert!(
+                        pb.setData_forType(Some(&NSData::with_bytes(&bytes)), unsafe {
+                            NSPasteboardTypeTIFF
+                        })
+                    );
+                    let Some(ClipboardItem::Image { mime, bytes, .. }) =
+                        read_image_data(&pb).unwrap()
+                    else {
+                        panic!("TIFF flavor lost its valid image");
+                    };
+                    assert_eq!(mime, ImageMime::Png);
+                    assert_eq!(
+                        image::load_from_memory(&bytes).unwrap().to_rgba8().as_raw(),
+                        &[5, 6, 7, 255, 8, 9, 10, 255]
+                    );
+                }
+            }
+            "partial-preview" => {
+                let path = root.join("file.txt");
+                std::fs::write(&path, b"file survives an invalid image preview").unwrap();
+                // Its PNG signature is recognized, but conversion to TIFF must fail.
+                let corrupt_png = b"\x89PNG\r\n\x1a\ntruncated";
+                assert!(png_or_raw_to_tiff(corrupt_png).is_err());
+                publish_files(&pb, &[path], Some(corrupt_png)).unwrap();
+                assert_eq!(
+                    pb.dataForType(unsafe { NSPasteboardTypePNG })
+                        .unwrap()
+                        .to_vec(),
+                    corrupt_png
+                );
+                let Some(ClipboardItem::Files { files }) = read_pasteboard(&pb).unwrap() else {
+                    panic!("failed preview conversion replaced the file item");
+                };
+                assert_eq!(files[0].bytes, b"file survives an invalid image preview");
+            }
             "text" => {
                 pb.clearContents();
                 assert!(read_pasteboard(&pb).unwrap().is_none());
@@ -815,7 +874,15 @@ mod behavior_tests {
     }
     #[test]
     fn native_writes_and_failures_use_only_isolated_named_pasteboards() {
-        for case in ["text", "files", "image", "fallback"] {
+        for case in [
+            "text",
+            "files",
+            "image",
+            "fallback",
+            "legacy-empty",
+            "tiff",
+            "partial-preview",
+        ] {
             let root = Scratch::new();
             let out = root
                 .child("macos::behavior_tests::private_pasteboard_child")
