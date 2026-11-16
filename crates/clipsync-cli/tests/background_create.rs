@@ -544,6 +544,22 @@ async fn mismatched_or_rejected_verification_codes_store_nothing_on_either_devic
         let joiner_sas = digits(&line_with_prefix(&mut joiner_output, "verification code: ").await);
         let creator_wait = background_sas(a.path()).await;
         assert_eq!(creator_wait.sas.as_deref(), Some(joiner_sas.as_str()));
+        // `room confirm` shows no code before reading its argument, so "yes"
+        // compares nothing: it is refused and leaves the request unanswered.
+        for not_a_code in ["yes", "y"] {
+            let refused = clipsync(a.path(), &relay, &["room", "confirm", not_a_code]);
+            assert!(!refused.status.success(), "{not_a_code:?} confirmed");
+            let stderr = String::from_utf8_lossy(&refused.stderr);
+            assert!(stderr.contains("digits"), "{stderr}");
+            let unanswered = waiting_store(a.path())
+                .load_pairing_wait()
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                (unanswered.status.as_str(), unanswered.sas_decision),
+                ("confirm_sas", None)
+            );
+        }
         let answer = if reject_command {
             clipsync(a.path(), &relay, &["room", "reject"])
         } else {
@@ -597,6 +613,69 @@ async fn mismatched_or_rejected_verification_codes_store_nothing_on_either_devic
             assert_eq!(rooms, serde_json::json!([]));
             assert!(secrets_in(home).is_empty());
         }
+    }
+    relay_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn piped_yes_does_not_confirm_a_join() {
+    // A script that pipes "yes" answers before anyone compared the codes.
+    // Without a terminal only the other device's digits confirm.
+    let (relay, relay_task) = start_relay().await;
+    let a = TempDir::new().unwrap();
+    let b = TempDir::new().unwrap();
+    seed_identity_file(a.path());
+    seed_identity_file(b.path());
+    let create = clipsync(
+        a.path(),
+        &relay,
+        &["--json", "room", "create", "--no-auto-sync"],
+    );
+    assert!(
+        create.status.success(),
+        "{}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let offer = json_out(&create);
+    let code = offer["pairing_code"].as_str().unwrap();
+    let pid = offer["pid"].as_u64().unwrap() as u32;
+    let mut joiner = spawn_cli(b.path(), &relay, &["room", "join", code, "--no-auto-sync"]);
+    let mut joiner_input = joiner.stdin.take().unwrap();
+    let mut joiner_output = tokio::io::BufReader::new(joiner.stdout.take().unwrap());
+    line_with_prefix(&mut joiner_output, "verification code: ").await;
+    use tokio::io::AsyncWriteExt;
+    joiner_input.write_all(b"yes\n").await.unwrap();
+    joiner_input.flush().await.unwrap();
+    let join = tokio::time::timeout(Duration::from_secs(20), joiner.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    if join.status.success() {
+        kill_pid(pid);
+        panic!("a piped \"yes\" confirmed the join");
+    }
+    let stderr = String::from_utf8_lossy(&join.stderr);
+    assert!(stderr.contains("interactive"), "{stderr}");
+    // The creator's worker stops on the joiner's abort notice.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let wait = waiting_store(a.path())
+            .load_pairing_wait()
+            .unwrap()
+            .unwrap();
+        if wait.status == "failed" {
+            break;
+        }
+        if Instant::now() > deadline {
+            kill_pid(pid);
+            panic!("background worker did not abort: {}", wait.status);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    for home in [a.path(), b.path()] {
+        let rooms = json_out(&clipsync(home, &relay, &["--json", "room", "list"]));
+        assert_eq!(rooms, serde_json::json!([]));
+        assert!(secrets_in(home).is_empty());
     }
     relay_task.abort();
 }
@@ -675,6 +754,18 @@ async fn rejecting_before_a_join_lets_a_new_room_create_replace_the_pairing() {
     let blocked = clipsync(a.path(), &relay, &["room", "create", "--no-auto-sync"]);
     assert!(!blocked.status.success());
     assert!(String::from_utf8_lossy(&blocked.stderr).contains("room join"));
+    // "yes" before anyone joined would approve a code nobody has seen yet.
+    let premature = clipsync(a.path(), &relay, &["room", "confirm", "yes"]);
+    assert!(!premature.status.success());
+    assert!(String::from_utf8_lossy(&premature.stderr).contains("digits"));
+    let unanswered = waiting_store(a.path())
+        .load_pairing_wait()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (unanswered.status.as_str(), unanswered.sas_decision),
+        ("waiting", None)
+    );
 
     let rejected = clipsync(a.path(), &relay, &["--json", "room", "reject"]);
     assert!(

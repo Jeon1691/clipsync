@@ -9,7 +9,7 @@ use tracing::{info, warn};
 
 use clipsync_crypto::{
     confirm_mac, finish_pairing, initial_epoch_key, open, seal, short_authentication_string,
-    start_pairing_a, start_pairing_b, verify_confirm_mac, DeviceIdentity, PairingRole,
+    start_pairing_a, start_pairing_b, verify_confirm_mac, DeviceIdentity, PairingRole, SAS_DIGITS,
 };
 use clipsync_protocol::{
     ClientRole, ControlMessage, CreatePairingRequest, CreatePairingResponse,
@@ -55,8 +55,7 @@ impl SasCheck {
     /// Compare with the value a user read from the other device, ignoring the
     /// spaces or dashes used to group digits on screen.
     pub fn matches(&self, shown_on_other_device: &str) -> bool {
-        let entered = normalize_sas(shown_on_other_device);
-        !entered.is_empty() && entered == self.sas
+        parse_sas(shown_on_other_device).is_some_and(|entered| entered == self.sas)
     }
 
     /// Digits grouped for reading aloud, such as `482 913`.
@@ -68,6 +67,23 @@ impl SasCheck {
 /// Keep only the digits of user-entered SAS text.
 pub fn normalize_sas(raw: &str) -> String {
     raw.chars().filter(char::is_ascii_digit).collect()
+}
+
+/// Characters a user may type between digit groups, as [`display_sas`]
+/// shows them or as they are commonly read aloud.
+const SAS_GROUP_SEPARATORS: [char; 2] = [' ', '-'];
+
+/// Parse user-entered SAS text: exactly [`SAS_DIGITS`] digits, optionally
+/// grouped with spaces or dashes. Anything else, such as "yes" or a code
+/// with stray letters, is not a code and returns `None`.
+pub fn parse_sas(raw: &str) -> Option<String> {
+    let digits: String = raw
+        .trim()
+        .chars()
+        .filter(|c| !SAS_GROUP_SEPARATORS.contains(c))
+        .collect();
+    let complete = digits.len() == SAS_DIGITS as usize;
+    (complete && digits.bytes().all(|byte| byte.is_ascii_digit())).then_some(digits)
 }
 
 /// Group SAS digits in threes for display. Grouping is presentation only;
@@ -1197,9 +1213,21 @@ mod tests {
         for same in ["482913", "482 913", "482-913", " 48 29 13 "] {
             assert!(check.matches(same), "{same}");
         }
-        for different in ["", "yes", "482914", "4829130", "48291"] {
+        for different in [
+            "",
+            "yes",
+            "482914",
+            "4829130",
+            "48291",
+            "code 482913",
+            "482913x",
+            "48_29_13",
+        ] {
             assert!(!check.matches(different), "{different}");
+            assert_ne!(parse_sas(different).as_deref(), Some("482913"));
         }
+        assert_eq!(parse_sas(" 482-913\n").as_deref(), Some("482913"));
+        assert_eq!(parse_sas("yes"), None);
         assert_eq!(normalize_sas("4a8-2 9"), "4829");
     }
 

@@ -80,7 +80,9 @@ peer and aborts the pairing session on any client `error`. A SAS client that
 receives a second `key_confirm` after the peer's first one stops with nothing
 stored; a pre-SAS client fails key confirmation on it. Pre-SAS clients send
 `device_bind` right after key confirmation; a SAS client buffers it until its
-user confirms. See [security](security.md#verification-code-sas) for what the
+user confirms. A pre-SAS client also stores its room keys at that point, so
+when the SAS side rejects, the pre-SAS client keeps an unused room-key secret,
+though no room record or device token. See [security](security.md#verification-code-sas) for what the
 comparison covers.
 
 ## Reconnect

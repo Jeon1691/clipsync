@@ -118,18 +118,22 @@ Both devices then show a 6-digit verification code. On device A:
 clipsync room confirm
 ```
 
-Check that the two codes are the same, then confirm on both devices (type the
-code shown on the other device, or `yes`). If they differ, answer anything
-else, or run `clipsync room reject` on A: pairing stops on both devices and
-nothing is stored. A mismatch means something other than your device joined,
-for example a relay in the middle or someone who guessed the code. With
-`--foreground`, device A asks in the same terminal instead of `room confirm`.
+Check that the two codes are the same, then confirm on both devices by typing
+the code shown on the other device. At a prompt in a terminal, after the code
+is displayed, `yes` is also accepted. If they differ, answer anything else, or
+run `clipsync room reject` on A: pairing stops on both devices and nothing is
+stored. A mismatch means something other than your device joined, for example
+a relay in the middle or someone who guessed the code. With `--foreground`,
+device A asks in the same terminal instead of `room confirm`.
 
-For scripts, `clipsync room confirm <CODE>` compares non-interactively, and
-`room join` reads its answer from stdin. `--insecure-skip-sas` on
-`room create` / `room join` skips the comparison and removes that protection;
-use it only for test setups on a relay you trust. Devices on a version without
-verification codes still pair, but cannot show a code to compare.
+For scripts, `clipsync room confirm <CODE>` takes the 6 digits shown on the
+other device and checks them against this device's code; `yes` is refused
+there, because that command has shown nothing to compare. Likewise, when
+`room join` reads its answer from a pipe instead of a terminal, only the
+digits confirm. `--insecure-skip-sas` on `room create` / `room join` skips the
+comparison and removes that protection; use it only for test setups on a relay
+you trust. Devices on a version without verification codes still pair, but
+cannot show a code to compare.
 
 `clipsync init` is optional. Identity is created on Homebrew install and on
 first use.

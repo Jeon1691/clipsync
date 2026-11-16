@@ -14,13 +14,15 @@ mod pairing;
 #[path = "../tests/support/relay_script.rs"]
 mod test_relay;
 
+/// Number of digits in a verification code (SAS).
+pub use clipsync_crypto::SAS_DIGITS;
 pub use engine::{
     oneshot_pull as engine_oneshot_pull, oneshot_push as engine_oneshot_push, run_daemon,
     SyncHandle,
 };
 pub use error::{CoreError, ExitCode};
 pub use pairing::{
-    begin_create_room, create_room, display_sas, join_room, leave_room, normalize_sas,
+    begin_create_room, create_room, display_sas, join_room, leave_room, normalize_sas, parse_sas,
     PendingCreate, RoomOffer, SasCheck, SasDecision,
 };
 
@@ -121,14 +123,14 @@ impl App {
         // A rejected background pairing may be replaced by a newer `room
         // create` while this one winds down; never overwrite that file.
         let finish = |result: PairingWait| {
-            let replaced = matches!(
-                self.store.load_pairing_wait(),
-                Ok(Some(current))
-                    if current.pid != result.pid || current.room_id != result.room_id
-            );
-            if !replaced {
-                let _ = self.store.save_pairing_wait(&result);
-            }
+            let _ = self.store.update_pairing_wait(|current| {
+                let replaced = matches!(
+                    current,
+                    Some(current)
+                        if current.pid != result.pid || current.room_id != result.room_id
+                );
+                ((!replaced).then_some(result), ())
+            });
         };
         match pending.wait(&self.store, &identity, confirm).await {
             Ok(()) => {

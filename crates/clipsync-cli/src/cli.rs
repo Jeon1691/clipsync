@@ -110,7 +110,9 @@ pub enum RoomCmd {
     },
     /// Confirm the verification code of a background `room create`
     Confirm {
-        /// Code shown on the other device; prompts when omitted
+        /// The 6 digits shown on the other device, checked against this
+        /// device's code ("yes" is not accepted here). Omit it to see this
+        /// device's code and answer at a prompt.
         code: Option<String>,
     },
     /// Reject a background `room create` whose verification code does not match

@@ -95,6 +95,11 @@ impl AppPaths {
     pub fn pairing_file(&self) -> PathBuf {
         self.runtime_dir.join("pairing.json")
     }
+
+    /// Lock that serializes writers of [`Self::pairing_file`].
+    pub fn pairing_lock_file(&self) -> PathBuf {
+        self.runtime_dir.join("pairing.lock")
+    }
 }
 
 fn set_private_dir(path: &Path) -> std::io::Result<()> {

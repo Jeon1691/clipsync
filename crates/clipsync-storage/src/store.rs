@@ -149,18 +149,11 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Replace the pairing file. Writes hold the pairing lock, so they never
+    /// interleave with [`Self::update_pairing_wait`].
     pub fn save_pairing_wait(&self, wait: &PairingWait) -> Result<()> {
-        let path = self.paths.pairing_file();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        // The background worker and `room confirm`/`room reject` both write
-        // this file; a per-process temporary name keeps their renames whole.
-        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-        std::fs::write(&tmp, serde_json::to_vec_pretty(wait)?)?;
-        set_private_file(&tmp)?;
-        std::fs::rename(tmp, path)?;
-        Ok(())
+        let _lock = self.lock_pairing_file()?;
+        self.write_pairing_wait(wait)
     }
 
     pub fn load_pairing_wait(&self) -> Result<Option<PairingWait>> {
@@ -172,8 +165,64 @@ impl LocalStore {
         Ok(Some(serde_json::from_str(&raw)?))
     }
 
+    /// Read, change and write the pairing file as one step.
+    ///
+    /// The background worker and `room confirm`/`room reject` run in separate
+    /// processes and both change this file. `update` sees the current
+    /// contents and returns what to write (`None` writes nothing) plus a
+    /// value for the caller. An exclusive lock is held throughout, so no
+    /// other writer's change can land between the read and the write and be
+    /// lost.
+    pub fn update_pairing_wait<T>(
+        &self,
+        update: impl FnOnce(Option<PairingWait>) -> (Option<PairingWait>, T),
+    ) -> Result<T> {
+        let _lock = self.lock_pairing_file()?;
+        let (next, out) = update(self.load_pairing_wait()?);
+        if let Some(next) = next {
+            self.write_pairing_wait(&next)?;
+        }
+        Ok(out)
+    }
+
     pub fn clear_pairing_wait(&self) {
+        // Without the lock the file may still be removed; a writer that is
+        // mid-update would then just recreate it, as before this lock existed.
+        let _lock = self.lock_pairing_file();
         let _ = std::fs::remove_file(self.paths.pairing_file());
+    }
+
+    /// Hold an exclusive OS lock on a sidecar file until the guard drops.
+    /// The lock file is never removed: deleting it would let two processes
+    /// lock different files under the same name.
+    fn lock_pairing_file(&self) -> Result<std::fs::File> {
+        let path = self.paths.pairing_lock_file();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+        set_private_file(&path)?;
+        file.lock()?;
+        Ok(file)
+    }
+
+    fn write_pairing_wait(&self, wait: &PairingWait) -> Result<()> {
+        let path = self.paths.pairing_file();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Rename a complete file into place so readers that take no lock
+        // never see a partial one.
+        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+        std::fs::write(&tmp, serde_json::to_vec_pretty(wait)?)?;
+        set_private_file(&tmp)?;
+        std::fs::rename(tmp, path)?;
+        Ok(())
     }
 
     pub fn current_room(&self) -> Result<RoomRecord> {
@@ -372,6 +421,60 @@ mod failure_tests {
         std::fs::remove_file(&tmp).unwrap();
         std::fs::create_dir(&tmp).unwrap();
         assert!(store.save_pairing_wait(&waiting()).is_err());
+    }
+
+    #[test]
+    fn pairing_file_updates_are_serialized_so_an_answer_is_never_lost() {
+        use std::sync::mpsc;
+        // Long enough for the second update to reach its read if nothing
+        // serialized it; a correct lock passes no matter how long this is.
+        const SECOND_UPDATE_HEAD_START: std::time::Duration = std::time::Duration::from_millis(200);
+        let (_root, store) = fixture();
+        store.save_pairing_wait(&waiting()).unwrap();
+        let (inside_tx, inside_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        // The background worker publishes the verification code...
+        let publish = std::thread::spawn({
+            let store = store.clone();
+            move || {
+                store.update_pairing_wait(|current| {
+                    inside_tx.send(()).unwrap();
+                    go_rx.recv().unwrap();
+                    let mut wait = current.unwrap();
+                    wait.status = "confirm_sas".into();
+                    wait.sas_decision = None;
+                    (Some(wait), ())
+                })
+            }
+        });
+        inside_rx.recv().unwrap();
+        // ...while `room reject` records the user's answer.
+        let reject = std::thread::spawn({
+            let store = store.clone();
+            move || {
+                store.update_pairing_wait(|current| {
+                    let mut wait = current.unwrap();
+                    wait.sas_decision = Some("rejected".into());
+                    (Some(wait), ())
+                })
+            }
+        });
+        std::thread::sleep(SECOND_UPDATE_HEAD_START);
+        go_tx.send(()).unwrap();
+        publish.join().unwrap().unwrap();
+        reject.join().unwrap().unwrap();
+        let settled = store.load_pairing_wait().unwrap().unwrap();
+        assert_eq!(settled.status, "confirm_sas");
+        assert_eq!(settled.sas_decision.as_deref(), Some("rejected"));
+        // Declining to write leaves the file as it was.
+        let seen = store
+            .update_pairing_wait(|current| (None, current.map(|wait| wait.status)))
+            .unwrap();
+        assert_eq!(seen.as_deref(), Some("confirm_sas"));
+        store.clear_pairing_wait();
+        assert!(store
+            .update_pairing_wait(|current| (None, current.is_none()))
+            .unwrap());
     }
 
     #[test]

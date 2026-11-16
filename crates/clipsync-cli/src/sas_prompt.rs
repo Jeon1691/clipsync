@@ -13,7 +13,7 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
-use clipsync_core::{display_sas, normalize_sas, App, CoreError, SasCheck, SasDecision};
+use clipsync_core::{display_sas, parse_sas, App, CoreError, SasCheck, SasDecision, SAS_DIGITS};
 use clipsync_protocol::PAIRING_TTL_SECS;
 use clipsync_storage::{LocalStore, PairingWait};
 
@@ -62,15 +62,27 @@ pub fn terminal_confirmer(mode: SasMode) -> SasConfirm {
                 );
                 return SasDecision::Rejected;
             }
-            prompt_line(mode);
             let sas = check.sas.clone();
-            let answer = tokio::task::spawn_blocking(read_answer_line)
-                .await
-                .ok()
-                .flatten();
-            decide(&sas, answer.as_deref())
+            ask(mode, &sas).await
         })
     })
+}
+
+/// Prompt for and read one answer line, then decide. "yes" counts only
+/// when a person answers at a terminal that has just shown the code.
+async fn ask(mode: SasMode, sas: &str) -> SasDecision {
+    let interactive = io::stdin().is_terminal();
+    prompt_line(mode, interactive);
+    let answer = tokio::task::spawn_blocking(read_answer_line)
+        .await
+        .ok()
+        .flatten();
+    if !interactive && answer.as_deref().is_some_and(is_affirmation) {
+        eprintln!(
+            "error: \"yes\" is accepted only at an interactive terminal; answer with the code shown on the other device"
+        );
+    }
+    decide(sas, answer.as_deref(), interactive)
 }
 
 /// Background worker: publish the SAS in the pairing file and wait for
@@ -86,25 +98,21 @@ pub fn background_confirmer(store: LocalStore, skip: bool) -> SasConfirm {
             // Only answer through a pairing file this worker owns; a newer
             // `room create` may have replaced it.
             let owned = |wait: &PairingWait| wait.pid == worker;
-            let Ok(Some(mut wait)) = store.load_pairing_wait() else {
-                return SasDecision::Rejected;
-            };
-            if !owned(&wait) || rejected(&wait) {
+            // Check and publish under the pairing lock, so a `room reject`
+            // that lands meanwhile is never overwritten.
+            let published = store.update_pairing_wait(|current| match current {
                 // A rejection recorded before the joiner arrived still applies.
-                return SasDecision::Rejected;
-            }
-            wait.status = STATUS_CONFIRM_SAS.into();
-            wait.sas = Some(check.sas.clone());
-            wait.peer_device_name = Some(check.peer_device_name.clone());
-            // A confirmation can only come from a user who saw this code.
-            wait.sas_decision = None;
-            // Re-read right before publishing so a rejection written since
-            // the first read is not overwritten.
-            match store.load_pairing_wait() {
-                Ok(Some(latest)) if owned(&latest) && !rejected(&latest) => {}
-                _ => return SasDecision::Rejected,
-            }
-            if store.save_pairing_wait(&wait).is_err() {
+                Some(mut wait) if owned(&wait) && !rejected(&wait) => {
+                    wait.status = STATUS_CONFIRM_SAS.into();
+                    wait.sas = Some(check.sas.clone());
+                    wait.peer_device_name = Some(check.peer_device_name.clone());
+                    // A confirmation can only come from a user who saw this code.
+                    wait.sas_decision = None;
+                    (Some(wait), true)
+                }
+                _ => (None, false),
+            });
+            if !matches!(published, Ok(true)) {
                 return SasDecision::Rejected;
             }
             loop {
@@ -149,6 +157,17 @@ pub async fn answer_background(
     reject: bool,
     mode: SasMode,
 ) -> Result<(), CoreError> {
+    // This command shows no code before it reads its argument, so only the
+    // digits from the other device are a comparison. Refuse anything else
+    // before waiting, so it can never approve a code that appears later.
+    let entered = match shown_on_other_device {
+        Some(raw) if !reject => Some(parse_sas(raw).ok_or_else(|| {
+            CoreError::Message(format!(
+                "expected the {SAS_DIGITS} digits shown on the other device, got {raw:?}; run `clipsync room confirm` without a code to compare at a prompt (scripts that cannot compare must opt out with `room create --insecure-skip-sas`)"
+            ))
+        })?),
+        _ => None,
+    };
     let deadline = Instant::now() + CONFIRM_COMMAND_DEADLINE;
     let mut announced_wait = false;
     let wait = loop {
@@ -178,8 +197,12 @@ pub async fn answer_background(
     }
     let sas = wait.sas.clone().unwrap_or_default();
     let peer = wait.peer_device_name.clone().unwrap_or_default();
-    let decision = if let Some(entered) = shown_on_other_device {
-        decide(&sas, Some(entered))
+    let decision = if let Some(entered) = entered {
+        if entered == sas {
+            SasDecision::Confirmed
+        } else {
+            SasDecision::Rejected
+        }
     } else {
         announce(mode, &sas, &peer);
         if mode.non_interactive {
@@ -187,35 +210,39 @@ pub async fn answer_background(
                 "pass the code shown on the other device: clipsync room confirm <code>".into(),
             ));
         }
-        prompt_line(mode);
-        let answer = tokio::task::spawn_blocking(read_answer_line)
-            .await
-            .ok()
-            .flatten();
-        decide(&sas, answer.as_deref())
+        ask(mode, &sas).await
     };
 
-    // The prompt may have taken a while: answer only the same live request.
-    let mut answered = load_live(app)?;
-    if answered.status != STATUS_CONFIRM_SAS
-        || answered.pid != wait.pid
-        || answered.sas.as_deref() != Some(sas.as_str())
-    {
-        return Err(not_answerable(&answered));
-    }
-    if rejected(&answered) {
-        return Err(CoreError::Pairing(
-            "pairing was already rejected; nothing was stored".into(),
-        ));
-    }
-    answered.sas_decision = Some(
-        match decision {
-            SasDecision::Confirmed => DECISION_CONFIRMED,
-            SasDecision::Rejected => DECISION_REJECTED,
+    // The prompt may have taken a while: answer only the same live request,
+    // checked and written under the pairing lock.
+    let answered = app.store.update_pairing_wait(|current| {
+        let Some(mut answered) = current else {
+            return (None, Err(no_pairing()));
+        };
+        if answered.status != STATUS_CONFIRM_SAS
+            || answered.pid != wait.pid
+            || answered.sas.as_deref() != Some(sas.as_str())
+        {
+            let error = not_answerable(&answered);
+            return (None, Err(error));
         }
-        .into(),
-    );
-    app.store.save_pairing_wait(&answered)?;
+        if rejected(&answered) {
+            return (
+                None,
+                Err(CoreError::Pairing(
+                    "pairing was already rejected; nothing was stored".into(),
+                )),
+            );
+        }
+        answered.sas_decision = Some(
+            match decision {
+                SasDecision::Confirmed => DECISION_CONFIRMED,
+                SasDecision::Rejected => DECISION_REJECTED,
+            }
+            .into(),
+        );
+        (Some(answered.clone()), Ok(answered))
+    })??;
     if decision == SasDecision::Rejected {
         wait_for_worker_exit(app, &answered, deadline).await?;
         return Err(CoreError::Pairing(
@@ -269,14 +296,33 @@ async fn reject_background(
     deadline: Instant,
     mode: SasMode,
 ) -> Result<(), CoreError> {
-    if wait.sas_decision.as_deref() == Some(DECISION_CONFIRMED) {
-        return Err(CoreError::Message(
-            "the verification code was already confirmed and pairing is completing".into(),
-        ));
-    }
-    let mut answered = wait;
-    answered.sas_decision = Some(DECISION_REJECTED.into());
-    app.store.save_pairing_wait(&answered)?;
+    // Re-check and record the rejection under the pairing lock: the worker
+    // may publish a joiner's code between the caller's read and this write,
+    // and must then see the rejection instead of replacing it.
+    let answered = app.store.update_pairing_wait(|current| {
+        let Some(mut answered) = current.filter(|current| current.pid == wait.pid) else {
+            return (
+                None,
+                Err(CoreError::Message(
+                    "the pairing request changed; run `clipsync room reject` again".into(),
+                )),
+            );
+        };
+        if answered.sas_decision.as_deref() == Some(DECISION_CONFIRMED) {
+            return (
+                None,
+                Err(CoreError::Message(
+                    "the verification code was already confirmed and pairing is completing".into(),
+                )),
+            );
+        }
+        if answered.status != STATUS_WAITING && answered.status != STATUS_CONFIRM_SAS {
+            let error = not_answerable(&answered);
+            return (None, Err(error));
+        }
+        answered.sas_decision = Some(DECISION_REJECTED.into());
+        (Some(answered.clone()), Ok(answered))
+    })??;
     if answered.status == STATUS_WAITING {
         // No joiner yet: the worker rejects as soon as one arrives, and a new
         // `room create` may replace this pairing right away.
@@ -321,9 +367,13 @@ async fn wait_for_worker_exit(
                 }
                 _ if !pid_alive(current.pid) => return Ok(()),
                 _ if !rejected(&current) => {
-                    let mut again = current;
-                    again.sas_decision = Some(DECISION_REJECTED.into());
-                    app.store.save_pairing_wait(&again)?;
+                    app.store.update_pairing_wait(|latest| match latest {
+                        Some(mut again) if again.pid == answered.pid && !rejected(&again) => {
+                            again.sas_decision = Some(DECISION_REJECTED.into());
+                            (Some(again), ())
+                        }
+                        _ => (None, ()),
+                    })?;
                 }
                 _ => {}
             },
@@ -342,9 +392,11 @@ async fn wait_for_worker_exit(
     reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
 )]
 fn load_live(app: &App) -> Result<PairingWait, CoreError> {
-    app.store.load_pairing_wait()?.ok_or_else(|| {
-        CoreError::Message("no pairing in progress; run `clipsync room create` first".into())
-    })
+    app.store.load_pairing_wait()?.ok_or_else(no_pairing)
+}
+
+fn no_pairing() -> CoreError {
+    CoreError::Message("no pairing in progress; run `clipsync room create` first".into())
 }
 
 /// Explain why a pairing file can no longer be answered.
@@ -382,9 +434,13 @@ fn announce(mode: SasMode, sas: &str, peer_device_name: &str) {
     let _ = io::stdout().flush();
 }
 
-fn prompt_line(mode: SasMode) {
+fn prompt_line(mode: SasMode, interactive: bool) {
     if !mode.json {
-        print!("Type the code shown on the other device, or \"yes\" if it matches: ");
+        if interactive {
+            print!("Type the code shown on the other device, or \"yes\" if it matches: ");
+        } else {
+            print!("Type the code shown on the other device: ");
+        }
         let _ = io::stdout().flush();
     }
 }
@@ -424,20 +480,24 @@ fn read_answer_line() -> Option<String> {
     }
 }
 
-/// Accept "y"/"yes", or the code shown on the other device. Anything else,
-/// including end of input, rejects.
-pub fn decide(sas: &str, answer: Option<&str>) -> SasDecision {
+/// Accept the code shown on the other device, or "y"/"yes" when
+/// `interactive` (a person at a terminal that just showed the local code).
+/// Anything else, including end of input, rejects.
+pub fn decide(sas: &str, answer: Option<&str>, interactive: bool) -> SasDecision {
     let Some(answer) = answer else {
         return SasDecision::Rejected;
     };
-    let trimmed = answer.trim();
-    let entered = normalize_sas(trimmed);
-    let affirmed = trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("yes");
-    if affirmed || (!entered.is_empty() && entered == sas) {
+    let affirmed = interactive && is_affirmation(answer);
+    if affirmed || parse_sas(answer).as_deref() == Some(sas) {
         SasDecision::Confirmed
     } else {
         SasDecision::Rejected
     }
+}
+
+fn is_affirmation(answer: &str) -> bool {
+    let trimmed = answer.trim();
+    trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("yes")
 }
 
 #[cfg(test)]
@@ -546,22 +606,47 @@ mod tests {
     }
 
     #[test]
-    fn answers_accept_yes_or_the_matching_code_and_reject_everything_else() {
-        for accepted in ["y", "YES", " yes \n", "482913", "482 913\n", "482-913"] {
+    fn answers_accept_the_matching_code_and_yes_only_at_a_terminal() {
+        for interactive in [true, false] {
+            for accepted in ["482913", "482 913\n", "482-913"] {
+                assert_eq!(
+                    decide(SAS, Some(accepted), interactive),
+                    SasDecision::Confirmed,
+                    "{accepted:?}"
+                );
+            }
+            for rejected in [
+                "",
+                "\n",
+                "n",
+                "no",
+                "482914",
+                "48291",
+                "yess",
+                "1",
+                "code 482913",
+            ] {
+                assert_eq!(
+                    decide(SAS, Some(rejected), interactive),
+                    SasDecision::Rejected,
+                    "{rejected:?}"
+                );
+            }
+            assert_eq!(decide(SAS, None, interactive), SasDecision::Rejected);
+        }
+        for affirmation in ["y", "YES", " yes \n"] {
             assert_eq!(
-                decide("482913", Some(accepted)),
+                decide(SAS, Some(affirmation), true),
                 SasDecision::Confirmed,
-                "{accepted:?}"
+                "{affirmation:?}"
             );
-        }
-        for rejected in ["", "\n", "n", "no", "482914", "48291", "yess", "1"] {
+            // Piped input answers before anyone compared the codes.
             assert_eq!(
-                decide("482913", Some(rejected)),
+                decide(SAS, Some(affirmation), false),
                 SasDecision::Rejected,
-                "{rejected:?}"
+                "{affirmation:?}"
             );
         }
-        assert_eq!(decide("482913", None), SasDecision::Rejected);
     }
 
     #[tokio::test]
@@ -715,6 +800,38 @@ mod tests {
             app.store.load_pairing_wait().unwrap().unwrap().sas_decision,
             None
         );
+    }
+
+    #[tokio::test]
+    async fn room_confirm_accepts_only_the_digits_shown_on_the_other_device() {
+        // `room confirm` never displays the local code before it reads its
+        // argument, so anything but the other device's digits must not count
+        // as a comparison, and must leave the request unanswered.
+        let (_root, app) = fixture();
+        for status in [STATUS_WAITING, STATUS_CONFIRM_SAS] {
+            app.store
+                .save_pairing_wait(&request(status, live()))
+                .unwrap();
+            for not_a_code in [
+                "y",
+                "yes",
+                "YES",
+                "",
+                "48291",
+                "4829130",
+                "482913x",
+                "code 482913",
+            ] {
+                let error = confirm_error(&app, Some(not_a_code)).await;
+                assert!(error.contains("digits"), "{not_a_code:?}: {error}");
+                let unchanged = app.store.load_pairing_wait().unwrap().unwrap();
+                assert_eq!(
+                    (unchanged.status.as_str(), unchanged.sas_decision),
+                    (status, None),
+                    "{not_a_code:?}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

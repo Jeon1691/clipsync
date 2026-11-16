@@ -63,8 +63,11 @@ could not get by dropping the session. The peer name comes from the relay and
 is not authenticated; only the code is.
 
 Users must actually compare the codes. Typing the code shown on the other
-device is the most reliable comparison; answering "yes" relies on the user
-having looked.
+device is the most reliable comparison, and the only one the CLI accepts
+without a terminal: `clipsync room confirm CODE` and a piped `room join`
+answer must be the other device's digits, which are checked against the local
+code. Answering "yes" is accepted only at an interactive prompt that has just
+displayed the local code, and relies on the user having looked.
 
 **Limit: offline search by a relay.** There is no commitment step: a device
 sends its SPAKE2 message before it sees the peer's. A relay in the middle sees
@@ -81,7 +84,11 @@ that ships, pair through a relay you trust.
 **Older peers.** The code is computed locally, so the wire format is unchanged
 and an updated device still pairs with an older one. The older device shows no
 code, so the comparison cannot be made. Treat such a pairing as unverified, or
-update both devices first.
+update both devices first. An older device writes its room key to local
+storage right after key confirmation, before the comparison. If the updated
+device rejects, the older one stores no room record or device token, but
+keeps that room-key secret. No room refers to it, so it is never used; removing
+it would need a change on the older device.
 
 **Skipping the comparison.** `clipsync room create|join --insecure-skip-sas`
 and the mobile `create_room()` / `join_room()` calls, kept for existing apps,
