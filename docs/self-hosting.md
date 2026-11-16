@@ -93,6 +93,25 @@ no client override; for a private CA, supply its public root PEM through
 `CLIPSYNC_CA_FILE`. This extends trust and preserves hostname/issuer validation.
 Never distribute the server private key to clients.
 
+## Pairing-join limits
+
+The default budgets suit a small self-hosted relay. To tune them, set:
+
+| Variable | Default | Allowed values |
+| --- | ---: | --- |
+| `CLIPSYNC_RELAY_PAIRING_CLIENT_FAIL_LIMIT` | `10` | 1 to the relay-wide limit; failed joins per client address (IPv6: per /64) per client window |
+| `CLIPSYNC_RELAY_PAIRING_CLIENT_FAIL_WINDOW_SECS` | `900` | `120` (one pairing TTL) to `86400` |
+| `CLIPSYNC_RELAY_PAIRING_RELAY_FAIL_LIMIT` | `20` | 1 to `50`; failed joins across all clients per 120-second pairing TTL |
+
+The CLI equivalents are `--pairing-client-fail-limit`,
+`--pairing-client-fail-window-secs` and `--pairing-relay-fail-limit`. Values
+outside these ranges stop startup. The relay-wide cap of 50 is the security
+bound: a pairing code can be tested at most twice that many times while it is
+live, so the chance of guessing one session stays at or below 10^-4. Raising the
+limits trades that margin for fewer lockouts. Lowering them does the opposite.
+Watch `clipsync_pairing_throttled` on `/metrics` to see how often joins are
+refused.
+
 ## Production (Proxmox)
 
 The live relay runs on the Proxmox host at `/opt/clipsync`:
@@ -149,6 +168,9 @@ location / {
 | `CLIPSYNC_RELAY_TLS_KEY_FILE` | Matching PEM private key; both TLS files are required |
 | `CLIPSYNC_RELAY_ALLOW_HTTP` | Explicit `true` for a local/TLS-proxy plaintext origin; default `false` |
 | `CLIPSYNC_RELAY_TRUSTED_PROXIES` | Optional comma-separated proxy addresses/CIDRs whose `X-Forwarded-For` identifies clients for pairing-join limits; unset uses only the TCP peer address |
+| `CLIPSYNC_RELAY_PAIRING_CLIENT_FAIL_LIMIT` | Failed pairing joins per client per window; default `10` (see [pairing-join limits](#pairing-join-limits)) |
+| `CLIPSYNC_RELAY_PAIRING_CLIENT_FAIL_WINDOW_SECS` | Per-client window in seconds; default `900` |
+| `CLIPSYNC_RELAY_PAIRING_RELAY_FAIL_LIMIT` | Failed pairing joins relay-wide per pairing TTL; default `20`, at most `50` |
 | `CLIPSYNC_RELAY_TOKEN_SECRET_FILE` | Optional private file of exact HMAC key bytes; at least 32 bytes; cannot be combined with `CLIPSYNC_RELAY_TOKEN_SECRET` |
 | `CLIPSYNC_RELAY_TOKEN_SECRET` | HMAC token key; at least 32 bytes when explicitly set. Unset, empty, or whitespace-only generates a fresh random 32-byte key. |
 | `CLIPSYNC_RELAY_WEBHOOK_URL` | Optional metadata webhook |

@@ -41,6 +41,8 @@ pub struct RelayTransportConfig {
         value_parser = crate::client_ip::parse_trusted_proxy
     )]
     pub trusted_proxies: Vec<ipnet::IpNet>,
+    #[command(flatten)]
+    pub join_limits: crate::PairingJoinLimits,
 }
 
 impl RelayTransportConfig {

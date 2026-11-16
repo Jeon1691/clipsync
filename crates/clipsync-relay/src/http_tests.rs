@@ -96,7 +96,7 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
     .unwrap_err();
     assert_eq!(error.0, StatusCode::CONFLICT);
     assert_eq!(error.1 .0.code, "busy");
-    for _ in 0..30 {
+    for _ in 0..IP_FAILED_JOIN_LIMIT {
         state.record_ip_fail(address.ip());
     }
     let error = join_pairing(
@@ -316,16 +316,20 @@ async fn forwarded_for_is_honored_only_from_configured_trusted_proxies() {
 
     // With the proxy trusted, each forwarded client has its own budget and a
     // client-forged entry to the left of the proxy's is ignored.
-    let state = Arc::new(RelayState::with_trusted_proxies(
-        RelayConfig {
-            bind: "127.0.0.1:0".parse().unwrap(),
-            public_url: "http://127.0.0.1".into(),
-            token_secret: vec![34; 32],
-            webhook_url: None,
-            webhook_secret: None,
-        },
-        vec!["127.0.0.0/8".parse().unwrap()],
-    ));
+    let state = Arc::new(
+        RelayState::with_join_policy(
+            RelayConfig {
+                bind: "127.0.0.1:0".parse().unwrap(),
+                public_url: "http://127.0.0.1".into(),
+                token_secret: vec![34; 32],
+                webhook_url: None,
+                webhook_secret: None,
+            },
+            vec!["127.0.0.0/8".parse().unwrap()],
+            PairingJoinLimits::default(),
+        )
+        .unwrap(),
+    );
     let offer = create_offer(&state).await;
     let mut not_found = 0;
     for (n, code) in wrong_codes(&offer).take(50).enumerate() {
@@ -396,4 +400,30 @@ async fn exhausted_relay_wide_budget_answers_unknown_and_correct_codes_identical
         serde_json::to_string(&unknown.1 .0).unwrap(),
         serde_json::to_string(&correct.1 .0).unwrap()
     );
+}
+
+#[tokio::test]
+async fn invalid_join_limits_stop_the_relay_from_starting() {
+    let config = RelayConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        public_url: "http://127.0.0.1".into(),
+        token_secret: vec![36; 32],
+        webhook_url: None,
+        webhook_secret: None,
+    };
+    let transport = RelayTransportConfig {
+        allow_http: true,
+        join_limits: PairingJoinLimits {
+            relay_fail_limit: join_limits::MAX_GLOBAL_FAILED_JOIN_LIMIT + 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let error = serve_with_transport(config.clone(), transport.clone())
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("CLIPSYNC_RELAY_PAIRING_RELAY_FAIL_LIMIT"));
+    assert!(router_with_join_policy(config, Vec::new(), transport.join_limits).is_err());
 }

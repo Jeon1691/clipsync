@@ -19,8 +19,9 @@ confirmation aborts without storing credentials.
 
 The relay limits online guessing of this password. Every failed
 `/v1/pairing/join` counts, whether the code was unknown, expired, busy or
-otherwise rejected. Each client address (IPv6 by /64 prefix) may fail 10 times
-per 15 minutes. The whole relay may fail 20 times per 120-second pairing TTL.
+otherwise rejected. By default, each client address (IPv6 by /64 prefix) may
+fail 10 times per 15 minutes. The whole relay may fail 20 times per 120-second
+pairing TTL.
 A code's lifetime overlaps at most two of those relay-wide windows, so an
 attacker with any number of addresses can test at most 40 of the 10^6 codes
 while a session is open. That bounds the chance of guessing one session at
@@ -33,6 +34,9 @@ the relay-wide budget can keep blocking new pairings. This is a deliberate
 trade-off: guessing becomes a denial of service instead of a room compromise.
 Per-client limits use the TCP peer address unless trusted proxies are configured;
 see [self-hosting](self-hosting.md).
+Operators can change these budgets, but startup rejects a relay-wide limit above
+50 per pairing TTL, which keeps the chance of guessing one session at or below
+10^-4. `/metrics` reports refused joins as `clipsync_pairing_throttled`.
 
 The relay generates this password. Pair through a trusted relay: an actively
 malicious operator who knows the password is outside the honest-but-curious

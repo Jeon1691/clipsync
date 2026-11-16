@@ -5,6 +5,7 @@
 
 mod auth;
 mod client_ip;
+mod join_limits;
 mod state;
 mod transport;
 mod webhook;
@@ -27,9 +28,10 @@ use clipsync_protocol::{
     JoinPairingResponse, FRAME_HARD_CAP,
 };
 
-pub use state::RelayState;
+pub use join_limits::PairingJoinLimits;
 #[cfg(test)]
-use state::IP_FAILED_JOIN_LIMIT;
+use join_limits::IP_FAILED_JOIN_LIMIT;
+pub use state::RelayState;
 pub use transport::RelayTransportConfig;
 
 #[derive(Clone, Debug)]
@@ -107,6 +109,7 @@ pub async fn serve_with_transport(
     transport: RelayTransportConfig,
 ) -> anyhow::Result<()> {
     let tls = transport.tls_config(&config.public_url)?;
+    transport.join_limits.validate()?;
     let listener = std::net::TcpListener::bind(config.bind)?;
     let addr = listener.local_addr()?;
     if !transport.trusted_proxies.is_empty() {
@@ -115,8 +118,15 @@ pub async fn serve_with_transport(
             "honoring X-Forwarded-For from trusted proxies for pairing limits"
         );
     }
-    let app = router_with_trusted_proxies(config, transport.trusted_proxies.clone())
-        .into_make_service_with_connect_info::<SocketAddr>();
+    if transport.join_limits != PairingJoinLimits::default() {
+        info!(limits = ?transport.join_limits, "using configured pairing-join limits");
+    }
+    let app = router_with_join_policy(
+        config,
+        transport.trusted_proxies.clone(),
+        transport.join_limits,
+    )?
+    .into_make_service_with_connect_info::<SocketAddr>();
     let server = axum_server::from_tcp(listener)?.first_request_timeout(Duration::from_secs(10));
     if let Some(tls) = tls {
         info!(%addr, "clipsync-relay listening with TLS 1.2/1.3");
@@ -132,16 +142,25 @@ pub async fn serve_with_transport(
 }
 
 pub fn router(config: RelayConfig) -> Router {
-    router_with_trusted_proxies(config, Vec::new())
+    router_with_state(Arc::new(RelayState::new(config)))
 }
 
 /// Like [`router`], also honoring `X-Forwarded-For` from `trusted_proxies`
-/// when identifying clients for pairing limits.
-pub fn router_with_trusted_proxies(
+/// when identifying clients for pairing limits, and applying `join_limits`.
+/// Fails if `join_limits` does not pass [`PairingJoinLimits::validate`].
+pub fn router_with_join_policy(
     config: RelayConfig,
     trusted_proxies: Vec<ipnet::IpNet>,
-) -> Router {
-    let state = Arc::new(RelayState::with_trusted_proxies(config, trusted_proxies));
+    join_limits: PairingJoinLimits,
+) -> anyhow::Result<Router> {
+    Ok(router_with_state(Arc::new(RelayState::with_join_policy(
+        config,
+        trusted_proxies,
+        join_limits,
+    )?)))
+}
+
+fn router_with_state(state: Arc<RelayState>) -> Router {
     let janitor_state = state.clone();
     tokio::spawn(async move {
         loop {
