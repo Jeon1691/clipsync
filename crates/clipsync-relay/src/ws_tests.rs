@@ -70,7 +70,9 @@ async fn regression_f98_stale_room_socket_close_does_not_announce_live_replaceme
         let current_sender = state.member_sender(rid.as_str(), owner.as_str()).unwrap();
         assert!(!old_sender.same_channel(&current_sender));
 
-        old.close(None).await.unwrap();
+        // The replacement evicts the old socket; the relay may already have
+        // closed it, so the client's own close can fail.
+        let _ = old.close(None).await;
         // The old writer's receiver closes only after its socket cleanup has
         // queued any leave notification and sent its Close. No blind delay.
         old_sender.closed().await;
@@ -929,13 +931,34 @@ async fn regression_f88_revocation_closes_the_registered_socket_before_discardin
     )
     .await
     .unwrap();
+    let registration = member_ctx.as_ref().unwrap().member_conn.as_ref().unwrap();
+    // The socket loop closes the connection once it observes the eviction.
     assert!(
-        matches!(
-            tokio::time::timeout(Duration::from_millis(500), member_rx.recv()).await,
-            Ok(Some(WsOut::Close))
-        ),
+        tokio::time::timeout(Duration::from_millis(500), registration.evicted.notified())
+            .await
+            .is_ok(),
         "revoked socket was removed from routing without being told to close"
     );
+    assert!(!state.owns_route(rid.as_str(), member.as_str(), registration.id));
+    assert!(member_rx.try_recv().is_err());
+    assert_eq!(
+        handle_control(
+            &state,
+            &member_tx,
+            &mut member_ctx,
+            ControlMessage::Ack {
+                message_id: MessageId::from("after-revoke"),
+                transfer_id: None,
+                status: AckStatus::Delivered,
+                detail: None,
+            },
+            None
+        )
+        .await
+        .unwrap_err(),
+        "room member connection required"
+    );
+    assert!(owner_rx.try_recv().is_err());
     assert!(!state.is_online(rid.as_str(), member.as_str()));
     let room = state.room(rid.as_str()).unwrap();
     assert!(room.devices[member.as_str()].revoked);
@@ -1046,7 +1069,9 @@ async fn regression_f88_revoked_network_peer_is_closed_cannot_send_and_cannot_re
         .send(ClientMessage::Text(forbidden.encode().unwrap().into()))
         .await
         .is_err());
-    assert_eq!(state.frames_forwarded.load(Ordering::Relaxed), forwarded);
+    // Only the owner's PeerLeft was forwarded: the evicted socket's cleanup
+    // fans it out before writing its Close, and the forbidden text adds none.
+    assert_eq!(state.frames_forwarded.load(Ordering::Relaxed), forwarded + 1);
     assert!(state.take_queue(rid.as_str(), owner.as_str()).is_none());
     let (mut rejected, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
     rejected
@@ -1074,18 +1099,26 @@ async fn regression_f88_revoked_network_peer_is_closed_cannot_send_and_cannot_re
         ))
         .await
         .unwrap();
-    let frame = tokio::time::timeout(Duration::from_secs(3), owner_socket.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let ClientMessage::Text(text) = frame else {
-        panic!("owner connection stopped")
-    };
-    assert!(matches!(
-        ControlMessage::decode(&text).unwrap(),
-        ControlMessage::Pong { ts: 89 }
-    ));
+    let mut owner_frames = Vec::new();
+    for _ in 0..2 {
+        let frame = tokio::time::timeout(Duration::from_secs(3), owner_socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let ClientMessage::Text(text) = frame else {
+            panic!("owner connection stopped")
+        };
+        owner_frames.push(ControlMessage::decode(&text).unwrap());
+    }
+    assert!(
+        matches!(
+            owner_frames.as_slice(),
+            [ControlMessage::PeerLeft { device_id }, ControlMessage::Pong { ts: 89 }]
+                if *device_id == member
+        ),
+        "the owner must see the revoked member leave, then its pong: {owner_frames:?}"
+    );
     owner_socket.close(None).await.unwrap();
     rejected.close(None).await.unwrap();
     server.abort();
@@ -1378,4 +1411,72 @@ async fn regression_f98_expiry_discards_pending_spake_and_prevents_admission_or_
     assert!(state.room(offer.room_id.as_str()).is_none());
     state.gc();
     assert!(state.pairing(sid.as_str()).is_none());
+}
+
+#[tokio::test]
+async fn a_replaced_member_socket_cannot_send_room_traffic_before_it_closes() {
+    let state = state();
+    let (rid, owner, member, owner_token, member_token) = room(&state);
+    let (owner_tx, mut owner_rx) = mpsc::channel(16);
+    let mut owner_ctx = None;
+    handle_control(
+        &state,
+        &owner_tx,
+        &mut owner_ctx,
+        hello(&owner, &rid, &owner_token),
+        None,
+    )
+    .await
+    .unwrap();
+    receive(&mut owner_rx).await;
+    let (old_tx, _old_rx) = mpsc::channel(16);
+    let mut old_ctx = None;
+    handle_control(
+        &state,
+        &old_tx,
+        &mut old_ctx,
+        hello(&member, &rid, &member_token),
+        None,
+    )
+    .await
+    .unwrap();
+    let (new_tx, _new_rx) = mpsc::channel(16);
+    handle_control(
+        &state,
+        &new_tx,
+        &mut None,
+        hello(&member, &rid, &member_token),
+        None,
+    )
+    .await
+    .unwrap();
+    // Both registrations announced the member; nothing else reached the owner.
+    for _ in 0..2 {
+        assert!(matches!(
+            receive(&mut owner_rx).await,
+            ControlMessage::PeerJoined { .. }
+        ));
+    }
+
+    // Until the old socket's loop observes its eviction, its frames must be
+    // refused rather than routed under the member's identity.
+    for frame in [
+        ControlMessage::NoiseHandshake {
+            message: "opaque".into(),
+        },
+        ControlMessage::EpochWrapMsg {
+            epoch: 2,
+            wraps: Vec::new(),
+        },
+    ] {
+        assert_eq!(
+            handle_control(&state, &old_tx, &mut old_ctx, frame, None)
+                .await
+                .unwrap_err(),
+            "room member connection required"
+        );
+    }
+    // The binary path uses the same gate, so the old socket's chunks are dropped.
+    assert!(member_ctx(&state, &old_ctx).is_err());
+    assert!(owner_rx.try_recv().is_err());
 }

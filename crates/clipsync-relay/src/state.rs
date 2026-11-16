@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use rand::Rng;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 use clipsync_protocol::{
     clamp_ttl, CreatePairingRequest, CreatePairingResponse, DeviceRole, JoinPairingRequest,
     JoinPairingResponse, PairingSessionId, PeerInfo, QueuedEnvelope, RoomId, HARD_MAX_TTL_SECS,
-    PAIRING_MAX_ATTEMPTS, PAIRING_TTL_SECS,
+    PAIRING_MAX_ATTEMPTS, PAIRING_TTL_SECS, QUEUE_TTL_SECS,
 };
 
 use crate::auth::issue_token;
@@ -35,6 +35,23 @@ fn member_key(room_id: &str, device_id: &str) -> MemberKey {
 pub(crate) struct MemberRoute {
     pub(crate) id: ConnectionId,
     pub(crate) sender: mpsc::Sender<WsOut>,
+    evicted: Arc<Notify>,
+}
+
+impl MemberRoute {
+    /// Tells the socket that installed this route to close. `notify_one`
+    /// keeps the signal until the socket next waits, so it cannot be missed.
+    fn evict(self) {
+        self.evicted.notify_one();
+    }
+}
+
+/// One socket's room-member registration. `evicted` fires once a newer socket
+/// of the same member replaces the route or revocation removes it; the
+/// socket must then stop and close, because it no longer owns the route.
+pub struct MemberRegistration {
+    pub id: ConnectionId,
+    pub evicted: Arc<Notify>,
 }
 
 /// Counts one authenticated socket, pairing or room member, until dropped.
@@ -370,14 +387,15 @@ impl RelayState {
         LiveConnection(self.live_connections.clone())
     }
 
-    /// Routes room traffic for `device_id` in `room_id` to `tx`, replacing any
-    /// older socket of the same member. Only non-revoked members qualify.
+    /// Routes room traffic for `device_id` in `room_id` to `tx`, replacing and
+    /// evicting any older socket of the same member. Only non-revoked members
+    /// qualify.
     pub fn register_conn(
         &self,
         room_id: &str,
         device_id: &str,
         tx: mpsc::Sender<WsOut>,
-    ) -> Result<ConnectionId, &'static str> {
+    ) -> Result<MemberRegistration, &'static str> {
         // Holding the room entry orders this insert with `revoke`, which
         // removes the route under the same entry's write lock.
         let room = self.rooms.get(room_id).ok_or("unknown room")?;
@@ -386,13 +404,31 @@ impl RelayState {
             return Err("device revoked");
         }
         let id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
-        self.member_routes.insert(
+        let evicted = Arc::new(Notify::new());
+        let displaced = self.member_routes.insert(
             member_key(room_id, device_id),
-            MemberRoute { id, sender: tx },
+            MemberRoute {
+                id,
+                sender: tx,
+                evicted: evicted.clone(),
+            },
         );
         drop(room);
+        // The displaced socket can no longer receive room traffic; closing it
+        // also ensures a later revocation has no older socket left to miss.
+        if let Some(route) = displaced {
+            route.evict();
+        }
         self.connections_total.fetch_add(1, Ordering::Relaxed);
-        Ok(id)
+        Ok(MemberRegistration { id, evicted })
+    }
+
+    /// Whether registration `id` still owns the member's route. Only the
+    /// owning socket may send room traffic; a replaced or revoked one may not.
+    pub fn owns_route(&self, room_id: &str, device_id: &str, id: ConnectionId) -> bool {
+        self.member_routes
+            .get(&member_key(room_id, device_id))
+            .is_some_and(|route| route.id == id)
     }
 
     /// Removes the member route only if registration `id` still owns it.
@@ -428,6 +464,8 @@ impl RelayState {
             .contains_key(&member_key(room_id, device_id))
     }
 
+    /// Keeps the latest text for an offline member until the sender's expiry,
+    /// but never longer than `QUEUE_TTL_SECS`: the expiry is sender-chosen.
     pub fn queue_text(
         &self,
         room_id: &str,
@@ -435,8 +473,11 @@ impl RelayState {
         env: QueuedEnvelope,
         expires_at: DateTime<Utc>,
     ) {
-        self.queue
-            .insert(member_key(room_id, device_id), (env, expires_at));
+        let retention_limit = Utc::now() + chrono::Duration::seconds(QUEUE_TTL_SECS as i64);
+        self.queue.insert(
+            member_key(room_id, device_id),
+            (env, expires_at.min(retention_limit)),
+        );
     }
 
     pub fn take_queue(&self, room_id: &str, device_id: &str) -> Option<QueuedEnvelope> {
@@ -449,26 +490,25 @@ impl RelayState {
         }
     }
 
+    /// Revokes a room member, removes its route and evicts the socket that
+    /// owned it. Any older socket of the member was already evicted when it
+    /// was replaced, so no socket of a revoked member keeps a route. Returns
+    /// `false` when the device is not a member of the room.
     pub fn revoke(&self, room_id: &str, device_id: &str) -> bool {
-        self.revoke_member(room_id, device_id).is_some()
-    }
-
-    /// Revokes a room member and removes its route. `None` means the device is
-    /// not a member; otherwise the removed socket, if any, is returned so the
-    /// caller can close exactly the connection that lost its route.
-    pub(crate) fn revoke_member(
-        &self,
-        room_id: &str,
-        device_id: &str,
-    ) -> Option<Option<mpsc::Sender<WsOut>>> {
-        let mut room = self.rooms.get_mut(room_id)?;
-        room.devices.get_mut(device_id)?.revoked = true;
+        let Some(mut room) = self.rooms.get_mut(room_id) else {
+            return false;
+        };
+        let Some(device) = room.devices.get_mut(device_id) else {
+            return false;
+        };
+        device.revoked = true;
         room.epoch += 1;
-        Some(
-            self.member_routes
-                .remove(&member_key(room_id, device_id))
-                .map(|(_, route)| route.sender),
-        )
+        let removed = self.member_routes.remove(&member_key(room_id, device_id));
+        drop(room);
+        if let Some((_, route)) = removed {
+            route.evict();
+        }
+        true
     }
 
     pub fn gc(&self) {

@@ -9,7 +9,7 @@ use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tracing::{debug, warn};
 
 use clipsync_protocol::{
@@ -18,7 +18,7 @@ use clipsync_protocol::{
 };
 
 use crate::auth::verify_token;
-use crate::state::{ConnectionId, LiveConnection};
+use crate::state::{LiveConnection, MemberRegistration};
 use crate::RelayState;
 
 #[derive(Clone, Debug)]
@@ -49,8 +49,8 @@ struct ConnCtx {
     pairing_sid: Option<String>,
     device_role: DeviceRole,
     pairing_side: Option<usize>,
-    // Set only for device-token sockets that own a room-member route.
-    member_conn: Option<ConnectionId>,
+    // Set only for device-token sockets registered for a room-member route.
+    member_conn: Option<MemberRegistration>,
     _live: LiveConnection,
 }
 
@@ -159,7 +159,20 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
     let mut last_msg = Instant::now();
     let mut burst = 0u32;
 
-    while let Some(Ok(msg)) = stream.next().await {
+    loop {
+        let evicted = ctx
+            .as_ref()
+            .and_then(|c| c.member_conn.as_ref())
+            .map(|m| m.evicted.clone());
+        let msg = tokio::select! {
+            msg = stream.next() => match msg {
+                Some(Ok(msg)) => msg,
+                _ => break,
+            },
+            // A replaced or revoked member socket lost its route. Stop reading
+            // so it closes even if the client never answers the close frame.
+            () = until_evicted(evicted.as_deref()) => break,
+        };
         if message_rate_exceeded(&mut last_msg, &mut burst, Instant::now()) {
             send_err(&tx, "rate_limited", "too many messages").await;
             break;
@@ -180,8 +193,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
                 }
             }
             Message::Binary(b) => {
-                // Like frames before hello, pairing-socket binary is dropped.
-                if let Ok(c) = member_ctx(&ctx) {
+                // Like frames before hello, binary from a pairing socket or a
+                // socket that no longer owns its member route is dropped.
+                if let Ok(c) = member_ctx(&state, &ctx) {
                     forward_binary(&state, c, b.to_vec(), &tx).await;
                 }
             }
@@ -197,8 +211,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
     // `c` (and its live-connection count) is dropped only after any leave
     // notice is queued, so observers of the metric also see that notice.
     if let Some(c) = ctx {
-        if let Some(id) = c.member_conn {
-            state.unregister_conn(&c.room_id, &c.device_id, id);
+        if let Some(member) = &c.member_conn {
+            state.unregister_conn(&c.room_id, &c.device_id, member.id);
             // A replacement may already own this member's routing entry. Its
             // peers must stay online when the superseded socket finishes closing.
             if !state.is_online(&c.room_id, &c.device_id) {
@@ -221,14 +235,31 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
     let _ = writer.await;
 }
 
-/// Room traffic needs a device-token member connection. Pairing tokens are
-/// issued without authentication and are confined to their pairing session.
-fn member_ctx(ctx: &Option<ConnCtx>) -> Result<&ConnCtx, String> {
+const MEMBER_CONNECTION_REQUIRED: &str = "room member connection required";
+
+async fn until_evicted(evicted: Option<&Notify>) {
+    match evicted {
+        Some(evicted) => evicted.notified().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Room traffic needs the device-token socket that currently owns the
+/// member's route. Pairing tokens are issued without authentication and are
+/// confined to their pairing session; a socket replaced by a newer one or
+/// revoked lost its route, so it may not send either.
+fn member_ctx<'a>(state: &RelayState, ctx: &'a Option<ConnCtx>) -> Result<&'a ConnCtx, String> {
     let c = ctx.as_ref().ok_or("hello required")?;
-    if c.member_conn.is_none() {
-        return Err("room member connection required".into());
+    if !owns_member_route(state, c) {
+        return Err(MEMBER_CONNECTION_REQUIRED.into());
     }
     Ok(c)
+}
+
+fn owns_member_route(state: &RelayState, c: &ConnCtx) -> bool {
+    c.member_conn
+        .as_ref()
+        .is_some_and(|member| state.owns_route(&c.room_id, &c.device_id, member.id))
 }
 
 fn message_rate_exceeded(last: &mut Instant, burst: &mut u32, now: Instant) -> bool {
@@ -377,7 +408,7 @@ async fn handle_control(
             nonce,
             ciphertext,
         } => {
-            let c = member_ctx(ctx)?;
+            let c = member_ctx(state, ctx)?;
             if routing.item_kind != ItemKind::Text {
                 return Err("text envelope item_kind mismatch".into());
             }
@@ -447,7 +478,7 @@ async fn handle_control(
             Ok(())
         }
         ControlMessage::Manifest { ref routing, .. } => {
-            let c = member_ctx(ctx)?;
+            let c = member_ctx(state, ctx)?;
             let peers = state.peer_ids(&c.room_id, &c.device_id);
             let online: Vec<_> = peers
                 .iter()
@@ -481,24 +512,21 @@ async fn handle_control(
             Ok(())
         }
         ControlMessage::Ack { .. } | ControlMessage::EpochWrapMsg { .. } => {
-            let c = member_ctx(ctx)?;
+            let c = member_ctx(state, ctx)?;
             fanout_except(state, &c.room_id, &c.device_id, &msg).await;
             Ok(())
         }
         ControlMessage::Revoke { ref device_id } => {
-            let c = member_ctx(ctx)?;
+            let c = member_ctx(state, ctx)?;
             if c.device_role != DeviceRole::Owner {
                 return Err("manage permission required".into());
             }
-            // Revoke removes the routing entry and hands back that socket's
-            // sender, so the connection that lost its route is the one closed.
-            let revoked_connection = state
-                .revoke_member(&c.room_id, device_id.as_str())
-                .ok_or("device not found")?;
-            fanout_except(state, &c.room_id, &c.device_id, &msg).await;
-            if let Some(p) = revoked_connection {
-                let _ = p.send(WsOut::Close).await;
+            // Revocation removes the route and evicts the socket that owned
+            // it, which then closes itself; older sockets were already evicted.
+            if !state.revoke(&c.room_id, device_id.as_str()) {
+                return Err("device not found".into());
             }
+            fanout_except(state, &c.room_id, &c.device_id, &msg).await;
             state.webhook_spawn(serde_json::json!({
                 "type": "room.revoked",
                 "room_id": c.room_id,
@@ -614,6 +642,9 @@ async fn forward_pairing_or_peer(
             }
         }
         return Ok(());
+    }
+    if !owns_member_route(state, c) {
+        return Err(MEMBER_CONNECTION_REQUIRED.into());
     }
     fanout_except(state, &c.room_id, &c.device_id, &msg).await;
     Ok(())

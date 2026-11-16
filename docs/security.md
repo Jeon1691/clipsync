@@ -54,9 +54,9 @@ protocol changes; the current v1 format is retained for existing clients.
 ## Relay
 
 The relay routes opaque ciphertext. It stores at most one latest encrypted text
-envelope per recipient device in each room, in memory for 60 seconds. Image and
-file frames are forwarded only while the peer is online and are never assembled
-or written to disk.
+envelope per recipient device in each room, in memory until the sender's
+expiry and never longer than 60 seconds. Image and file frames are forwarded
+only while the peer is online and are never assembled or written to disk.
 
 Room traffic and presence reach only sockets authenticated with a device token
 for a current, non-revoked room member, and routes are keyed by room and device
@@ -64,12 +64,15 @@ ID. Device IDs are not secret, and the pairing endpoints issue pairing tokens
 for any device ID without authentication. A pairing socket therefore exchanges
 frames only within its own pairing session; it cannot send room traffic, or
 receive, displace or take offline a room member's route, and a device in one
-room cannot shadow the same device ID in another room. When a member reconnects, the newest socket owns the
-route; cleanup of an older socket removes only the route it installed.
-Revocation removes the member's route and closes that socket. Pairing requests
-that name a device ID already connected to a room are not rejected: such a
-check would reveal presence to unauthenticated callers and stop a device from
-pairing into another room, while routing no longer depends on it.
+room cannot shadow the same device ID in another room. Only the socket that owns
+a member's route may send room traffic. When a member reconnects, the newest
+socket takes over the route and the relay closes the older socket; cleanup of an
+older socket removes only the route it installed. Revocation removes the
+member's route and closes its socket, so no socket of a revoked member can send
+room traffic. Pairing requests that name a device ID already connected to a room
+are not rejected: such a check would reveal presence to unauthenticated callers
+and stop a device from pairing into another room, while routing no longer
+depends on it.
 
 Webhooks carry metadata only: opaque IDs, item kind, encrypted size, timestamp,
 status. Destination checks must include DNS results, IPv4/IPv6 special ranges,

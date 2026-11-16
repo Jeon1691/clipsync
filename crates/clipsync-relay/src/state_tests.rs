@@ -176,8 +176,11 @@ fn stale_connection_cleanup_cannot_remove_a_newer_member_route() {
     let (state, room, _, member) = paired_room();
     let (old_tx, _old_rx) = mpsc::channel(1);
     let (new_tx, _new_rx) = mpsc::channel(1);
-    let old = state.register_conn(&room, &member, old_tx).unwrap();
-    let new = state.register_conn(&room, &member, new_tx.clone()).unwrap();
+    let old = state.register_conn(&room, &member, old_tx).unwrap().id;
+    let new = state
+        .register_conn(&room, &member, new_tx.clone())
+        .unwrap()
+        .id;
     assert_ne!(old, new);
 
     assert!(!state.unregister_conn(&room, &member, old));
@@ -192,17 +195,44 @@ fn stale_connection_cleanup_cannot_remove_a_newer_member_route() {
     assert!(!state.unregister_conn(&room, &member, new));
 }
 
+#[tokio::test]
+async fn a_replaced_member_socket_loses_its_route_and_is_evicted() {
+    let (state, room, _, member) = paired_room();
+    let (old_tx, _old_rx) = mpsc::channel(1);
+    let (new_tx, _new_rx) = mpsc::channel(1);
+    let old = state.register_conn(&room, &member, old_tx).unwrap();
+    assert!(state.owns_route(&room, &member, old.id));
+    let new = state.register_conn(&room, &member, new_tx).unwrap();
+
+    assert!(!state.owns_route(&room, &member, old.id));
+    assert!(state.owns_route(&room, &member, new.id));
+    // The eviction is retained until the old socket next waits for it.
+    tokio::time::timeout(EVICTION_DEADLINE, old.evicted.notified())
+        .await
+        .expect("the replaced socket was not evicted");
+    assert!(
+        tokio::time::timeout(EVICTION_DEADLINE, new.evicted.notified())
+            .await
+            .is_err(),
+        "the current socket must not be evicted"
+    );
+}
+
 #[test]
 fn member_routes_require_a_live_membership_and_are_scoped_per_room() {
     let (state, room, owner, member) = paired_room();
     let (tx, _rx) = mpsc::channel(1);
     assert_eq!(
-        state.register_conn(&RoomId::new().to_string(), &member, tx.clone()),
-        Err("unknown room")
+        state
+            .register_conn(&RoomId::new().to_string(), &member, tx.clone())
+            .err(),
+        Some("unknown room")
     );
     assert_eq!(
-        state.register_conn(&room, &DeviceId::new().to_string(), tx.clone()),
-        Err("unknown device")
+        state
+            .register_conn(&room, &DeviceId::new().to_string(), tx.clone())
+            .err(),
+        Some("unknown device")
     );
     assert!(state.member_routes.is_empty());
 
@@ -212,21 +242,69 @@ fn member_routes_require_a_live_membership_and_are_scoped_per_room() {
     assert!(!state.is_online(&room, &owner));
 }
 
-#[test]
-fn revocation_drops_the_route_returns_its_socket_and_blocks_reregistration() {
+#[tokio::test]
+async fn revocation_drops_the_route_evicts_its_socket_and_blocks_reregistration() {
     let (state, room, _, member) = paired_room();
     let (tx, _rx) = mpsc::channel(1);
-    state.register_conn(&room, &member, tx.clone()).unwrap();
+    let registration = state.register_conn(&room, &member, tx.clone()).unwrap();
 
-    let removed = state.revoke_member(&room, &member).unwrap().unwrap();
-    assert!(removed.same_channel(&tx));
+    assert!(state.revoke(&room, &member));
     assert!(!state.is_online(&room, &member));
+    assert!(!state.owns_route(&room, &member, registration.id));
+    tokio::time::timeout(EVICTION_DEADLINE, registration.evicted.notified())
+        .await
+        .expect("the revoked socket was not evicted");
     assert_eq!(
-        state.register_conn(&room, &member, tx),
-        Err("device revoked")
+        state.register_conn(&room, &member, tx).err(),
+        Some("device revoked")
     );
-    assert!(state
-        .revoke_member(&room, &DeviceId::new().to_string())
-        .is_none());
+    assert!(!state.revoke(&room, &DeviceId::new().to_string()));
     assert!(!state.revoke(&RoomId::new().to_string(), &member));
+}
+
+#[test]
+fn queued_text_retention_is_capped_whatever_expiry_the_sender_chose() {
+    let (state, room, _, member) = paired_room();
+    let sent_at = Utc::now();
+    // Far beyond the relay's retention cap, as a misbehaving sender may claim.
+    let claimed_expiry = sent_at + chrono::Duration::days(SENDER_CLAIMED_EXPIRY_DAYS);
+    state.queue_text(
+        &room,
+        &member,
+        queued_envelope(&room, &member),
+        claimed_expiry,
+    );
+    let (_, retained_until) = state
+        .queue
+        .get(&member_key(&room, &member))
+        .map(|entry| entry.value().clone())
+        .unwrap();
+    let cap = chrono::Duration::seconds(QUEUE_TTL_SECS as i64);
+    assert!(retained_until <= Utc::now() + cap);
+    assert!(retained_until >= sent_at + cap);
+}
+
+// Evictions are signalled synchronously, so an absent one is decided quickly.
+const EVICTION_DEADLINE: std::time::Duration = std::time::Duration::from_millis(50);
+// Any claim well past the relay's retention cap exercises the clamp.
+const SENDER_CLAIMED_EXPIRY_DAYS: i64 = 30;
+
+fn queued_envelope(room: &str, sender: &str) -> QueuedEnvelope {
+    let now = Utc::now();
+    QueuedEnvelope {
+        routing: RoutingHeader {
+            version: clipsync_protocol::PROTOCOL_VERSION,
+            message_id: MessageId::new(),
+            transfer_id: TransferId::new(),
+            room_id: RoomId::from(room),
+            sender_device_id: DeviceId::from(sender),
+            recipient: Recipient::Broadcast,
+            sent_at: now,
+            expires_at: now,
+            item_kind: ItemKind::Text,
+            seq: 1,
+        },
+        nonce: "opaque".into(),
+        ciphertext: "opaque".into(),
+    }
 }

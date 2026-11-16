@@ -64,6 +64,7 @@ async fn pairing_registration_rejects_wrong_room_completion_and_identity_without
             .pairing_senders
             .iter()
             .all(Option::is_none));
+        assert!(state.member_routes.is_empty(), "{case}");
     }
 }
 
