@@ -154,10 +154,9 @@ async fn repeated_hello_cannot_switch_authenticated_identity_or_replace_its_rout
     );
     assert_eq!(ctx.as_ref().unwrap().device_id, owner.as_str());
     assert_eq!(ctx.as_ref().unwrap().device_role, DeviceRole::Owner);
-    assert!(state
-        .member_sender(rid.as_str(), owner.as_str())
-        .unwrap()
-        .same_channel(&tx));
+    let senders = state.member_senders(rid.as_str(), owner.as_str());
+    assert_eq!(senders.len(), 1);
+    assert!(senders[0].1.same_channel(&tx));
     assert!(!state.is_online(rid.as_str(), member.as_str()));
     assert!(rx.try_recv().is_err());
 }

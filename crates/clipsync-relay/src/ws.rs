@@ -9,6 +9,7 @@ use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
+use tokio::sync::mpsc::error::SendTimeoutError;
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, warn};
 
@@ -169,7 +170,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
                 Some(Ok(msg)) => msg,
                 _ => break,
             },
-            // A replaced or revoked member socket lost its route. Stop reading
+            // An evicted or revoked member socket lost its route. Stop reading
             // so it closes even if the client never answers the close frame.
             () = until_evicted(evicted.as_deref()) => break,
         };
@@ -194,7 +195,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
             }
             Message::Binary(b) => {
                 // Like frames before hello, binary from a pairing socket or a
-                // socket that no longer owns its member route is dropped.
+                // member socket that is no longer routed is dropped.
                 if let Ok(c) = member_ctx(&state, &ctx) {
                     forward_binary(&state, c, b.to_vec(), &tx).await;
                 }
@@ -213,8 +214,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
     if let Some(c) = ctx {
         if let Some(member) = &c.member_conn {
             state.unregister_conn(&c.room_id, &c.device_id, member.id);
-            // A replacement may already own this member's routing entry. Its
-            // peers must stay online when the superseded socket finishes closing.
+            // The member may still have other sockets (its daemon, a newer
+            // reconnect). Its peers must keep seeing it online until the last
+            // one closes.
             if !state.is_online(&c.room_id, &c.device_id) {
                 notify_peers_left(&state, &c).await;
             }
@@ -244,10 +246,15 @@ async fn until_evicted(evicted: Option<&Notify>) {
     }
 }
 
-/// Room traffic needs the device-token socket that currently owns the
-/// member's route. Pairing tokens are issued without authentication and are
-/// confined to their pairing session; a socket replaced by a newer one or
-/// revoked lost its route, so it may not send either.
+/// Room traffic needs a device-token socket that is still routed for its
+/// member. Pairing tokens are issued without authentication and are confined
+/// to their pairing session; an evicted or revoked socket lost its route, so
+/// it may not send either.
+///
+/// The check and the forward that follows are not one atomic step: a frame
+/// that passed the check just before a concurrent revocation is still
+/// forwarded. Each socket handles one frame at a time, so this is at most one
+/// frame per socket of the revoked member.
 fn member_ctx<'a>(state: &RelayState, ctx: &'a Option<ConnCtx>) -> Result<&'a ConnCtx, String> {
     let c = ctx.as_ref().ok_or("hello required")?;
     if !owns_member_route(state, c) {
@@ -432,13 +439,14 @@ async fn handle_control(
                 nonce: nonce.clone(),
                 ciphertext: ciphertext.clone(),
             };
+            let encoded = env.encode().ok();
             for peer in &peers {
-                if let Some(p) = state.member_sender(&c.room_id, peer) {
+                let online = match &encoded {
+                    Some(s) => deliver(state, &c.room_id, peer, WsOut::Text(s.clone())).await,
+                    None => state.is_online(&c.room_id, peer),
+                };
+                if online {
                     any_online = true;
-                    if let Ok(s) = env.encode() {
-                        let _ = p.send(WsOut::Text(s)).await;
-                        state.frames_forwarded.fetch_add(1, Ordering::Relaxed);
-                    }
                 } else {
                     state.queue_text(
                         &c.room_id,
@@ -521,8 +529,8 @@ async fn handle_control(
             if c.device_role != DeviceRole::Owner {
                 return Err("manage permission required".into());
             }
-            // Revocation removes the route and evicts the socket that owned
-            // it, which then closes itself; older sockets were already evicted.
+            // Revocation removes every route of the member and evicts all of
+            // its sockets, which then close themselves.
             if !state.revoke(&c.room_id, device_id.as_str()) {
                 return Err("device not found".into());
             }
@@ -659,11 +667,7 @@ async fn forward_binary(
     let peers = state.peer_ids(&c.room_id, &c.device_id);
     let mut sent = false;
     for peer in peers {
-        if let Some(p) = state.member_sender(&c.room_id, &peer) {
-            let _ = p.send(WsOut::Binary(bytes.clone())).await;
-            state.frames_forwarded.fetch_add(1, Ordering::Relaxed);
-            sent = true;
-        }
+        sent |= deliver(state, &c.room_id, &peer, WsOut::Binary(bytes.clone())).await;
     }
     if !sent {
         let ack = ControlMessage::Ack {
@@ -679,12 +683,56 @@ async fn forward_binary(
 async fn fanout_except(state: &Arc<RelayState>, room_id: &str, except: &str, msg: &ControlMessage) {
     if let Ok(s) = msg.encode() {
         for peer in state.peer_ids(room_id, except) {
-            if let Some(p) = state.member_sender(room_id, &peer) {
-                let _ = p.send(WsOut::Text(s.clone())).await;
-                state.frames_forwarded.fetch_add(1, Ordering::Relaxed);
-            }
+            deliver(state, room_id, &peer, WsOut::Text(s.clone())).await;
         }
     }
+}
+
+/// How long an older socket of a member may hold up delivery while its
+/// outbound queue is full before the relay evicts it. A healthy socket frees
+/// a slot once its writer hands one frame (at most `FRAME_HARD_CAP`, 384 KiB)
+/// to the kernel; 30 s covers that on a link of about 100 kbit/s. Only a
+/// stalled socket reaches it, typically a half-open one whose client already
+/// reconnected, which would otherwise block delivery to the member's live
+/// sockets until TCP gave up on it.
+const STALLED_MEMBER_SOCKET_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Sends `out` to every routed socket of `peer` in `room_id` and returns
+/// whether the member had any. The newest socket keeps plain backpressure, as
+/// a member's only socket always had; an older socket that stays full for
+/// `STALLED_MEMBER_SOCKET_TIMEOUT` is evicted instead of stalling the sender.
+async fn deliver(state: &RelayState, room_id: &str, peer: &str, out: WsOut) -> bool {
+    deliver_within(state, room_id, peer, out, STALLED_MEMBER_SOCKET_TIMEOUT).await
+}
+
+async fn deliver_within(
+    state: &RelayState,
+    room_id: &str,
+    peer: &str,
+    out: WsOut,
+    stall_timeout: Duration,
+) -> bool {
+    let sockets = state.member_senders(room_id, peer);
+    let Some(((_, newest), older)) = sockets.split_last() else {
+        return false;
+    };
+    for (id, sender) in older {
+        match sender.send_timeout(out.clone(), stall_timeout).await {
+            Ok(()) => {
+                state.frames_forwarded.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(SendTimeoutError::Timeout(_)) => {
+                warn!("evicting a member socket whose outbound queue stalled");
+                state.evict_conn(room_id, peer, *id);
+            }
+            // The socket is already closing; its cleanup unregisters it.
+            Err(SendTimeoutError::Closed(_)) => {}
+        }
+    }
+    if newest.send(out).await.is_ok() {
+        state.frames_forwarded.fetch_add(1, Ordering::Relaxed);
+    }
+    true
 }
 
 async fn notify_peers_left(state: &Arc<RelayState>, c: &ConnCtx) {

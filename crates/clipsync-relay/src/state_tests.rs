@@ -171,8 +171,16 @@ fn paired_room() -> (RelayState, String, String, String) {
     )
 }
 
+fn routed(state: &RelayState, room: &str, member: &str) -> Vec<ConnectionId> {
+    state
+        .member_senders(room, member)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
 #[test]
-fn stale_connection_cleanup_cannot_remove_a_newer_member_route() {
+fn closing_one_socket_keeps_the_member_s_other_sockets_routed() {
     let (state, room, _, member) = paired_room();
     let (old_tx, _old_rx) = mpsc::channel(1);
     let (new_tx, _new_rx) = mpsc::channel(1);
@@ -182,40 +190,72 @@ fn stale_connection_cleanup_cannot_remove_a_newer_member_route() {
         .unwrap()
         .id;
     assert_ne!(old, new);
+    assert_eq!(routed(&state, &room, &member), [old, new]);
 
+    assert!(state.unregister_conn(&room, &member, old));
     assert!(!state.unregister_conn(&room, &member, old));
-    assert!(state
-        .member_sender(&room, &member)
-        .unwrap()
-        .same_channel(&new_tx));
+    let senders = state.member_senders(&room, &member);
+    assert_eq!(senders.len(), 1);
+    assert!(senders[0].1.same_channel(&new_tx));
     assert!(state.is_online(&room, &member));
 
     assert!(state.unregister_conn(&room, &member, new));
     assert!(!state.is_online(&room, &member));
+    assert!(state.member_routes.is_empty());
     assert!(!state.unregister_conn(&room, &member, new));
 }
 
 #[tokio::test]
-async fn a_replaced_member_socket_loses_its_route_and_is_evicted() {
+async fn concurrent_sockets_of_a_member_are_all_routed_and_none_is_evicted() {
     let (state, room, _, member) = paired_room();
-    let (old_tx, _old_rx) = mpsc::channel(1);
-    let (new_tx, _new_rx) = mpsc::channel(1);
-    let old = state.register_conn(&room, &member, old_tx).unwrap();
-    assert!(state.owns_route(&room, &member, old.id));
-    let new = state.register_conn(&room, &member, new_tx).unwrap();
+    let (daemon_tx, _daemon_rx) = mpsc::channel(1);
+    let (command_tx, _command_rx) = mpsc::channel(1);
+    let daemon = state.register_conn(&room, &member, daemon_tx).unwrap();
+    let command = state.register_conn(&room, &member, command_tx).unwrap();
 
-    assert!(!state.owns_route(&room, &member, old.id));
-    assert!(state.owns_route(&room, &member, new.id));
-    // The eviction is retained until the old socket next waits for it.
-    tokio::time::timeout(EVICTION_DEADLINE, old.evicted.notified())
+    assert!(state.owns_route(&room, &member, daemon.id));
+    assert!(state.owns_route(&room, &member, command.id));
+    for registration in [&daemon, &command] {
+        assert!(
+            tokio::time::timeout(EVICTION_DEADLINE, registration.evicted.notified())
+                .await
+                .is_err(),
+            "a concurrent socket of the same member must not be evicted"
+        );
+    }
+}
+
+#[tokio::test]
+async fn registering_past_the_per_member_cap_evicts_only_the_oldest_socket() {
+    let (state, room, _, member) = paired_room();
+    let mut receivers = Vec::new();
+    let mut registrations = Vec::new();
+    for _ in 0..=MAX_MEMBER_SOCKETS {
+        let (tx, rx) = mpsc::channel(1);
+        receivers.push(rx);
+        registrations.push(state.register_conn(&room, &member, tx).unwrap());
+    }
+
+    let oldest = registrations.remove(0);
+    assert!(!state.owns_route(&room, &member, oldest.id));
+    tokio::time::timeout(EVICTION_DEADLINE, oldest.evicted.notified())
         .await
-        .expect("the replaced socket was not evicted");
-    assert!(
-        tokio::time::timeout(EVICTION_DEADLINE, new.evicted.notified())
-            .await
-            .is_err(),
-        "the current socket must not be evicted"
+        .expect("the oldest socket past the cap was not evicted");
+    assert_eq!(
+        routed(&state, &room, &member),
+        registrations.iter().map(|r| r.id).collect::<Vec<_>>()
     );
+    for registration in &registrations {
+        assert!(
+            tokio::time::timeout(EVICTION_DEADLINE, registration.evicted.notified())
+                .await
+                .is_err(),
+            "only the oldest socket may be evicted"
+        );
+    }
+    // The evicted socket's own cleanup later finds nothing to remove.
+    assert!(!state.unregister_conn(&room, &member, oldest.id));
+    assert_eq!(routed(&state, &room, &member).len(), MAX_MEMBER_SOCKETS);
 }
 
 #[test]
@@ -243,17 +283,23 @@ fn member_routes_require_a_live_membership_and_are_scoped_per_room() {
 }
 
 #[tokio::test]
-async fn revocation_drops_the_route_evicts_its_socket_and_blocks_reregistration() {
-    let (state, room, _, member) = paired_room();
+async fn revocation_drops_every_route_evicts_every_socket_and_blocks_reregistration() {
+    let (state, room, owner, member) = paired_room();
     let (tx, _rx) = mpsc::channel(1);
-    let registration = state.register_conn(&room, &member, tx.clone()).unwrap();
+    let registrations: Vec<_> = (0..MAX_MEMBER_SOCKETS)
+        .map(|_| state.register_conn(&room, &member, tx.clone()).unwrap())
+        .collect();
+    let owner_registration = state.register_conn(&room, &owner, tx.clone()).unwrap();
 
     assert!(state.revoke(&room, &member));
     assert!(!state.is_online(&room, &member));
-    assert!(!state.owns_route(&room, &member, registration.id));
-    tokio::time::timeout(EVICTION_DEADLINE, registration.evicted.notified())
-        .await
-        .expect("the revoked socket was not evicted");
+    for registration in &registrations {
+        assert!(!state.owns_route(&room, &member, registration.id));
+        tokio::time::timeout(EVICTION_DEADLINE, registration.evicted.notified())
+            .await
+            .expect("a revoked member's socket was not evicted");
+    }
+    assert!(state.owns_route(&room, &owner, owner_registration.id));
     assert_eq!(
         state.register_conn(&room, &member, tx).err(),
         Some("device revoked")

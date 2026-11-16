@@ -4,7 +4,7 @@
 mod boundary_tests;
 
 use super::*;
-use crate::{auth::issue_token, RelayConfig};
+use crate::{auth::issue_token, RelayConfig, MAX_MEMBER_SOCKETS};
 use clipsync_protocol::{
     CreatePairingRequest, JoinPairingRequest, PairingSessionId, Recipient, RoomId, RoutingHeader,
     TransferId,
@@ -64,19 +64,22 @@ async fn regression_f98_stale_room_socket_close_does_not_announce_live_replaceme
         let mut peer = connect(address, &member, &rid, &member_token).await;
         let mut old = connect(address, &owner, &rid, &owner_token).await;
         assert!(matches!(control(&mut peer).await, ControlMessage::PeerJoined { device } if device.device_id == owner));
-        let old_sender = state.member_sender(rid.as_str(), owner.as_str()).unwrap();
+        let old_sender = state.member_senders(rid.as_str(), owner.as_str())[0].1.clone();
         let mut current = connect(address, &owner, &rid, &owner_token).await;
         assert!(matches!(control(&mut peer).await, ControlMessage::PeerJoined { device } if device.device_id == owner));
-        let current_sender = state.member_sender(rid.as_str(), owner.as_str()).unwrap();
-        assert!(!old_sender.same_channel(&current_sender));
+        // Both sockets of the device stay routed, oldest first.
+        let senders = state.member_senders(rid.as_str(), owner.as_str());
+        assert_eq!(senders.len(), 2);
+        assert!(senders[0].1.same_channel(&old_sender));
+        let current_sender = senders[1].1.clone();
 
-        // The replacement evicts the old socket; the relay may already have
-        // closed it, so the client's own close can fail.
-        let _ = old.close(None).await;
+        old.close(None).await.unwrap();
         // The old writer's receiver closes only after its socket cleanup has
         // queued any leave notification and sent its Close. No blind delay.
         old_sender.closed().await;
-        assert!(state.member_sender(rid.as_str(), owner.as_str()).unwrap().same_channel(&current_sender));
+        let senders = state.member_senders(rid.as_str(), owner.as_str());
+        assert_eq!(senders.len(), 1);
+        assert!(senders[0].1.same_channel(&current_sender));
         peer.send(ClientMessage::Text(ControlMessage::Ping { ts: 9801 }.encode().unwrap().into())).await.unwrap();
         assert!(matches!(control(&mut peer).await, ControlMessage::Pong { ts: 9801 }),
             "a stale socket must not announce a still-live device as offline");
@@ -1414,7 +1417,7 @@ async fn regression_f98_expiry_discards_pending_spake_and_prevents_admission_or_
 }
 
 #[tokio::test]
-async fn a_replaced_member_socket_cannot_send_room_traffic_before_it_closes() {
+async fn a_socket_evicted_past_the_member_cap_cannot_send_room_traffic_before_it_closes() {
     let state = state();
     let (rid, owner, member, owner_token, member_token) = room(&state);
     let (owner_tx, mut owner_rx) = mpsc::channel(16);
@@ -1440,23 +1443,31 @@ async fn a_replaced_member_socket_cannot_send_room_traffic_before_it_closes() {
     )
     .await
     .unwrap();
-    let (new_tx, _new_rx) = mpsc::channel(16);
-    handle_control(
-        &state,
-        &new_tx,
-        &mut None,
-        hello(&member, &rid, &member_token),
-        None,
-    )
-    .await
-    .unwrap();
-    // Both registrations announced the member; nothing else reached the owner.
-    for _ in 0..2 {
+    let mut newer_rxs = Vec::new();
+    for _ in 0..MAX_MEMBER_SOCKETS {
+        let (new_tx, new_rx) = mpsc::channel(16);
+        newer_rxs.push(new_rx);
+        handle_control(
+            &state,
+            &new_tx,
+            &mut None,
+            hello(&member, &rid, &member_token),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    // Every registration announced the member; nothing else reached the owner.
+    for _ in 0..=MAX_MEMBER_SOCKETS {
         assert!(matches!(
             receive(&mut owner_rx).await,
             ControlMessage::PeerJoined { .. }
         ));
     }
+    let registration = old_ctx.as_ref().unwrap().member_conn.as_ref().unwrap();
+    tokio::time::timeout(Duration::from_millis(500), registration.evicted.notified())
+        .await
+        .expect("the oldest socket past the cap was not evicted");
 
     // Until the old socket's loop observes its eviction, its frames must be
     // refused rather than routed under the member's identity.
@@ -1479,4 +1490,46 @@ async fn a_replaced_member_socket_cannot_send_room_traffic_before_it_closes() {
     // The binary path uses the same gate, so the old socket's chunks are dropped.
     assert!(member_ctx(&state, &old_ctx).is_err());
     assert!(owner_rx.try_recv().is_err());
+    assert!(state.is_online(rid.as_str(), member.as_str()));
+}
+
+// Stands in for `STALLED_MEMBER_SOCKET_TIMEOUT` so the stall is observed fast.
+const TEST_STALL_TIMEOUT: Duration = Duration::from_millis(50);
+
+#[tokio::test]
+async fn a_stalled_older_member_socket_is_evicted_instead_of_blocking_delivery() {
+    let state = state();
+    let (rid, _, member, _, _) = room(&state);
+    // A half-open socket the client already replaced: its queue never drains.
+    let (stalled_tx, _stalled_rx) = mpsc::channel(1);
+    stalled_tx
+        .try_send(WsOut::Text("unsent".into()))
+        .expect("fill the stalled queue");
+    let stalled = state
+        .register_conn(rid.as_str(), member.as_str(), stalled_tx)
+        .unwrap();
+    let (live_tx, mut live_rx) = mpsc::channel(1);
+    let live = state
+        .register_conn(rid.as_str(), member.as_str(), live_tx)
+        .unwrap();
+
+    let frame = WsOut::Binary(vec![4, 5, 6]);
+    assert!(tokio::time::timeout(
+        Duration::from_secs(3),
+        deliver_within(
+            &state,
+            rid.as_str(),
+            member.as_str(),
+            frame,
+            TEST_STALL_TIMEOUT
+        )
+    )
+    .await
+    .expect("a stalled socket blocked delivery to the member's live socket"));
+    assert!(matches!(live_rx.recv().await, Some(WsOut::Binary(bytes)) if bytes == [4, 5, 6]));
+    tokio::time::timeout(Duration::from_millis(500), stalled.evicted.notified())
+        .await
+        .expect("the stalled socket was not evicted");
+    assert!(!state.owns_route(rid.as_str(), member.as_str(), stalled.id));
+    assert!(state.owns_route(rid.as_str(), member.as_str(), live.id));
 }

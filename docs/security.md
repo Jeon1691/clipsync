@@ -64,15 +64,21 @@ ID. Device IDs are not secret, and the pairing endpoints issue pairing tokens
 for any device ID without authentication. A pairing socket therefore exchanges
 frames only within its own pairing session; it cannot send room traffic, or
 receive, displace or take offline a room member's route, and a device in one
-room cannot shadow the same device ID in another room. Only the socket that owns
-a member's route may send room traffic. When a member reconnects, the newest
-socket takes over the route and the relay closes the older socket; cleanup of an
-older socket removes only the route it installed. Revocation removes the
-member's route and closes its socket, so no socket of a revoked member can send
-room traffic. Pairing requests that name a device ID already connected to a room
-are not rejected: such a check would reveal presence to unauthenticated callers
-and stop a device from pairing into another room, while routing no longer
-depends on it.
+room cannot shadow the same device ID in another room. A member may hold up to
+four routed sockets at once, such as its sync daemon beside a CLI `push` or
+`pull`, and the relay delivers the member's room traffic to each of them. A
+fifth socket evicts the member's oldest, and an older socket whose outbound
+queue stays full for 30 seconds is evicted instead of stalling delivery. Only a
+routed socket may send room traffic, and closing one socket removes only its own
+registration. Revocation removes all of the member's routes and closes every one
+of its sockets. A socket checks that it is still routed before it forwards each
+frame, and the check and forward are not atomic, so a frame that passed the
+check just before the revocation is still forwarded: at most one frame per
+socket of the revoked member, because each socket handles its frames one at a
+time. After that none of its sockets can send room traffic. Pairing requests
+that name a device ID already connected to a room are not rejected: such a
+check would reveal presence to unauthenticated callers and stop a device from
+pairing into another room, while routing no longer depends on it.
 
 Webhooks carry metadata only: opaque IDs, item kind, encrypted size, timestamp,
 status. Destination checks must include DNS results, IPv4/IPv6 special ranges,

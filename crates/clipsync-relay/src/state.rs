@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use rand::Rng;
 use tokio::sync::{mpsc, Notify};
@@ -32,6 +33,15 @@ fn member_key(room_id: &str, device_id: &str) -> MemberKey {
     (room_id.to_string(), device_id.to_string())
 }
 
+/// Most sockets one room member may have routed at once. A device runs its
+/// sync daemon and, alongside it, CLI commands that open their own socket
+/// (`push` of an image or file, `pull` without a daemon item, possibly both),
+/// and a daemon reconnect overlaps the old socket until that one closes:
+/// daemon, reconnect overlap, push and pull make four. Registering one more
+/// evicts the member's oldest socket, so one device token cannot pin an
+/// unbounded number of routed sockets and their outbound queues.
+pub const MAX_MEMBER_SOCKETS: usize = 4;
+
 pub(crate) struct MemberRoute {
     pub(crate) id: ConnectionId,
     pub(crate) sender: mpsc::Sender<WsOut>,
@@ -46,9 +56,10 @@ impl MemberRoute {
     }
 }
 
-/// One socket's room-member registration. `evicted` fires once a newer socket
-/// of the same member replaces the route or revocation removes it; the
-/// socket must then stop and close, because it no longer owns the route.
+/// One socket's room-member registration. `evicted` fires once the relay
+/// drops this registration (revocation, the per-member socket cap, or a
+/// stalled outbound queue); the socket must then stop and close, because it
+/// is no longer routed.
 pub struct MemberRegistration {
     pub id: ConnectionId,
     pub evicted: Arc<Notify>,
@@ -70,7 +81,9 @@ pub struct RelayState {
     rooms: DashMap<String, Room>,
     // Only sockets authenticated with a device token for a non-revoked room
     // member are routed here. Pairing sockets route via `pairing_senders`.
-    pub(crate) member_routes: DashMap<MemberKey, MemberRoute>,
+    // Each member's registrations are kept oldest first, never empty, and at
+    // most `MAX_MEMBER_SOCKETS` long.
+    pub(crate) member_routes: DashMap<MemberKey, Vec<MemberRoute>>,
     next_connection_id: AtomicU64,
     live_connections: Arc<AtomicU64>,
     queue: DashMap<MemberKey, (QueuedEnvelope, DateTime<Utc>)>,
@@ -387,9 +400,10 @@ impl RelayState {
         LiveConnection(self.live_connections.clone())
     }
 
-    /// Routes room traffic for `device_id` in `room_id` to `tx`, replacing and
-    /// evicting any older socket of the same member. Only non-revoked members
-    /// qualify.
+    /// Adds `tx` to the sockets that receive room traffic for `device_id` in
+    /// `room_id`. A member may hold several sockets at once (daemon plus CLI
+    /// one-shot commands); past `MAX_MEMBER_SOCKETS` the oldest is evicted.
+    /// Only non-revoked members qualify.
     pub fn register_conn(
         &self,
         room_id: &str,
@@ -397,7 +411,7 @@ impl RelayState {
         tx: mpsc::Sender<WsOut>,
     ) -> Result<MemberRegistration, &'static str> {
         // Holding the room entry orders this insert with `revoke`, which
-        // removes the route under the same entry's write lock.
+        // removes the member's routes under the same entry's write lock.
         let room = self.rooms.get(room_id).ok_or("unknown room")?;
         let device = room.devices.get(device_id).ok_or("unknown device")?;
         if device.revoked {
@@ -405,47 +419,83 @@ impl RelayState {
         }
         let id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
         let evicted = Arc::new(Notify::new());
-        let displaced = self.member_routes.insert(
-            member_key(room_id, device_id),
-            MemberRoute {
+        let overflow: Vec<MemberRoute> = {
+            let mut routes = self
+                .member_routes
+                .entry(member_key(room_id, device_id))
+                .or_default();
+            routes.push(MemberRoute {
                 id,
                 sender: tx,
                 evicted: evicted.clone(),
-            },
-        );
+            });
+            let excess = routes.len().saturating_sub(MAX_MEMBER_SOCKETS);
+            routes.drain(..excess).collect()
+        };
         drop(room);
-        // The displaced socket can no longer receive room traffic; closing it
-        // also ensures a later revocation has no older socket left to miss.
-        if let Some(route) = displaced {
+        for route in overflow {
             route.evict();
         }
         self.connections_total.fetch_add(1, Ordering::Relaxed);
         Ok(MemberRegistration { id, evicted })
     }
 
-    /// Whether registration `id` still owns the member's route. Only the
-    /// owning socket may send room traffic; a replaced or revoked one may not.
+    /// Whether registration `id` is still routed for the member. Only routed
+    /// sockets may send room traffic; an evicted or revoked one may not.
     pub fn owns_route(&self, room_id: &str, device_id: &str, id: ConnectionId) -> bool {
         self.member_routes
             .get(&member_key(room_id, device_id))
-            .is_some_and(|route| route.id == id)
+            .is_some_and(|routes| routes.iter().any(|route| route.id == id))
     }
 
-    /// Removes the member route only if registration `id` still owns it.
-    pub fn unregister_conn(&self, room_id: &str, device_id: &str, id: ConnectionId) -> bool {
-        self.member_routes
-            .remove_if(&member_key(room_id, device_id), |_, route| route.id == id)
-            .is_some()
-    }
-
-    pub(crate) fn member_sender(
+    /// Removes registration `id` from the member's routes, leaving the
+    /// member's other sockets in place.
+    fn remove_registration(
         &self,
         room_id: &str,
         device_id: &str,
-    ) -> Option<mpsc::Sender<WsOut>> {
+        id: ConnectionId,
+    ) -> Option<MemberRoute> {
+        let Entry::Occupied(mut entry) = self.member_routes.entry(member_key(room_id, device_id))
+        else {
+            return None;
+        };
+        let routes = entry.get_mut();
+        let position = routes.iter().position(|route| route.id == id)?;
+        let removed = routes.remove(position);
+        if routes.is_empty() {
+            entry.remove();
+        }
+        Some(removed)
+    }
+
+    /// Removes only registration `id`; returns whether it was still routed.
+    pub fn unregister_conn(&self, room_id: &str, device_id: &str, id: ConnectionId) -> bool {
+        self.remove_registration(room_id, device_id, id).is_some()
+    }
+
+    /// Removes registration `id` and tells its socket to close.
+    pub(crate) fn evict_conn(&self, room_id: &str, device_id: &str, id: ConnectionId) -> bool {
+        self.remove_registration(room_id, device_id, id)
+            .map(MemberRoute::evict)
+            .is_some()
+    }
+
+    /// Every routed socket of the member, oldest first.
+    pub(crate) fn member_senders(
+        &self,
+        room_id: &str,
+        device_id: &str,
+    ) -> Vec<(ConnectionId, mpsc::Sender<WsOut>)> {
         self.member_routes
             .get(&member_key(room_id, device_id))
-            .map(|route| route.sender.clone())
+            .map(|routes| {
+                routes
+                    .iter()
+                    .map(|route| (route.id, route.sender.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn peer_ids(&self, room_id: &str, except: &str) -> Vec<String> {
@@ -461,7 +511,8 @@ impl RelayState {
 
     pub fn is_online(&self, room_id: &str, device_id: &str) -> bool {
         self.member_routes
-            .contains_key(&member_key(room_id, device_id))
+            .get(&member_key(room_id, device_id))
+            .is_some_and(|routes| !routes.is_empty())
     }
 
     /// Keeps the latest text for an offline member until the sender's expiry,
@@ -490,9 +541,8 @@ impl RelayState {
         }
     }
 
-    /// Revokes a room member, removes its route and evicts the socket that
-    /// owned it. Any older socket of the member was already evicted when it
-    /// was replaced, so no socket of a revoked member keeps a route. Returns
+    /// Revokes a room member, removes all of its routes and evicts every one
+    /// of its sockets, so no socket of a revoked member stays routed. Returns
     /// `false` when the device is not a member of the room.
     pub fn revoke(&self, room_id: &str, device_id: &str) -> bool {
         let Some(mut room) = self.rooms.get_mut(room_id) else {
@@ -505,7 +555,7 @@ impl RelayState {
         room.epoch += 1;
         let removed = self.member_routes.remove(&member_key(room_id, device_id));
         drop(room);
-        if let Some((_, route)) = removed {
+        for route in removed.into_iter().flat_map(|(_, routes)| routes) {
             route.evict();
         }
         true

@@ -26,7 +26,7 @@ use clipsync_protocol::{
     JoinPairingResponse, FRAME_HARD_CAP,
 };
 
-pub use state::RelayState;
+pub use state::{RelayState, MAX_MEMBER_SOCKETS};
 pub use transport::RelayTransportConfig;
 
 #[derive(Clone, Debug)]

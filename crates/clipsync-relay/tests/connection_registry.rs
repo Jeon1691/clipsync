@@ -1,7 +1,8 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
 //! Room routing belongs to authenticated members, is scoped to one room, and
-//! is owned by exactly one socket at a time.
+//! reaches every live socket of a member (daemon plus CLI one-shot commands),
+//! up to a per-member cap.
 
 use chrono::Utc;
 use clipsync_protocol::{
@@ -9,7 +10,7 @@ use clipsync_protocol::{
     ItemKind, JoinPairingRequest, JoinPairingResponse, MessageId, PairingSessionId, Recipient,
     RoomId, RoutingHeader, TransferId, PROTOCOL_VERSION,
 };
-use clipsync_relay::{router, RelayConfig};
+use clipsync_relay::{router, RelayConfig, MAX_MEMBER_SOCKETS};
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -552,43 +553,94 @@ async fn queued_text_for_a_device_id_is_scoped_to_its_room() {
 }
 
 #[tokio::test]
-async fn a_superseded_member_socket_is_closed_and_keeps_the_newer_route() {
+async fn every_socket_of_a_member_gets_room_traffic_and_closes_independently() {
     tokio::time::timeout(FIXTURE_DEADLINE, async {
         let relay = Relay::start().await;
         let (owner, member) = (DeviceId::new(), DeviceId::new());
         let room = relay.pair(&owner, &member, Some(0)).await;
         let (mut owner_socket, _) = relay.member(&room, &owner).await;
-        let (mut superseded, _) = relay.member(&room, &member).await;
-        let (mut current, _) = relay.member(&room, &member).await;
+        // A device's daemon and a CLI command each hold a socket at once.
+        let (mut daemon, _) = relay.member(&room, &member).await;
+        let (mut command, _) = relay.member(&room, &member).await;
+        relay.connections(3).await;
 
-        assert_live_delivery(
-            &room,
-            &owner,
-            &mut owner_socket,
-            &mut current,
-            "owner-to-newest member socket",
-        )
-        .await;
-        // The replacement evicts the older socket: the relay closes it, and
-        // it never receives the newer socket's room traffic.
-        let (superseded_frames, superseded_closed) =
-            drain_to_pong_or_close(&mut superseded, 1).await;
-        assert_no_text(&superseded_frames, "superseded socket");
-        assert!(superseded_closed, "the relay kept a superseded socket open");
+        let marker = "owner-to-every-member-socket";
+        send(&mut owner_socket, text(&room.id, &owner, marker)).await;
+        assert_eq!(text_ack(&mut owner_socket).await, AckStatus::Delivered);
+        assert_eq!(received_text(&mut daemon, "daemon text").await, marker);
+        assert_eq!(received_text(&mut command, "command text").await, marker);
+        owner_socket
+            .send(Message::Binary(vec![7, 8, 9].into()))
+            .await
+            .unwrap();
+        assert_eq!(next_binary(&mut daemon, "daemon chunk").await, [7, 8, 9]);
+        assert_eq!(next_binary(&mut command, "command chunk").await, [7, 8, 9]);
 
+        // Either socket may send room traffic for the member.
+        for (socket, marker) in [
+            (&mut daemon, "member daemon to owner"),
+            (&mut command, "member command to owner"),
+        ] {
+            assert_live_delivery(&room, &member, socket, &mut owner_socket, marker).await;
+        }
+
+        // The command finishing leaves the daemon routed and the member online.
+        command.close(None).await.unwrap();
         relay.connections(2).await;
-        assert_not_left(&drain_to_pong(&mut owner_socket, 2).await, &member);
+        assert_not_left(&drain_to_pong(&mut owner_socket, 1).await, &member);
         assert_live_delivery(
             &room,
             &owner,
             &mut owner_socket,
-            &mut current,
-            "owner-to-member after superseded socket closed",
+            &mut daemon,
+            "owner-to-daemon after the command closed",
         )
         .await;
+        let (daemon_frames, daemon_closed) = drain_to_pong_or_close(&mut daemon, 2).await;
+        assert!(
+            !daemon_closed,
+            "a concurrent socket closed the daemon: {daemon_frames:?}"
+        );
     })
     .await
-    .expect("superseded member fixture exceeded its deadline");
+    .expect("concurrent member sockets fixture exceeded its deadline");
+}
+
+#[tokio::test]
+async fn a_member_past_the_socket_cap_loses_only_its_oldest_socket() {
+    tokio::time::timeout(FIXTURE_DEADLINE, async {
+        let relay = Relay::start().await;
+        let (owner, member) = (DeviceId::new(), DeviceId::new());
+        let room = relay.pair(&owner, &member, Some(0)).await;
+        let (mut owner_socket, _) = relay.member(&room, &owner).await;
+        let mut sockets = Vec::new();
+        for _ in 0..MAX_MEMBER_SOCKETS {
+            sockets.push(relay.member(&room, &member).await.0);
+        }
+        relay.connections(1 + MAX_MEMBER_SOCKETS).await;
+
+        // One more socket than the cap evicts the member's oldest one.
+        let (newest, _) = relay.member(&room, &member).await;
+        let mut oldest = sockets.remove(0);
+        sockets.push(newest);
+        let (oldest_frames, oldest_closed) = drain_to_pong_or_close(&mut oldest, 1).await;
+        assert!(
+            oldest_closed,
+            "the relay kept more member sockets than its cap"
+        );
+        assert_no_text(&oldest_frames, "evicted socket");
+        relay.connections(1 + MAX_MEMBER_SOCKETS).await;
+
+        let marker = "owner-to-capped-member";
+        send(&mut owner_socket, text(&room.id, &owner, marker)).await;
+        assert_eq!(text_ack(&mut owner_socket).await, AckStatus::Delivered);
+        for socket in &mut sockets {
+            assert_eq!(received_text(socket, "routed member socket").await, marker);
+        }
+        assert_not_left(&drain_to_pong(&mut owner_socket, 2).await, &member);
+    })
+    .await
+    .expect("per-member socket cap fixture exceeded its deadline");
 }
 
 #[tokio::test]
@@ -668,17 +720,35 @@ async fn drain_to_pong_or_close(socket: &mut Socket, ts: i64) -> (Vec<ControlMes
     (before, closed)
 }
 
+/// Reads until the next binary frame, skipping control frames.
+async fn next_binary(socket: &mut Socket, what: &str) -> Vec<u8> {
+    tokio::time::timeout(FRAME_DEADLINE, async {
+        loop {
+            match socket.next().await {
+                Some(Ok(Message::Binary(bytes))) => return bytes.to_vec(),
+                Some(Ok(Message::Ping(bytes))) => socket.send(Message::Pong(bytes)).await.unwrap(),
+                Some(Ok(Message::Close(_)) | Err(_)) | None => {
+                    panic!("socket closed before {what}")
+                }
+                Some(Ok(_)) => {}
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{what} was not delivered"))
+}
+
 #[tokio::test]
-async fn revoked_member_cannot_send_room_traffic_through_a_superseded_socket() {
+async fn revocation_closes_every_socket_of_the_member_and_none_can_send() {
     tokio::time::timeout(FIXTURE_DEADLINE, async {
         let relay = Relay::start().await;
         let (owner, member) = (DeviceId::new(), DeviceId::new());
         let room = relay.pair(&owner, &member, Some(0)).await;
         let (mut owner_socket, _) = relay.member(&room, &owner).await;
-        // A normal reconnect overlap: the second socket replaces the first
-        // socket's route while the first is still open.
-        let (mut superseded, _) = relay.member(&room, &member).await;
-        let (mut current, _) = relay.member(&room, &member).await;
+        // The member's daemon and a concurrent CLI command are both routed.
+        let (first, _) = relay.member(&room, &member).await;
+        let (second, _) = relay.member(&room, &member).await;
+        relay.connections(3).await;
 
         send(
             &mut owner_socket,
@@ -688,39 +758,33 @@ async fn revoked_member_cannot_send_room_traffic_through_a_superseded_socket() {
         )
         .await;
         drain_to_pong(&mut owner_socket, 1).await;
-        let (_, current_closed) = drain_to_pong_or_close(&mut current, 2).await;
-        assert!(
-            current_closed,
-            "the revoked member's route socket stays open"
-        );
 
-        // The older socket's frames are processed before its pong, so any text
-        // it got through is already queued for the owner before the owner's pong.
-        let _ = superseded
-            .send(Message::Text(
-                text(&room.id, &member, "from revoked superseded socket")
-                    .encode()
-                    .unwrap()
-                    .into(),
-            ))
-            .await;
-        let _ = superseded.send(Message::Binary(vec![1, 2, 3].into())).await;
-        let (superseded_frames, superseded_closed) =
-            drain_to_pong_or_close(&mut superseded, 3).await;
-        assert!(
-            !superseded_frames
-                .iter()
-                .any(|m| ack_status(m) == Some(AckStatus::Delivered)),
-            "revoked member text was delivered: {superseded_frames:?}"
-        );
-        assert!(
-            superseded_closed,
-            "the revoked member's superseded socket stays open"
-        );
+        for (index, mut socket) in [first, second].into_iter().enumerate() {
+            // Each socket's frames are processed before its pong, so any text
+            // it got through would already be queued for the owner.
+            let _ = socket
+                .send(Message::Text(
+                    text(&room.id, &member, "from a revoked member socket")
+                        .encode()
+                        .unwrap()
+                        .into(),
+                ))
+                .await;
+            let _ = socket.send(Message::Binary(vec![1, 2, 3].into())).await;
+            let ts = 2 + index as i64;
+            let (frames, closed) = drain_to_pong_or_close(&mut socket, ts).await;
+            assert!(
+                !frames
+                    .iter()
+                    .any(|m| ack_status(m) == Some(AckStatus::Delivered)),
+                "revoked member text was delivered: {frames:?}"
+            );
+            assert!(closed, "socket {index} of the revoked member stays open");
+        }
         let owner_frames = drain_to_pong(&mut owner_socket, 4).await;
         assert_no_text(&owner_frames, "owner from a revoked member");
         relay.connections(1).await;
     })
     .await
-    .expect("revoked superseded socket fixture exceeded its deadline");
+    .expect("revoked member sockets fixture exceeded its deadline");
 }
