@@ -483,17 +483,15 @@ mod tests {
         std::process::id()
     }
 
-    /// A worker process that has already exited and been reaped.
+    /// A worker that is no longer running. A real exited child is not
+    /// reliable here: Windows keeps its PID openable while any handle to it
+    /// remains and reuses PIDs quickly. No process can have this one: it is
+    /// above Linux's maximum `pid_max` (2^22) and macOS's 99 999, and far
+    /// beyond the PIDs Windows assigns in practice.
     fn exited() -> u32 {
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .arg("--list")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        let pid = child.id();
-        child.wait().unwrap();
-        pid
+        const NO_SUCH_PID: u32 = i32::MAX as u32 - 1;
+        assert!(!pid_alive(NO_SUCH_PID));
+        NO_SUCH_PID
     }
 
     fn request(status: &str, pid: u32) -> PairingWait {
