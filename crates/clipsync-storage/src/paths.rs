@@ -72,6 +72,11 @@ impl AppPaths {
         self.data_dir.join("state.json")
     }
 
+    /// Private envelope sequence/replay state; see `LocalStore::next_send_seq`.
+    pub fn replay_state_file(&self) -> PathBuf {
+        self.data_dir.join("replay-state.json")
+    }
+
     pub fn identity_file(&self) -> PathBuf {
         self.data_dir.join("identity.json")
     }

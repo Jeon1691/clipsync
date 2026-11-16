@@ -23,6 +23,10 @@ pub struct SyncConfig {
     pub types: Vec<String>,
     pub debounce_ms: u64,
     pub ttl_secs: u64,
+    /// Rollout aid: send legacy v1 envelopes so peers that have not been
+    /// updated yet can still decrypt them. Off by default; see docs/protocol.md.
+    #[serde(default)]
+    pub legacy_envelopes: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -59,6 +63,7 @@ impl Default for SyncConfig {
             types: vec!["text".into(), "image".into(), "files".into()],
             debounce_ms: clipsync_protocol::DEBOUNCE_MS,
             ttl_secs: DEFAULT_TTL_SECS,
+            legacy_envelopes: false,
         }
     }
 }
@@ -84,6 +89,7 @@ impl AppConfig {
             "sync.direction" => Some(format!("{:?}", self.sync.direction).to_lowercase()),
             "sync.auto_start" => Some(self.sync.auto_start.to_string()),
             "sync.ttl_secs" => Some(self.sync.ttl_secs.to_string()),
+            "sync.legacy_envelopes" => Some(self.sync.legacy_envelopes.to_string()),
             "notify.enabled" => Some(self.notify.enabled.to_string()),
             "notify.preview" => Some(self.notify.preview.to_string()),
             _ => None,
@@ -102,6 +108,10 @@ impl AppConfig {
             }
             "sync.auto_start" => {
                 self.sync.auto_start = parse_bool(value);
+                true
+            }
+            "sync.legacy_envelopes" => {
+                self.sync.legacy_envelopes = parse_bool(value);
                 true
             }
             "sync.direction" => {

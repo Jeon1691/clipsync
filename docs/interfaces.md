@@ -101,7 +101,8 @@ not printed. Clipboard write failures in `pull --copy` are currently best effort
 
 The full configuration has `relay_url: string`, `sync: {enabled, auto_start:
 boolean, direction: "both"|"send_only"|"receive_only", types: string[],
-debounce_ms, ttl_secs: unsigned integer}`, `notify: {enabled, preview: boolean}`,
+debounce_ms, ttl_secs: unsigned integer, legacy_envelopes: boolean}`, `notify:
+{enabled, preview: boolean}`,
 and `webhook: null|{url: string, secret: string}`.
 [Configuration source](../crates/clipsync-storage/src/config.rs) defines these
 records and defaults; [stored records](../crates/clipsync-storage/src/store.rs)
@@ -114,6 +115,7 @@ define room/peer output.
 | `notify.preview` | Same boolean syntax; default false. |
 | `sync.direction` | `both`, `send-only`/`send_only`, `receive-only`/`receive_only`; default `both`. Single-key `get` currently returns `sendonly`/`receiveonly`, while full JSON uses underscores. |
 | `sync.ttl_secs` | Unsigned seconds, clamped to 10–300; default 60. Current sending code uses 60 regardless of this setting. |
+| `sync.legacy_envelopes` | Same boolean syntax; default false. True makes this device send legacy v1 envelopes so peers that have not been updated can still read them; see [envelope versions](protocol.md#envelope-versions). Receiving is unaffected. |
 
 `sync.types` (default text/image/files), `sync.debounce_ms` (default 200), and
 `webhook` appear in the full config but have no `config set` key. An unknown key
@@ -266,7 +268,7 @@ null transfer ID. Peers can emit further acknowledgements.
 | Nested record | Fields / representation |
 | --- | --- |
 | `PeerInfo` | `device_id`, `device_name`, `os: string`; `role: DeviceRole`; `online: boolean`. |
-| `RoutingHeader` | `version: u16`; `message_id`, `transfer_id`, `room_id`, `sender_device_id: string`; `recipient`: `"broadcast"` or `{"device":"DEVICE_ID"}`; `sent_at`, `expires_at: time`; `item_kind`: `text`/`image`/`files`; `seq: u64`. |
+| `RoutingHeader` | `version: u16` (envelope version: 1 legacy, 2 authenticated; see [protocol](protocol.md#envelope-versions)); `message_id`, `transfer_id`, `room_id`, `sender_device_id: string`; `recipient`: `"broadcast"` or `{"device":"DEVICE_ID"}`; `sent_at`, `expires_at: time`; `item_kind`: `text`/`image`/`files`; `seq: u64`. |
 | `QueuedEnvelope` | `routing: RoutingHeader`, `nonce`, `ciphertext: string`. |
 | `EpochWrap` | `device_id`, `eph_public`, `nonce`, `ciphertext: string`. |
 

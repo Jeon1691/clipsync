@@ -4,15 +4,23 @@
 //! ClipSync wire protocol: routing headers, control messages, binary chunks, limits.
 
 mod chunk;
+mod envelope;
 mod ids;
 mod limits;
 mod messages;
 
 pub use chunk::{decode_chunk_frame, encode_chunk_frame, ChunkFrame, CHUNK_MAGIC};
+pub use envelope::{
+    envelope_aad, EnvelopeFrame, ENVELOPE_AAD_LABEL, ENVELOPE_VERSION_AUTHENTICATED,
+    ENVELOPE_VERSION_LEGACY,
+};
 pub use ids::{DeviceId, MessageId, PairingSessionId, RoomId, TransferId};
 pub use limits::*;
 pub use messages::*;
 
+/// Hello/pairing protocol version checked by the relay. Envelope AAD is
+/// versioned separately in `RoutingHeader.version`, so v2 envelopes work with
+/// existing relays.
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const PROTOCOL_NAME: &str = "clipsync-v1";
 pub const PAIRING_TRANSCRIPT_LABEL: &str = "clipsync-pairing-v1";

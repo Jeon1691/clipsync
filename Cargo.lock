@@ -1180,6 +1180,7 @@ name = "clipsync-transfer"
 version = "0.2.0"
 dependencies = [
  "blake3",
+ "chrono",
  "clipsync-crypto",
  "clipsync-protocol",
  "tempfile",
