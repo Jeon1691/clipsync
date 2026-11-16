@@ -511,6 +511,8 @@ async fn senders_use_v1_until_the_peer_proves_v2_and_honor_both_overrides() {
     let room = pair.a.app.store.current_room().unwrap().room_id;
     // A raw connection never answers the handshake: no capability evidence.
     let mut receiver = pair.member(&pair.b).await;
+    // Ordered so that no v2 has gone out before "peer proved v2": a sent v2
+    // keeps the room on v2 by itself.
     let cases = [
         ("no evidence", false, false, false, ENVELOPE_VERSION_LEGACY),
         (
@@ -519,13 +521,6 @@ async fn senders_use_v1_until_the_peer_proves_v2_and_honor_both_overrides() {
             false,
             false,
             ENVELOPE_VERSION_LEGACY,
-        ),
-        (
-            "strict override",
-            false,
-            true,
-            false,
-            ENVELOPE_VERSION_AUTHENTICATED,
         ),
         (
             "peer proved v2",
@@ -540,6 +535,13 @@ async fn senders_use_v1_until_the_peer_proves_v2_and_honor_both_overrides() {
             false,
             true,
             ENVELOPE_VERSION_LEGACY,
+        ),
+        (
+            "strict override",
+            false,
+            true,
+            true,
+            ENVELOPE_VERSION_AUTHENTICATED,
         ),
         (
             "strict beats legacy",
@@ -725,6 +727,57 @@ async fn updated_and_released_clients_keep_syncing_both_ways_without_configurati
     a.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_updated_initiator_completes_the_handshake_with_a_released_responder() {
+    let pair = Pair::new().await;
+    let room = pair.b.app.store.current_room().unwrap().room_id;
+    // a plays a released client; b (smaller ID) is updated and initiates.
+    let mut old = pair.member(&pair.a).await;
+    let b = Session::start(&pair.b).await;
+    let first = loop {
+        if let ControlMessage::NoiseHandshake { message } = next_control(&mut old).await {
+            break hex::decode(message).unwrap();
+        }
+    };
+    let b_public = parse_public(&hex::encode(pair.b.identity.public_bytes())).unwrap();
+    let mut handshake =
+        NoiseHandshake::responder(&pair.a.identity.static_secret(), &b_public).unwrap();
+    let payload = handshake.read_message(&first).unwrap();
+    assert!(payload.len() <= clipsync_protocol::LEGACY_HANDSHAKE_PAYLOAD_MAX_BYTES);
+    old.send_control(ControlMessage::NoiseHandshake {
+        message: hex::encode(handshake.write_message().unwrap()),
+    })
+    .await
+    .unwrap();
+    assert!(handshake.is_finished());
+
+    // The empty reply advertises nothing: b keeps sending v1, and a's v1 arrives.
+    let legacy = RoutingHeader {
+        version: ENVELOPE_VERSION_LEGACY,
+        ..room_routing(&pair.a, 1)
+    };
+    old.send_control(sealed_text(legacy, "from the released responder"))
+        .await
+        .unwrap();
+    b.text("from the released responder").await;
+    b.clipboard.set(ClipboardItem::Text {
+        text: "to the released responder".into(),
+    });
+    let (routing, nonce, ciphertext) = next_text_envelope(&mut old).await;
+    assert_eq!(routing.version, ENVELOPE_VERSION_LEGACY);
+    assert_eq!(
+        released_client_opens(&routing, &nonce, &ciphertext).as_deref(),
+        Some("to the released responder")
+    );
+    assert!(!accepts_v2(
+        &pair.b.app.store,
+        &room,
+        &pair.a.identity.device_id
+    ));
+    old.close().await;
+    b.stop().await;
+}
+
 #[test]
 fn strict_mode_refuses_every_legacy_envelope() {
     let room = RoomId::new();
@@ -770,6 +823,10 @@ fn broadcasts_follow_the_least_capable_peer_and_advertising_alone_never_refuses_
     let version = |policy| version_for(&room, policy);
 
     assert_eq!(version(EnvelopePolicy::Negotiate), ENVELOPE_VERSION_LEGACY);
+    assert_eq!(
+        version(EnvelopePolicy::Strict),
+        ENVELOPE_VERSION_AUTHENTICATED
+    );
     // One peer advertised v2 in its handshake; the other has not: stay on v1.
     store
         .mark_peer_advertised_authenticated(&room_id, &"script-device-y".into())
@@ -793,7 +850,8 @@ fn broadcasts_follow_the_least_capable_peer_and_advertising_alone_never_refuses_
         ENVELOPE_VERSION_AUTHENTICATED
     );
     assert_eq!(version(EnvelopePolicy::Legacy), ENVELOPE_VERSION_LEGACY);
-    // A newly paired peer without evidence sends the room back to v1.
+    // A peer pinned later without evidence keeps the room on v1 while this
+    // device has not sent v2 into it yet.
     let mut grown = room.clone();
     let mut third = room.peers[0].clone();
     third.device_id = "script-device-x".into();
@@ -805,5 +863,16 @@ fn broadcasts_follow_the_least_capable_peer_and_advertising_alone_never_refuses_
     assert_eq!(
         version_for(&grown, EnvelopePolicy::Strict),
         ENVELOPE_VERSION_AUTHENTICATED
+    );
+    // Once this device has sent v2 into the room, the earlier peers refuse its
+    // v1: the room stays on v2 even with a peer that has given no evidence.
+    store.reserve_send(&room_id, 0, true).unwrap();
+    assert_eq!(
+        version_for(&grown, EnvelopePolicy::Negotiate),
+        ENVELOPE_VERSION_AUTHENTICATED
+    );
+    assert_eq!(
+        version_for(&grown, EnvelopePolicy::Legacy),
+        ENVELOPE_VERSION_LEGACY
     );
 }

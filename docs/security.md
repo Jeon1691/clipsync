@@ -61,8 +61,11 @@ Limits:
   v2 envelope from it, or a v2 capability in its Noise handshake payload), then
   v2 for good; a broadcast uses v1 while any pinned peer of the room lacks that
   evidence. A malicious relay can delay the switch by dropping handshake
-  messages and v2 envelopes, keeping a pair on v1 (with the v1 limits above)
-  longer. It cannot forge either signal, because both need the epoch key or the
+  messages, which keeps a pair on v1 (with the v1 limits above) for as long as
+  it keeps dropping them, indefinitely if it wants. Two devices that are never
+  online at the same time never run a handshake and also stay on v1. Once
+  every device of a room is updated, set `sync.strict_envelopes` to remove v1
+  entirely. The relay cannot forge either signal, because both need the epoch key or the
   peer's pinned static key, and it cannot move a peer already marked v2 back
   to v1, because the mark is stored and never cleared. Unauthenticated signals
   are not used for the decision. A room member, who holds the epoch key, can

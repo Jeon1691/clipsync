@@ -27,6 +27,11 @@ pub struct RoomReplayState {
     /// Last `seq` this device put in an outgoing envelope for the room.
     #[serde(default)]
     pub last_sent_seq: u64,
+    /// This device has sent an authenticated envelope into the room. Peers
+    /// that accepted it refuse its v1 from then on, so negotiation never falls
+    /// back to v1 for this room (explicit `sync.legacy_envelopes` aside).
+    #[serde(default)]
+    pub sent_authenticated: bool,
     /// Receive-side state keyed by sender device ID.
     #[serde(default)]
     pub senders: BTreeMap<String, SenderReplayState>,
@@ -97,10 +102,17 @@ impl LocalStore {
     /// it is always above the last persisted value, so a clock stepping back
     /// does not reuse a number.
     pub fn next_send_seq(&self, room_id: &RoomId, floor: u64) -> Result<u64> {
+        self.reserve_send(room_id, floor, false)
+    }
+
+    /// [`Self::next_send_seq`] for an envelope of the given kind; an
+    /// authenticated one also records `sent_authenticated` in the same write.
+    pub fn reserve_send(&self, room_id: &RoomId, floor: u64, authenticated: bool) -> Result<u64> {
         let mut state = self.load_replay_state()?;
         let room = state.rooms.entry(room_id.to_string()).or_default();
         let seq = room.last_sent_seq.saturating_add(1).max(floor);
         room.last_sent_seq = seq;
+        room.sent_authenticated |= authenticated;
         self.save_replay_state(&state)?;
         Ok(seq)
     }
@@ -271,6 +283,11 @@ mod tests {
         std::fs::remove_file(reopened.paths.replay_state_file()).unwrap();
         // Without state the wall-clock floor still moves past old numbers.
         assert_eq!(reopened.next_send_seq(&room, 1_000).unwrap(), 1_000);
+        assert!(!reopened.load_replay_state().unwrap().rooms[room.as_str()].sent_authenticated);
+        assert_eq!(reopened.reserve_send(&room, 0, true).unwrap(), 1_001);
+        // A later legacy send (explicit override) does not clear the mark.
+        assert_eq!(reopened.reserve_send(&room, 0, false).unwrap(), 1_002);
+        assert!(reopened.load_replay_state().unwrap().rooms[room.as_str()].sent_authenticated);
     }
 
     #[test]

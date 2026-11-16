@@ -112,7 +112,9 @@ Both live in `replay-state.json` in the private data directory (mode `0600` on
 Unix). Missing fields default, so older or partial files load. An unreadable
 file stops sending and receiving with an error instead of being reset; deleting
 it limits replay protection to the expiry window until each sender's next
-envelope is accepted.
+envelope is accepted. It also forgets which peers accept v2, so the device
+sends v1 again until the next handshake; a peer that already locked this
+device to v2 drops those envelopes as a downgrade meanwhile.
 
 Because acceptance is strictly increasing, an older item that arrives after a
 newer one from the same sender is dropped. One relay connection delivers in
@@ -143,7 +145,11 @@ staggered upgrade.
   a downgrade (the peer may run with `sync.legacy_envelopes`).
 - **Room broadcast.** Envelopes are broadcast, so one version serves every
   peer: v2 only when every pinned peer of the room has given evidence,
-  otherwise v1 for the least capable peer. Sending both a v1 and a v2 copy was
+  otherwise v1 for the least capable peer. Once this device has sent v2 into
+  a room (`sent_authenticated` in `replay-state.json`), it keeps sending v2
+  there: peers that accepted it would refuse its v1. A peer pinned later that
+  cannot open v2 then cannot read this device (pairing creates a new room with
+  one peer, so this does not arise today). Sending both a v1 and a v2 copy was
   rejected: an updated receiver would apply the item twice or, once the sender
   is locked to v2, log the v1 copy as a downgrade, and every transfer would
   cost twice the bandwidth.
@@ -152,10 +158,11 @@ staggered upgrade.
   into a 1024-byte buffer, `LEGACY_HANDSHAKE_PAYLOAD_MAX_BYTES`; the
   capability payload is far smaller). They therefore keep receiving v1, and
   updated devices keep accepting their v1.
-- Two updated devices switch to v2 the first time both are online: the device
-  with the smaller device ID starts the handshake on `hello_ok` and on
-  `peer_joined`. One-shot `push` does not run a handshake; it uses the stored
-  evidence.
+- Two updated devices switch to v2 the first time both are online: the
+  device with the smaller device ID starts the handshake on `hello_ok` and on
+  `peer_joined`. If they are never online together, or a relay drops the
+  handshake, they stay on v1 (see `docs/security.md`). One-shot `push` does
+  not run a handshake; it uses the stored evidence.
 
 Overrides (restart the daemon after changing them):
 

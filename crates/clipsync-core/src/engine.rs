@@ -20,7 +20,8 @@ use clipsync_daemon::{
 use clipsync_protocol::{
     decode_chunk_frame, envelope_aad, AckStatus, ClientRole, ControlMessage, DeviceId,
     EnvelopeFrame, FileManifest, HandshakeCapabilities, ImageManifest, ItemKind, ManifestPlain,
-    MessageId, PeerInfo, Recipient, RoutingHeader, TransferId, PROTOCOL_VERSION,
+    MessageId, PeerInfo, Recipient, RoutingHeader, TransferId, ENVELOPE_VERSION_AUTHENTICATED,
+    PROTOCOL_VERSION,
 };
 use clipsync_storage::{LocalStore, RoomRecord};
 use clipsync_transfer::{
@@ -631,9 +632,14 @@ impl EnvelopeStamp {
         local: &DeviceId,
         policy: EnvelopePolicy,
     ) -> Result<Self, CoreError> {
+        let version = sending_version(store, room, local, policy)?;
         Ok(Self {
-            version: sending_version(store, room, local, policy)?,
-            seq: store.next_send_seq(&room.room_id, sequence_floor(Utc::now()))?,
+            version,
+            seq: store.reserve_send(
+                &room.room_id,
+                sequence_floor(Utc::now()),
+                version == ENVELOPE_VERSION_AUTHENTICATED,
+            )?,
         })
     }
 }

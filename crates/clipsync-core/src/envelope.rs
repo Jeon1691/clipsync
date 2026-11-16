@@ -96,7 +96,8 @@ impl EnvelopePolicy {
 /// channel, that it opens v2: it sent this device a v2 envelope, or it
 /// advertised v2 in its Noise handshake payload. Otherwise the least capable
 /// peer gets what it can read: v1. The evidence is persisted and never
-/// revoked, so a relay cannot roll a peer back to v1.
+/// revoked, so a relay cannot roll a peer back to v1; and once this device has
+/// sent v2 into the room it keeps sending v2 there.
 #[expect(
     clippy::result_large_err,
     reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
@@ -113,6 +114,11 @@ pub(crate) fn sending_version(
         EnvelopePolicy::Negotiate => {
             let state = store.load_replay_state()?;
             let room_state = state.rooms.get(room.room_id.as_str());
+            // Once v2 went out, peers refuse this device's v1: never fall back,
+            // even if a peer without evidence is pinned later.
+            if room_state.is_some_and(|state| state.sent_authenticated) {
+                return Ok(ENVELOPE_VERSION_AUTHENTICATED);
+            }
             let all_accept = room
                 .peers
                 .iter()
