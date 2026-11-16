@@ -9,8 +9,10 @@ mod coverage_expansion;
 mod envelope_security;
 
 use super::*;
+use crate::envelope::EnvelopePolicy;
 use crate::{App, AppPaths};
 use clipsync_clipboard::{ClipboardBackend, MockClipboard};
+use clipsync_crypto::{parse_public, NoiseHandshake};
 use clipsync_protocol::{
     CreatePairingRequest, CreatePairingResponse, DeviceRole, JoinPairingRequest,
     JoinPairingResponse, PairingSessionId, RoomId, SyncDirection, ENVELOPE_VERSION_AUTHENTICATED,
@@ -1598,7 +1600,7 @@ async fn hello_presence_only_starts_noise_for_a_known_online_peer_with_a_valid_p
         "unknown",
         "bad-key",
         "responder",
-        "already-done",
+        "already-started",
         "eligible",
     ] {
         let mut room = room.clone();
@@ -1632,13 +1634,20 @@ async fn hello_presence_only_starts_noise_for_a_known_online_peer_with_a_valid_p
                 device_token: None,
             }
         };
-        let mut noise = None;
-        let mut done = case == "already-done";
+        let mut handshakes = HandshakeTracker::new(Vec::new());
+        let remote: DeviceId = "script-device-z".into();
+        if case == "already-started" {
+            // A repeated presence announcement must not restart a running handshake.
+            assert!(handshakes
+                .initiate(&peer.identity, &room, &remote, false)
+                .is_some());
+        }
         let inbound = Inbound {
             store: &peer.app.store,
             room: &room,
             local: &peer.identity.device_id,
             epoch_key: &EPOCH,
+            policy: EnvelopePolicy::Negotiate,
         };
         apply_hello_ok(
             &message,
@@ -1650,13 +1659,16 @@ async fn hello_presence_only_starts_noise_for_a_known_online_peer_with_a_valid_p
             &handle,
             &notifier,
             &mut signature,
-            &mut noise,
-            &mut done,
+            &mut handshakes,
             &connection,
         )
         .await;
-        assert_eq!(noise.is_some(), case == "eligible", "{case}");
-        assert_eq!(done, case == "already-done");
+        assert_eq!(
+            handshakes.is_pending(&remote),
+            matches!(case, "eligible" | "already-started"),
+            "{case}"
+        );
+        assert!(!handshakes.is_done(&remote));
     }
     server.finish().await;
     assert_eq!(signature, "unchanged");

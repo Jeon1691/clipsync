@@ -55,6 +55,21 @@ Limits:
   later v1 envelopes from it are rejected as a downgrade. Until then, a relay
   can replay a recorded v1 envelope after the 120-second in-memory window or a
   restart, and extend its expiry. v1 checks run on unauthenticated values.
+  `sync.strict_envelopes` refuses all v1, at the cost of not syncing with
+  devices that are not updated.
+- Updated devices send v1 to a peer until it proves it opens v2 (an accepted
+  v2 envelope from it, or a v2 capability in its Noise handshake payload), then
+  v2 for good; a broadcast uses v1 while any pinned peer of the room lacks that
+  evidence. A malicious relay can delay the switch by dropping handshake
+  messages and v2 envelopes, keeping a pair on v1 (with the v1 limits above)
+  longer. It cannot forge either signal, because both need the epoch key or the
+  peer's pinned static key, and it cannot move a peer already marked v2 back
+  to v1, because the mark is stored and never cleared. Unauthenticated signals
+  are not used for the decision. A room member, who holds the epoch key, can
+  make a device switch to v2 early by sending a v2 envelope under another
+  member's ID; if the impersonated peer is not updated, it then stops syncing
+  with that device in both directions (v2 it cannot open, its v1 refused as a
+  downgrade). Room members are trusted not to do this.
 - An older item that arrives after a newer one from the same sender is dropped.
   Delivery and ordering by a malicious relay are not guaranteed: it can still
   drop or delay envelopes within their lifetime.
@@ -66,7 +81,7 @@ Limits:
 
 | Key | Purpose |
 | --- | --- |
-| Device X25519 | Long-term identity, Noise static key (handshake only), epoch wrap |
+| Device X25519 | Long-term identity, Noise static key (handshake and capability payload only), epoch wrap |
 | `roomRootKey` | First-epoch derivation only |
 | `roomEpochKey` | Payload AEAD; current clients retain the initial key until re-pairing |
 | Per-transfer content key | HKDF from epoch key + transfer ID |
@@ -76,8 +91,11 @@ wrapping, but the current client does not automatically rotate room keys on
 membership changes. Re-pair to establish a new room key.
 
 Full forward secrecy for stored payloads is not provided. When both devices are
-online they run a Noise `KK` handshake with their long-term keys. Its result is
-currently unused: payloads are not encrypted under the Noise session, sync does
+online they run a Noise `KK` handshake with their long-term keys. Its only use
+is the small capability payload each side sends in it (which envelope versions
+it accepts): a payload that opens is authenticated to the peer's pinned static
+key, so the relay can drop it but not forge or alter it. The resulting session
+is otherwise unused: clipboard payloads are not encrypted under it, sync does
 not wait for it, and a missing or failed handshake does not stop sync. Noise
 therefore provides no payload confidentiality, integrity, sender
 authentication, or forward secrecy here. Payloads use persistent room epoch

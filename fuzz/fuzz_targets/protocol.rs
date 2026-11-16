@@ -4,11 +4,18 @@
 
 use clipsync_protocol::{
     decode_chunk_frame, encode_chunk_frame, envelope_aad, ControlMessage, EnvelopeFrame,
-    RoutingHeader,
+    HandshakeCapabilities, RoutingHeader,
 };
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
+    // A decrypted Noise payload is peer-controlled: decoding never panics, and
+    // whatever it yields re-encodes to something it decodes back to.
+    let capabilities = HandshakeCapabilities::decode(data);
+    if let Ok(encoded) = capabilities.encode() {
+        assert_eq!(HandshakeCapabilities::decode(&encoded), capabilities);
+    }
+
     if let Ok(frame) = decode_chunk_frame(data) {
         let encoded = encode_chunk_frame(&frame).expect("decoded frame must encode");
         assert_eq!(encoded, data);

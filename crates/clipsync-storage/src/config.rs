@@ -23,10 +23,15 @@ pub struct SyncConfig {
     pub types: Vec<String>,
     pub debounce_ms: u64,
     pub ttl_secs: u64,
-    /// Rollout aid: send legacy v1 envelopes so peers that have not been
-    /// updated yet can still decrypt them. Off by default; see docs/protocol.md.
+    /// Override: always send legacy v1 envelopes, even to peers known to accept
+    /// v2. Off by default, in which case the send version is negotiated per
+    /// peer; see docs/protocol.md.
     #[serde(default)]
     pub legacy_envelopes: bool,
+    /// Hardening override: always send authenticated v2 envelopes and refuse
+    /// legacy v1 from every peer. Takes precedence over `legacy_envelopes`.
+    #[serde(default)]
+    pub strict_envelopes: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -64,6 +69,7 @@ impl Default for SyncConfig {
             debounce_ms: clipsync_protocol::DEBOUNCE_MS,
             ttl_secs: DEFAULT_TTL_SECS,
             legacy_envelopes: false,
+            strict_envelopes: false,
         }
     }
 }
@@ -90,6 +96,7 @@ impl AppConfig {
             "sync.auto_start" => Some(self.sync.auto_start.to_string()),
             "sync.ttl_secs" => Some(self.sync.ttl_secs.to_string()),
             "sync.legacy_envelopes" => Some(self.sync.legacy_envelopes.to_string()),
+            "sync.strict_envelopes" => Some(self.sync.strict_envelopes.to_string()),
             "notify.enabled" => Some(self.notify.enabled.to_string()),
             "notify.preview" => Some(self.notify.preview.to_string()),
             _ => None,
@@ -112,6 +119,10 @@ impl AppConfig {
             }
             "sync.legacy_envelopes" => {
                 self.sync.legacy_envelopes = parse_bool(value);
+                true
+            }
+            "sync.strict_envelopes" => {
+                self.sync.strict_envelopes = parse_bool(value);
                 true
             }
             "sync.direction" => {

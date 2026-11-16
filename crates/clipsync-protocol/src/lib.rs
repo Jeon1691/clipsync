@@ -3,12 +3,14 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 //! ClipSync wire protocol: routing headers, control messages, binary chunks, limits.
 
+mod capabilities;
 mod chunk;
 mod envelope;
 mod ids;
 mod limits;
 mod messages;
 
+pub use capabilities::{HandshakeCapabilities, LEGACY_HANDSHAKE_PAYLOAD_MAX_BYTES};
 pub use chunk::{decode_chunk_frame, encode_chunk_frame, ChunkFrame, CHUNK_MAGIC};
 pub use envelope::{
     envelope_aad, EnvelopeFrame, ENVELOPE_AAD_LABEL, ENVELOPE_VERSION_AUTHENTICATED,
@@ -37,6 +39,8 @@ pub enum ProtocolError {
     Version(u16),
     #[error("invalid identifier: {0}")]
     Id(String),
+    #[error("capabilities: {0}")]
+    Capabilities(&'static str),
 }
 
 pub type Result<T> = std::result::Result<T, ProtocolError>;

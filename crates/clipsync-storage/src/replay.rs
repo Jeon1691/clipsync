@@ -40,6 +40,28 @@ pub struct SenderReplayState {
     /// The sender has delivered an authenticated envelope; refuse legacy ones.
     #[serde(default)]
     pub authenticated: bool,
+    /// The peer advertised authenticated envelopes in an authenticated Noise
+    /// handshake. Send-side only: this device sends v2 to it from now on, but
+    /// it does not by itself make legacy envelopes from the peer a downgrade.
+    #[serde(default)]
+    pub advertised_authenticated: bool,
+}
+
+impl SenderReplayState {
+    /// Positive evidence that the peer can open v2: it sent one, or it
+    /// advertised the capability in an authenticated handshake. Sticky.
+    pub fn accepts_authenticated(&self) -> bool {
+        self.authenticated || self.advertised_authenticated
+    }
+}
+
+impl RoomReplayState {
+    /// Whether `peer` has shown it can open authenticated envelopes.
+    pub fn peer_accepts_authenticated(&self, peer: &DeviceId) -> bool {
+        self.senders
+            .get(peer.as_str())
+            .is_some_and(SenderReplayState::accepts_authenticated)
+    }
 }
 
 /// Outcome of offering an authenticated envelope's `seq` to the replay state.
@@ -110,6 +132,29 @@ impl LocalStore {
         Ok(SeqCheck::Accepted)
     }
 
+    /// Record that `peer` advertised authenticated envelopes over an
+    /// authenticated channel. Returns whether this changed the stored state.
+    pub fn mark_peer_advertised_authenticated(
+        &self,
+        room_id: &RoomId,
+        peer: &DeviceId,
+    ) -> Result<bool> {
+        let mut state = self.load_replay_state()?;
+        let entry = state
+            .rooms
+            .entry(room_id.to_string())
+            .or_default()
+            .senders
+            .entry(peer.to_string())
+            .or_default();
+        if entry.advertised_authenticated {
+            return Ok(false);
+        }
+        entry.advertised_authenticated = true;
+        self.save_replay_state(&state)?;
+        Ok(true)
+    }
+
     /// Whether `sender` has already delivered an authenticated envelope here.
     pub fn sender_is_authenticated(&self, room_id: &RoomId, sender: &DeviceId) -> Result<bool> {
         Ok(self
@@ -176,6 +221,40 @@ mod tests {
                 .unwrap(),
             SeqCheck::Accepted
         );
+    }
+
+    #[test]
+    fn send_side_capability_is_sticky_and_separate_from_the_downgrade_flag() {
+        let root = tempfile::tempdir().unwrap();
+        let room = RoomId::from("room");
+        let advertised = DeviceId::from("advertised");
+        let sent_v2 = DeviceId::from("sent-v2");
+        let first = store(root.path());
+        let accepts = |store: &LocalStore, peer: &DeviceId| {
+            store
+                .load_replay_state()
+                .unwrap()
+                .rooms
+                .get(room.as_str())
+                .is_some_and(|state| state.peer_accepts_authenticated(peer))
+        };
+        assert!(!accepts(&first, &advertised));
+        assert!(first
+            .mark_peer_advertised_authenticated(&room, &advertised)
+            .unwrap());
+        assert!(!first
+            .mark_peer_advertised_authenticated(&room, &advertised)
+            .unwrap());
+        first.accept_authenticated_seq(&room, &sent_v2, 1).unwrap();
+        drop(first);
+        let reopened = store(root.path());
+        assert!(accepts(&reopened, &advertised));
+        assert!(accepts(&reopened, &sent_v2));
+        // Advertising alone does not refuse the peer's legacy envelopes.
+        assert!(!reopened
+            .sender_is_authenticated(&room, &advertised)
+            .unwrap());
+        assert!(reopened.sender_is_authenticated(&room, &sent_v2).unwrap());
     }
 
     #[test]

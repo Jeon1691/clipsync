@@ -3,7 +3,7 @@
 //! Envelope authentication, expiry, and replay behavior through a real relay.
 
 use super::*;
-use crate::envelope::sequence_floor;
+use crate::envelope::{check_version, sending_version, sequence_floor, EnvelopePolicy};
 use crate::EnvelopeRejection;
 use clipsync_protocol::CLOCK_SKEW_SECS;
 
@@ -233,6 +233,19 @@ fn admit_text(
     routing: &RoutingHeader,
     text: &str,
 ) -> Result<ClipboardItem, CoreError> {
+    admit_text_with(peer, routing, text, EnvelopePolicy::Negotiate)
+}
+
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
+fn admit_text_with(
+    peer: &Peer,
+    routing: &RoutingHeader,
+    text: &str,
+    policy: EnvelopePolicy,
+) -> Result<ClipboardItem, CoreError> {
     let (room, store) = inbound_for(peer);
     // An unknown version has no AAD; seal under v2 and present the header as is.
     let sealing = RoutingHeader {
@@ -245,6 +258,7 @@ fn admit_text(
         room: &room,
         local: &peer.identity.device_id,
         epoch_key: &EPOCH,
+        policy,
     }
     .text(routing, &nonce, &ciphertext)
 }
@@ -262,6 +276,7 @@ fn admit_manifest(peer: &Peer, routing: &RoutingHeader) -> Result<ManifestPlain,
         room: &room,
         local: &peer.identity.device_id,
         epoch_key: &EPOCH,
+        policy: EnvelopePolicy::Negotiate,
     }
     .manifest(routing, &nonce, &ciphertext)
 }
@@ -301,7 +316,8 @@ fn replays_are_rejected_without_the_memory_cache_and_after_reopening_the_store()
         state.rooms[room.as_str()].senders[SCRIPT_SENDER],
         clipsync_storage::SenderReplayState {
             highest_seq: image.seq,
-            authenticated: true
+            authenticated: true,
+            advertised_authenticated: false,
         }
     );
     // A newer envelope is still accepted, and a rejected forgery cannot raise
@@ -314,6 +330,7 @@ fn replays_are_rejected_without_the_memory_cache_and_after_reopening_the_store()
         room: &room_record,
         local: &peer.identity.device_id,
         epoch_key: &EPOCH,
+        policy: EnvelopePolicy::Negotiate,
     };
     let (nonce, ciphertext) = seal_text(&EPOCH, &text_routing(&room), "honest").unwrap();
     assert!(matches!(
@@ -401,6 +418,7 @@ fn header_checks_cover_addressing_lifetime_and_frame_kind() {
                 room: &room_record,
                 local: &peer.identity.device_id,
                 epoch_key: &EPOCH,
+                policy: EnvelopePolicy::Negotiate,
             }
             .manifest(&image, &nonce, &ciphertext)
         ),
@@ -452,44 +470,111 @@ fn legacy_envelopes_are_accepted_until_the_sender_upgrades_then_refused_across_r
     admit_text(&peer, &text_routing(&room), "authenticated again").unwrap();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn senders_emit_v2_by_default_and_legacy_v1_only_when_configured() {
-    let pair = Pair::new().await;
-    let mut receiver = pair.member(&pair.b).await;
-    for legacy in [false, true] {
-        pair.a
-            .configure(|config| config.sync.legacy_envelopes = legacy);
-        let a = Session::start(&pair.a).await;
-        let text = format!("legacy={legacy}");
-        a.clipboard.set(ClipboardItem::Text { text: text.clone() });
-        let (routing, nonce, ciphertext) = loop {
-            if let ControlMessage::TextEnvelope {
-                routing,
-                nonce,
-                ciphertext,
-            } = next_control(&mut receiver).await
-            {
-                break (routing, nonce, ciphertext);
-            }
-        };
-        // What a receiver from before this change does: v1 AAD, header ignored.
-        let key = derive_content_key(&EPOCH, routing.transfer_id.as_str()).unwrap();
-        let old_receiver = open(
-            &key,
-            &decode_nonce(&nonce).unwrap(),
-            format!("{}:text", routing.message_id).as_bytes(),
-            &hex::decode(&ciphertext).unwrap(),
-        );
-        if legacy {
-            assert_eq!(routing.version, ENVELOPE_VERSION_LEGACY);
-            assert_eq!(old_receiver.unwrap(), text.as_bytes());
-        } else {
-            assert_eq!(routing.version, ENVELOPE_VERSION_AUTHENTICATED);
-            assert!(old_receiver.is_err(), "v2 must not open under the v1 AAD");
+/// What a receiver from before envelope v2 does: v1 AAD, header ignored.
+fn released_client_opens(routing: &RoutingHeader, nonce: &str, ciphertext: &str) -> Option<String> {
+    let key = derive_content_key(&EPOCH, routing.transfer_id.as_str()).unwrap();
+    open(
+        &key,
+        &decode_nonce(nonce).unwrap(),
+        format!("{}:text", routing.message_id).as_bytes(),
+        &hex::decode(ciphertext).unwrap(),
+    )
+    .ok()
+    .map(|plain| String::from_utf8(plain).unwrap())
+}
+
+async fn next_text_envelope(connection: &mut RelayConnection) -> (RoutingHeader, String, String) {
+    loop {
+        if let ControlMessage::TextEnvelope {
+            routing,
+            nonce,
+            ciphertext,
+        } = next_control(connection).await
+        {
+            return (routing, nonce, ciphertext);
         }
+    }
+}
+
+fn accepts_v2(store: &LocalStore, room: &RoomId, peer: &DeviceId) -> bool {
+    store
+        .load_replay_state()
+        .unwrap()
+        .rooms
+        .get(room.as_str())
+        .is_some_and(|state| state.peer_accepts_authenticated(peer))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn senders_use_v1_until_the_peer_proves_v2_and_honor_both_overrides() {
+    let pair = Pair::new().await;
+    let room = pair.a.app.store.current_room().unwrap().room_id;
+    // A raw connection never answers the handshake: no capability evidence.
+    let mut receiver = pair.member(&pair.b).await;
+    let cases = [
+        ("no evidence", false, false, false, ENVELOPE_VERSION_LEGACY),
+        (
+            "legacy override",
+            true,
+            false,
+            false,
+            ENVELOPE_VERSION_LEGACY,
+        ),
+        (
+            "strict override",
+            false,
+            true,
+            false,
+            ENVELOPE_VERSION_AUTHENTICATED,
+        ),
+        (
+            "peer proved v2",
+            false,
+            false,
+            true,
+            ENVELOPE_VERSION_AUTHENTICATED,
+        ),
+        (
+            "legacy beats evidence",
+            true,
+            false,
+            true,
+            ENVELOPE_VERSION_LEGACY,
+        ),
+        (
+            "strict beats legacy",
+            true,
+            true,
+            true,
+            ENVELOPE_VERSION_AUTHENTICATED,
+        ),
+    ];
+    for (case, legacy, strict, evidence, expected) in cases {
+        pair.a.configure(|config| {
+            config.sync.legacy_envelopes = legacy;
+            config.sync.strict_envelopes = strict;
+        });
+        if evidence {
+            pair.a
+                .app
+                .store
+                .mark_peer_advertised_authenticated(&room, &pair.b.identity.device_id)
+                .unwrap();
+        }
+        let a = Session::start(&pair.a).await;
+        let text = format!("case {case}");
+        a.clipboard.set(ClipboardItem::Text { text: text.clone() });
+        let (routing, nonce, ciphertext) = next_text_envelope(&mut receiver).await;
+        assert_eq!(routing.version, expected, "{case}");
+        assert_eq!(
+            released_client_opens(&routing, &nonce, &ciphertext).is_some(),
+            expected == ENVELOPE_VERSION_LEGACY,
+            "{case}: only v1 may open under the released AAD"
+        );
         assert!(
             matches!(open_text(&EPOCH, &routing, &nonce, &ciphertext).unwrap(),
-                ClipboardItem::Text { text: opened } if opened == text)
+                ClipboardItem::Text { text: opened } if opened == text),
+            "{case}"
         );
         // Sequence numbers are persisted and keep increasing across sessions.
         let last = pair.a.app.store.load_replay_state().unwrap().rooms[routing.room_id.as_str()]
@@ -499,4 +584,226 @@ async fn senders_emit_v2_by_default_and_legacy_v1_only_when_configured() {
         a.stop().await;
     }
     receiver.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn updated_clients_converge_on_v2_through_the_handshake_in_either_start_order() {
+    for b_first in [false, true] {
+        let pair = Pair::new().await;
+        let room = pair.a.app.store.current_room().unwrap().room_id;
+        let (a_id, b_id) = (&pair.a.identity.device_id, &pair.b.identity.device_id);
+        assert!(!accepts_v2(&pair.a.app.store, &room, b_id));
+        assert!(!accepts_v2(&pair.b.app.store, &room, a_id));
+        // b has the smaller device ID and initiates; when b connects first,
+        // only a's later arrival (peer_joined at b) can start the handshake.
+        let (a, b) = if b_first {
+            let b = Session::start(&pair.b).await;
+            (Session::start(&pair.a).await, b)
+        } else {
+            let a = Session::start(&pair.a).await;
+            (a, Session::start(&pair.b).await)
+        };
+        wait_until(|| async {
+            accepts_v2(&pair.a.app.store, &room, b_id) && accepts_v2(&pair.b.app.store, &room, a_id)
+        })
+        .await;
+        // Both directions now carry v2; each receiver locks the sender to v2.
+        a.clipboard.set(ClipboardItem::Text {
+            text: "from a".into(),
+        });
+        b.text("from a").await;
+        b.clipboard.set(ClipboardItem::Text {
+            text: "from b".into(),
+        });
+        a.text("from b").await;
+        assert!(pair
+            .b
+            .app
+            .store
+            .sender_is_authenticated(&room, a_id)
+            .unwrap());
+        assert!(pair
+            .a
+            .app
+            .store
+            .sender_is_authenticated(&room, b_id)
+            .unwrap());
+        a.stop().await;
+
+        // Downgrade after the switch: a v1 envelope claiming to be from a is
+        // refused, while a fresh v2 sentinel still arrives.
+        let mut sender = pair.member(&pair.a).await;
+        let legacy = RoutingHeader {
+            version: ENVELOPE_VERSION_LEGACY,
+            ..room_routing(&pair.a, 1)
+        };
+        deliver(&mut sender, sealed_text(legacy, "downgraded clip")).await;
+        let before = b.clipboard.signature().await.unwrap();
+        settle(&mut sender, &pair.a, &b, sequence_floor(Utc::now())).await;
+        let after: u64 = b.clipboard.signature().await.unwrap().parse().unwrap();
+        assert_eq!(
+            after,
+            before.parse::<u64>().unwrap() + 1,
+            "the v1 downgrade reached the clipboard"
+        );
+        sender.close().await;
+        b.stop().await;
+        // The switch is persisted: a new session still sends v2.
+        assert_eq!(
+            sending_version(
+                &pair.a.app.store,
+                &pair.a.app.store.current_room().unwrap(),
+                a_id,
+                EnvelopePolicy::Negotiate
+            )
+            .unwrap(),
+            ENVELOPE_VERSION_AUTHENTICATED
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn updated_and_released_clients_keep_syncing_both_ways_without_configuration() {
+    let pair = Pair::new().await;
+    let room = pair.a.app.store.current_room().unwrap().room_id;
+    let a = Session::start(&pair.a).await;
+    // b plays a released client: same handshake rule (smaller ID initiates),
+    // an empty handshake payload, v1 envelopes only.
+    let mut old = pair.member(&pair.b).await;
+    let a_public = parse_public(&hex::encode(pair.a.identity.public_bytes())).unwrap();
+    let mut handshake =
+        NoiseHandshake::initiator(&pair.b.identity.static_secret(), &a_public).unwrap();
+    old.send_control(ControlMessage::NoiseHandshake {
+        message: hex::encode(handshake.write_message().unwrap()),
+    })
+    .await
+    .unwrap();
+    let reply = loop {
+        if let ControlMessage::NoiseHandshake { message } = next_control(&mut old).await {
+            break hex::decode(message).unwrap();
+        }
+    };
+    let payload = handshake.read_message(&reply).unwrap();
+    assert!(handshake.is_finished());
+    // Released clients read the payload into a fixed buffer and drop it.
+    assert!(payload.len() <= clipsync_protocol::LEGACY_HANDSHAKE_PAYLOAD_MAX_BYTES);
+    assert!(clipsync_protocol::HandshakeCapabilities::decode(&payload).accepts_authenticated());
+
+    // Updated -> released: v1, readable with the released AAD.
+    a.clipboard.set(ClipboardItem::Text {
+        text: "to the old client".into(),
+    });
+    let (routing, nonce, ciphertext) = next_text_envelope(&mut old).await;
+    assert_eq!(routing.version, ENVELOPE_VERSION_LEGACY);
+    assert_eq!(
+        released_client_opens(&routing, &nonce, &ciphertext).as_deref(),
+        Some("to the old client")
+    );
+    assert!(!accepts_v2(
+        &pair.a.app.store,
+        &room,
+        &pair.b.identity.device_id
+    ));
+
+    // Released -> updated: v1 is applied, also after the old client restarts
+    // its sequence numbers.
+    for text in ["from the old client", "after the old client restarted"] {
+        let legacy = RoutingHeader {
+            version: ENVELOPE_VERSION_LEGACY,
+            ..room_routing(&pair.b, 1)
+        };
+        old.send_control(sealed_text(legacy, text)).await.unwrap();
+        a.text(text).await;
+    }
+    assert!(!pair
+        .a
+        .app
+        .store
+        .sender_is_authenticated(&room, &pair.b.identity.device_id)
+        .unwrap());
+    old.close().await;
+    a.stop().await;
+}
+
+#[test]
+fn strict_mode_refuses_every_legacy_envelope() {
+    let room = RoomId::new();
+    let peer = scripted_peer("http://127.0.0.1:1", room.clone());
+    let legacy = RoutingHeader {
+        version: ENVELOPE_VERSION_LEGACY,
+        ..text_routing(&room)
+    };
+    // Default policy accepts a not-yet-upgraded sender; strict never does.
+    admit_text(&peer, &legacy, "legacy").unwrap();
+    let legacy = RoutingHeader {
+        message_id: MessageId::new(),
+        ..legacy
+    };
+    assert_eq!(
+        rejection(admit_text_with(
+            &peer,
+            &legacy,
+            "legacy",
+            EnvelopePolicy::Strict
+        )),
+        EnvelopeRejection::LegacyRefused
+    );
+    admit_text_with(&peer, &text_routing(&room), "v2", EnvelopePolicy::Strict).unwrap();
+    assert_eq!(
+        EnvelopePolicy::Strict.accepted_versions(),
+        [ENVELOPE_VERSION_AUTHENTICATED]
+    );
+}
+
+#[test]
+fn broadcasts_follow_the_least_capable_peer_and_advertising_alone_never_refuses_v1() {
+    let room_id = RoomId::new();
+    let peer = scripted_peer("http://127.0.0.1:1", room_id.clone());
+    let store = &peer.app.store;
+    let local = &peer.identity.device_id;
+    let mut room = store.current_room().unwrap();
+    let mut second = room.peers[0].clone();
+    second.device_id = "script-device-y".into();
+    room.peers.push(second);
+    let version_for =
+        |room: &RoomRecord, policy| sending_version(store, room, local, policy).unwrap();
+    let version = |policy| version_for(&room, policy);
+
+    assert_eq!(version(EnvelopePolicy::Negotiate), ENVELOPE_VERSION_LEGACY);
+    // One peer advertised v2 in its handshake; the other has not: stay on v1.
+    store
+        .mark_peer_advertised_authenticated(&room_id, &"script-device-y".into())
+        .unwrap();
+    assert_eq!(version(EnvelopePolicy::Negotiate), ENVELOPE_VERSION_LEGACY);
+    // The advertisement does not make that peer's legacy envelopes a downgrade.
+    assert!(check_version(
+        store,
+        &RoutingHeader {
+            version: ENVELOPE_VERSION_LEGACY,
+            sender_device_id: "script-device-y".into(),
+            ..text_routing(&room_id)
+        },
+        EnvelopePolicy::Negotiate
+    )
+    .is_ok());
+    // The other peer sends an accepted v2 envelope: every peer is now capable.
+    admit_text(&peer, &text_routing(&room_id), "v2 from z").unwrap();
+    assert_eq!(
+        version(EnvelopePolicy::Negotiate),
+        ENVELOPE_VERSION_AUTHENTICATED
+    );
+    assert_eq!(version(EnvelopePolicy::Legacy), ENVELOPE_VERSION_LEGACY);
+    // A newly paired peer without evidence sends the room back to v1.
+    let mut grown = room.clone();
+    let mut third = room.peers[0].clone();
+    third.device_id = "script-device-x".into();
+    grown.peers.push(third);
+    assert_eq!(
+        version_for(&grown, EnvelopePolicy::Negotiate),
+        ENVELOPE_VERSION_LEGACY
+    );
+    assert_eq!(
+        version_for(&grown, EnvelopePolicy::Strict),
+        ENVELOPE_VERSION_AUTHENTICATED
+    );
 }

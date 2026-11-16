@@ -1,10 +1,16 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
-//! Receive-side admission of envelopes: addressing, expiry, downgrade and replay.
+//! Envelope version policy and receive-side admission of envelopes:
+//! addressing, expiry, downgrade and replay.
+//!
+//! Send side ([`sending_version`]): v1 to a peer until there is positive,
+//! authenticated evidence that it opens v2, then v2 for good. A broadcast goes
+//! out in the version of the least capable pinned peer of the room.
 //!
 //! Order of checks for every text envelope or manifest:
 //! 1. [`check_header`] — cheap checks on the (possibly unauthenticated) header.
-//! 2. [`check_version`] — v2 always; v1 only from senders never seen on v2.
+//! 2. [`check_version`] — v2 always; v1 only from senders never seen on v2,
+//!    and never in strict mode.
 //! 3. AEAD open — for v2 this authenticates every header field checked above.
 //! 4. [`commit_sequence`] — v2 only: durably require a strictly newer `seq`.
 //!
@@ -17,7 +23,7 @@ use clipsync_protocol::{
     DeviceId, ItemKind, Recipient, RoutingHeader, CLOCK_SKEW_SECS, ENVELOPE_VERSION_AUTHENTICATED,
     ENVELOPE_VERSION_LEGACY, HARD_MAX_TTL_SECS,
 };
-use clipsync_storage::{LocalStore, RoomRecord, SeqCheck};
+use clipsync_storage::{LocalStore, RoomRecord, SeqCheck, SyncConfig};
 
 use crate::CoreError;
 
@@ -41,16 +47,86 @@ pub enum EnvelopeRejection {
     LifetimeTooLong,
     #[error("legacy envelope from a sender that uses authenticated envelopes")]
     Downgrade,
+    #[error("legacy envelope refused by sync.strict_envelopes")]
+    LegacyRefused,
     #[error("replayed envelope (seq {seq} <= {highest_seq})")]
     Replayed { seq: u64, highest_seq: u64 },
 }
 
-/// Envelope version this device emits, per `sync.legacy_envelopes`.
-pub(crate) fn sending_version(legacy_envelopes: bool) -> u16 {
-    if legacy_envelopes {
-        ENVELOPE_VERSION_LEGACY
-    } else {
-        ENVELOPE_VERSION_AUTHENTICATED
+/// How this device chooses and accepts envelope versions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EnvelopePolicy {
+    /// Default: send v1 to a peer until it has proved it opens v2, then v2;
+    /// accept v2 always and v1 from a sender until its first accepted v2.
+    Negotiate,
+    /// `sync.legacy_envelopes`: always send v1; receive as in `Negotiate`.
+    Legacy,
+    /// `sync.strict_envelopes`: always send v2; refuse every v1 envelope.
+    Strict,
+}
+
+impl EnvelopePolicy {
+    /// Strict wins over legacy, so a conflicting config fails safe.
+    pub(crate) fn from_config(sync: &SyncConfig) -> Self {
+        if sync.strict_envelopes {
+            Self::Strict
+        } else if sync.legacy_envelopes {
+            Self::Legacy
+        } else {
+            Self::Negotiate
+        }
+    }
+
+    /// Envelope versions this device accepts, as advertised in the Noise
+    /// handshake payload.
+    pub(crate) fn accepted_versions(self) -> &'static [u16] {
+        match self {
+            Self::Strict => &[ENVELOPE_VERSION_AUTHENTICATED],
+            Self::Negotiate | Self::Legacy => {
+                &[ENVELOPE_VERSION_LEGACY, ENVELOPE_VERSION_AUTHENTICATED]
+            }
+        }
+    }
+}
+
+/// Envelope version for the next broadcast into `room`.
+///
+/// Under [`EnvelopePolicy::Negotiate`] that is v2 only when every pinned peer
+/// of the room (other than `local`) has shown, through an authenticated
+/// channel, that it opens v2: it sent this device a v2 envelope, or it
+/// advertised v2 in its Noise handshake payload. Otherwise the least capable
+/// peer gets what it can read: v1. The evidence is persisted and never
+/// revoked, so a relay cannot roll a peer back to v1.
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
+pub(crate) fn sending_version(
+    store: &LocalStore,
+    room: &RoomRecord,
+    local: &DeviceId,
+    policy: EnvelopePolicy,
+) -> Result<u16, CoreError> {
+    match policy {
+        EnvelopePolicy::Legacy => Ok(ENVELOPE_VERSION_LEGACY),
+        EnvelopePolicy::Strict => Ok(ENVELOPE_VERSION_AUTHENTICATED),
+        EnvelopePolicy::Negotiate => {
+            let state = store.load_replay_state()?;
+            let room_state = state.rooms.get(room.room_id.as_str());
+            let all_accept = room
+                .peers
+                .iter()
+                .filter(|peer| peer.device_id != *local)
+                .all(|peer| {
+                    room_state
+                        .is_some_and(|state| state.peer_accepts_authenticated(&peer.device_id))
+                });
+            Ok(if all_accept {
+                ENVELOPE_VERSION_AUTHENTICATED
+            } else {
+                ENVELOPE_VERSION_LEGACY
+            })
+        }
     }
 }
 
@@ -110,15 +186,25 @@ pub(crate) fn check_header(
 }
 
 /// Legacy v1 envelopes are accepted only from senders that have never
-/// delivered an authenticated v2 envelope to this device.
+/// delivered an authenticated v2 envelope to this device, and never in strict
+/// mode. A handshake capability advertisement alone does not refuse v1: the
+/// peer may run with `sync.legacy_envelopes`.
 #[expect(
     clippy::result_large_err,
     reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
 )]
-pub(crate) fn check_version(store: &LocalStore, routing: &RoutingHeader) -> Result<(), CoreError> {
-    if routing.version == ENVELOPE_VERSION_LEGACY
-        && store.sender_is_authenticated(&routing.room_id, &routing.sender_device_id)?
-    {
+pub(crate) fn check_version(
+    store: &LocalStore,
+    routing: &RoutingHeader,
+    policy: EnvelopePolicy,
+) -> Result<(), CoreError> {
+    if routing.version != ENVELOPE_VERSION_LEGACY {
+        return Ok(());
+    }
+    if policy == EnvelopePolicy::Strict {
+        return Err(EnvelopeRejection::LegacyRefused.into());
+    }
+    if store.sender_is_authenticated(&routing.room_id, &routing.sender_device_id)? {
         return Err(EnvelopeRejection::Downgrade.into());
     }
     Ok(())

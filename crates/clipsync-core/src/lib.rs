@@ -6,6 +6,7 @@
 mod engine;
 mod envelope;
 mod error;
+mod handshake;
 mod loop_guard;
 mod notify;
 mod pairing;
