@@ -18,6 +18,7 @@ use clipsync_protocol::{
 };
 
 use crate::auth::verify_token;
+use crate::state::{ConnectionId, LiveConnection};
 use crate::RelayState;
 
 #[derive(Clone, Debug)]
@@ -48,6 +49,9 @@ struct ConnCtx {
     pairing_sid: Option<String>,
     device_role: DeviceRole,
     pairing_side: Option<usize>,
+    // Set only for device-token sockets that own a room-member route.
+    member_conn: Option<ConnectionId>,
+    _live: LiveConnection,
 }
 
 // A protocol-v1 Ed25519 SPAKE message is 33 bytes (44 in base64). Retain only
@@ -101,8 +105,11 @@ fn register_pairing_connection(
     if session.pairing_senders[side].is_some() {
         session.pending_spake = [None, None];
     }
-    state.register_conn(&conn.device_id, tx.clone());
+    // Pairing tokens are issued without authentication for any device ID, so
+    // a pairing socket is routed only within its session and never becomes a
+    // room-member route.
     session.pairing_senders[side] = Some(tx.clone());
+    state.connections_total.fetch_add(1, Ordering::Relaxed);
     conn.pairing_side = Some(side);
     let peer_online = session.pairing_senders[1 - side]
         .as_ref()
@@ -173,7 +180,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
                 }
             }
             Message::Binary(b) => {
-                if let Some(c) = &ctx {
+                // Like frames before hello, pairing-socket binary is dropped.
+                if let Ok(c) = member_ctx(&ctx) {
                     forward_binary(&state, c, b.to_vec(), &tx).await;
                 }
             }
@@ -186,10 +194,17 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
         }
     }
 
+    // `c` (and its live-connection count) is dropped only after any leave
+    // notice is queued, so observers of the metric also see that notice.
     if let Some(c) = ctx {
-        state
-            .connections
-            .remove_if(&c.device_id, |_, sender| sender.same_channel(&tx));
+        if let Some(id) = c.member_conn {
+            state.unregister_conn(&c.room_id, &c.device_id, id);
+            // A replacement may already own this member's routing entry. Its
+            // peers must stay online when the superseded socket finishes closing.
+            if !state.is_online(&c.room_id, &c.device_id) {
+                notify_peers_left(&state, &c).await;
+            }
+        }
         if let (Some(sid), Some(side)) = (&c.pairing_sid, c.pairing_side) {
             if let Some(mut session) = state.pairing_mut(sid) {
                 if session.pairing_senders[side]
@@ -201,14 +216,19 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
                 }
             }
         }
-        // A replacement may already own this device's routing entry. Its
-        // peers must stay online when the superseded socket finishes closing.
-        if !state.is_online(&c.device_id) {
-            notify_peers_left(&state, &c).await;
-        }
     }
     let _ = tx.send(WsOut::Close).await;
     let _ = writer.await;
+}
+
+/// Room traffic needs a device-token member connection. Pairing tokens are
+/// issued without authentication and are confined to their pairing session.
+fn member_ctx(ctx: &Option<ConnCtx>) -> Result<&ConnCtx, String> {
+    let c = ctx.as_ref().ok_or("hello required")?;
+    if c.member_conn.is_none() {
+        return Err("room member connection required".into());
+    }
+    Ok(c)
 }
 
 fn message_rate_exceeded(last: &mut Instant, burst: &mut u32, now: Instant) -> bool {
@@ -278,14 +298,9 @@ async fn handle_control(
                 },
                 device_role: claims.role,
                 pairing_side: None,
+                member_conn: None,
+                _live: state.live_connection(),
             };
-            if claims.typ != "pair" {
-                let room = state.room(&conn.room_id).ok_or("unknown room")?;
-                let device = room.devices.get(&conn.device_id).ok_or("unknown device")?;
-                if device.revoked {
-                    return Err("device revoked".into());
-                }
-            }
             if claims.typ == "pair" {
                 let arrival = register_pairing_connection(state, &mut conn, tx, role)?;
                 let hello_ok = ControlMessage::HelloOk {
@@ -303,19 +318,19 @@ async fn handle_control(
                     send_msg(tx, &pending).await;
                 }
             } else {
-                state.register_conn(&conn.device_id, tx.clone());
+                conn.member_conn =
+                    Some(state.register_conn(&conn.room_id, &conn.device_id, tx.clone())?);
                 let peers: Vec<PeerInfo> = state
                     .peer_ids(&conn.room_id, &conn.device_id)
                     .into_iter()
                     .filter_map(|id| {
-                        let room = state.room(&conn.room_id)?;
-                        let mut info = room.devices.get(&id)?.info.clone();
-                        info.online = state.is_online(&id);
+                        let mut info = state.room(&conn.room_id)?.devices.get(&id)?.info.clone();
+                        info.online = state.is_online(&conn.room_id, &id);
                         Some(info)
                     })
                     .collect();
                 let peer_online = peers.iter().any(|p| p.online);
-                let queued = state.take_queue(&conn.device_id);
+                let queued = state.take_queue(&conn.room_id, &conn.device_id);
                 let hello_ok = ControlMessage::HelloOk {
                     room_id: claims.rid.clone(),
                     peer_online,
@@ -362,7 +377,7 @@ async fn handle_control(
             nonce,
             ciphertext,
         } => {
-            let c = ctx.as_ref().ok_or("hello required")?;
+            let c = member_ctx(ctx)?;
             if routing.item_kind != ItemKind::Text {
                 return Err("text envelope item_kind mismatch".into());
             }
@@ -387,7 +402,7 @@ async fn handle_control(
                 ciphertext: ciphertext.clone(),
             };
             for peer in &peers {
-                if let Some(p) = state.connections.get(peer) {
+                if let Some(p) = state.member_sender(&c.room_id, peer) {
                     any_online = true;
                     if let Ok(s) = env.encode() {
                         let _ = p.send(WsOut::Text(s)).await;
@@ -395,6 +410,7 @@ async fn handle_control(
                     }
                 } else {
                     state.queue_text(
+                        &c.room_id,
                         peer,
                         QueuedEnvelope {
                             routing: routing.clone(),
@@ -431,11 +447,11 @@ async fn handle_control(
             Ok(())
         }
         ControlMessage::Manifest { ref routing, .. } => {
-            let c = ctx.as_ref().ok_or("hello required")?;
+            let c = member_ctx(ctx)?;
             let peers = state.peer_ids(&c.room_id, &c.device_id);
             let online: Vec<_> = peers
                 .iter()
-                .filter(|p| state.is_online(p))
+                .filter(|p| state.is_online(&c.room_id, p))
                 .cloned()
                 .collect();
             if online.is_empty() {
@@ -465,24 +481,20 @@ async fn handle_control(
             Ok(())
         }
         ControlMessage::Ack { .. } | ControlMessage::EpochWrapMsg { .. } => {
-            let c = ctx.as_ref().ok_or("hello required")?;
+            let c = member_ctx(ctx)?;
             fanout_except(state, &c.room_id, &c.device_id, &msg).await;
             Ok(())
         }
         ControlMessage::Revoke { ref device_id } => {
-            let c = ctx.as_ref().ok_or("hello required")?;
+            let c = member_ctx(ctx)?;
             if c.device_role != DeviceRole::Owner {
                 return Err("manage permission required".into());
             }
-            // Revoke removes the routing entry. Keep the sender long enough
-            // to close the authenticated socket after invalidating its device.
+            // Revoke removes the routing entry and hands back that socket's
+            // sender, so the connection that lost its route is the one closed.
             let revoked_connection = state
-                .connections
-                .get(device_id.as_str())
-                .map(|connection| connection.value().clone());
-            if !state.revoke(&c.room_id, device_id.as_str()) {
-                return Err("device not found".into());
-            }
+                .revoke_member(&c.room_id, device_id.as_str())
+                .ok_or("device not found")?;
             fanout_except(state, &c.room_id, &c.device_id, &msg).await;
             if let Some(p) = revoked_connection {
                 let _ = p.send(WsOut::Close).await;
@@ -616,7 +628,7 @@ async fn forward_binary(
     let peers = state.peer_ids(&c.room_id, &c.device_id);
     let mut sent = false;
     for peer in peers {
-        if let Some(p) = state.connections.get(&peer) {
+        if let Some(p) = state.member_sender(&c.room_id, &peer) {
             let _ = p.send(WsOut::Binary(bytes.clone())).await;
             state.frames_forwarded.fetch_add(1, Ordering::Relaxed);
             sent = true;
@@ -636,7 +648,7 @@ async fn forward_binary(
 async fn fanout_except(state: &Arc<RelayState>, room_id: &str, except: &str, msg: &ControlMessage) {
     if let Ok(s) = msg.encode() {
         for peer in state.peer_ids(room_id, except) {
-            if let Some(p) = state.connections.get(&peer) {
+            if let Some(p) = state.member_sender(room_id, &peer) {
                 let _ = p.send(WsOut::Text(s.clone())).await;
                 state.frames_forwarded.fetch_add(1, Ordering::Relaxed);
             }

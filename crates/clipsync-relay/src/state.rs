@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -19,13 +20,43 @@ use clipsync_protocol::{
 use crate::auth::issue_token;
 use crate::{JoinError, RelayConfig, WsOut};
 
+/// Identifies one room-member registration, so a socket's cleanup can retire
+/// only the route it installed and never a newer socket's replacement.
+pub type ConnectionId = u64;
+
+/// Device IDs are client-chosen and public (presence frames, webhooks), and
+/// one device may belong to several rooms, so member state is keyed per room.
+type MemberKey = (String, String);
+
+fn member_key(room_id: &str, device_id: &str) -> MemberKey {
+    (room_id.to_string(), device_id.to_string())
+}
+
+pub(crate) struct MemberRoute {
+    pub(crate) id: ConnectionId,
+    pub(crate) sender: mpsc::Sender<WsOut>,
+}
+
+/// Counts one authenticated socket, pairing or room member, until dropped.
+pub(crate) struct LiveConnection(Arc<AtomicU64>);
+
+impl Drop for LiveConnection {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 pub struct RelayState {
     pub config: RelayConfig,
     pairing_by_code: DashMap<String, PairingSession>,
     pairing_by_id: DashMap<String, String>,
     rooms: DashMap<String, Room>,
-    pub connections: DashMap<String, mpsc::Sender<WsOut>>,
-    queue: DashMap<String, (QueuedEnvelope, DateTime<Utc>)>,
+    // Only sockets authenticated with a device token for a non-revoked room
+    // member are routed here. Pairing sockets route via `pairing_senders`.
+    pub(crate) member_routes: DashMap<MemberKey, MemberRoute>,
+    next_connection_id: AtomicU64,
+    live_connections: Arc<AtomicU64>,
+    queue: DashMap<MemberKey, (QueuedEnvelope, DateTime<Utc>)>,
     ip_fails: DashMap<IpAddr, (u32, Instant)>,
     pub connections_total: AtomicU64,
     pub frames_forwarded: AtomicU64,
@@ -70,7 +101,9 @@ impl RelayState {
             pairing_by_code: DashMap::new(),
             pairing_by_id: DashMap::new(),
             rooms: DashMap::new(),
-            connections: DashMap::new(),
+            member_routes: DashMap::new(),
+            next_connection_id: AtomicU64::new(0),
+            live_connections: Arc::new(AtomicU64::new(0)),
             queue: DashMap::new(),
             ip_fails: DashMap::new(),
             connections_total: AtomicU64::new(0),
@@ -332,13 +365,51 @@ impl RelayState {
         self.rooms.get_mut(id)
     }
 
-    pub fn register_conn(&self, device_id: &str, tx: mpsc::Sender<WsOut>) {
-        self.connections.insert(device_id.to_string(), tx);
-        self.connections_total.fetch_add(1, Ordering::Relaxed);
+    pub(crate) fn live_connection(&self) -> LiveConnection {
+        self.live_connections.fetch_add(1, Ordering::Relaxed);
+        LiveConnection(self.live_connections.clone())
     }
 
-    pub fn unregister_conn(&self, device_id: &str) {
-        self.connections.remove(device_id);
+    /// Routes room traffic for `device_id` in `room_id` to `tx`, replacing any
+    /// older socket of the same member. Only non-revoked members qualify.
+    pub fn register_conn(
+        &self,
+        room_id: &str,
+        device_id: &str,
+        tx: mpsc::Sender<WsOut>,
+    ) -> Result<ConnectionId, &'static str> {
+        // Holding the room entry orders this insert with `revoke`, which
+        // removes the route under the same entry's write lock.
+        let room = self.rooms.get(room_id).ok_or("unknown room")?;
+        let device = room.devices.get(device_id).ok_or("unknown device")?;
+        if device.revoked {
+            return Err("device revoked");
+        }
+        let id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
+        self.member_routes.insert(
+            member_key(room_id, device_id),
+            MemberRoute { id, sender: tx },
+        );
+        drop(room);
+        self.connections_total.fetch_add(1, Ordering::Relaxed);
+        Ok(id)
+    }
+
+    /// Removes the member route only if registration `id` still owns it.
+    pub fn unregister_conn(&self, room_id: &str, device_id: &str, id: ConnectionId) -> bool {
+        self.member_routes
+            .remove_if(&member_key(room_id, device_id), |_, route| route.id == id)
+            .is_some()
+    }
+
+    pub(crate) fn member_sender(
+        &self,
+        room_id: &str,
+        device_id: &str,
+    ) -> Option<mpsc::Sender<WsOut>> {
+        self.member_routes
+            .get(&member_key(room_id, device_id))
+            .map(|route| route.sender.clone())
     }
 
     pub fn peer_ids(&self, room_id: &str, except: &str) -> Vec<String> {
@@ -352,16 +423,24 @@ impl RelayState {
             .collect()
     }
 
-    pub fn is_online(&self, device_id: &str) -> bool {
-        self.connections.contains_key(device_id)
+    pub fn is_online(&self, room_id: &str, device_id: &str) -> bool {
+        self.member_routes
+            .contains_key(&member_key(room_id, device_id))
     }
 
-    pub fn queue_text(&self, device_id: &str, env: QueuedEnvelope, expires_at: DateTime<Utc>) {
-        self.queue.insert(device_id.to_string(), (env, expires_at));
+    pub fn queue_text(
+        &self,
+        room_id: &str,
+        device_id: &str,
+        env: QueuedEnvelope,
+        expires_at: DateTime<Utc>,
+    ) {
+        self.queue
+            .insert(member_key(room_id, device_id), (env, expires_at));
     }
 
-    pub fn take_queue(&self, device_id: &str) -> Option<QueuedEnvelope> {
-        let (_, (env, exp)) = self.queue.remove(device_id)?;
+    pub fn take_queue(&self, room_id: &str, device_id: &str) -> Option<QueuedEnvelope> {
+        let (_, (env, exp)) = self.queue.remove(&member_key(room_id, device_id))?;
         if exp < Utc::now() {
             self.expired.fetch_add(1, Ordering::Relaxed);
             None
@@ -371,17 +450,25 @@ impl RelayState {
     }
 
     pub fn revoke(&self, room_id: &str, device_id: &str) -> bool {
-        let Some(mut room) = self.rooms.get_mut(room_id) else {
-            return false;
-        };
-        if let Some(dev) = room.devices.get_mut(device_id) {
-            dev.revoked = true;
-            self.connections.remove(device_id);
-            room.epoch += 1;
-            true
-        } else {
-            false
-        }
+        self.revoke_member(room_id, device_id).is_some()
+    }
+
+    /// Revokes a room member and removes its route. `None` means the device is
+    /// not a member; otherwise the removed socket, if any, is returned so the
+    /// caller can close exactly the connection that lost its route.
+    pub(crate) fn revoke_member(
+        &self,
+        room_id: &str,
+        device_id: &str,
+    ) -> Option<Option<mpsc::Sender<WsOut>>> {
+        let mut room = self.rooms.get_mut(room_id)?;
+        room.devices.get_mut(device_id)?.revoked = true;
+        room.epoch += 1;
+        Some(
+            self.member_routes
+                .remove(&member_key(room_id, device_id))
+                .map(|(_, route)| route.sender),
+        )
     }
 
     pub fn gc(&self) {
@@ -401,7 +488,7 @@ impl RelayState {
     pub fn metrics_text(&self) -> String {
         format!(
             "clipsync_ws_connections {}\nclipsync_frames_forwarded {}\nclipsync_pairing_ok {}\nclipsync_pairing_fail {}\nclipsync_expired {}\n",
-            self.connections.len(),
+            self.live_connections.load(Ordering::Relaxed),
             self.frames_forwarded.load(Ordering::Relaxed),
             self.pairing_ok.load(Ordering::Relaxed),
             self.pairing_fail.load(Ordering::Relaxed),

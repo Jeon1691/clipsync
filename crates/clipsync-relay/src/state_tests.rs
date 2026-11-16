@@ -108,6 +108,7 @@ fn failed_join_rate_limit_resets_after_its_window_and_abort_removes_the_code() {
 #[test]
 fn queue_expiry_discards_only_expired_envelopes_and_gc_counts_them() {
     let (state, offer, _, owner) = fixture();
+    let room = offer.room_id.to_string();
     let now = Utc::now();
     let routing = RoutingHeader {
         version: clipsync_protocol::PROTOCOL_VERSION,
@@ -127,23 +128,105 @@ fn queue_expiry_discards_only_expired_envelopes_and_gc_counts_them() {
         ciphertext: "opaque".into(),
     };
     state.queue_text(
+        &room,
         "expired-on-read",
         envelope.clone(),
         now - chrono::Duration::seconds(1),
     );
-    assert!(state.take_queue("expired-on-read").is_none());
+    assert!(state.take_queue(&room, "expired-on-read").is_none());
     state.queue_text(
+        &room,
         "expired-on-gc",
         envelope.clone(),
         now - chrono::Duration::seconds(1),
     );
     state.queue_text(
+        &room,
         "fresh",
         envelope.clone(),
         now + chrono::Duration::seconds(60),
     );
     state.gc();
-    assert!(state.take_queue("expired-on-gc").is_none());
-    assert_eq!(state.take_queue("fresh"), Some(envelope));
+    assert!(state.take_queue(&room, "expired-on-gc").is_none());
+    assert_eq!(state.take_queue(&room, "fresh"), Some(envelope));
     assert_eq!(state.expired.load(Ordering::Relaxed), 2);
+}
+
+fn paired_room() -> (RelayState, String, String, String) {
+    let (state, offer, sid, owner) = fixture();
+    let member = DeviceId::new();
+    state
+        .join_pairing(
+            join(&offer.pairing_code, member.clone()),
+            "127.0.0.1".parse().unwrap(),
+        )
+        .unwrap();
+    assert!(state.complete_pairing(sid.as_str()).is_none());
+    let (_, _, room_id, _, _) = state.complete_pairing(sid.as_str()).unwrap();
+    (
+        state,
+        room_id.to_string(),
+        owner.to_string(),
+        member.to_string(),
+    )
+}
+
+#[test]
+fn stale_connection_cleanup_cannot_remove_a_newer_member_route() {
+    let (state, room, _, member) = paired_room();
+    let (old_tx, _old_rx) = mpsc::channel(1);
+    let (new_tx, _new_rx) = mpsc::channel(1);
+    let old = state.register_conn(&room, &member, old_tx).unwrap();
+    let new = state.register_conn(&room, &member, new_tx.clone()).unwrap();
+    assert_ne!(old, new);
+
+    assert!(!state.unregister_conn(&room, &member, old));
+    assert!(state
+        .member_sender(&room, &member)
+        .unwrap()
+        .same_channel(&new_tx));
+    assert!(state.is_online(&room, &member));
+
+    assert!(state.unregister_conn(&room, &member, new));
+    assert!(!state.is_online(&room, &member));
+    assert!(!state.unregister_conn(&room, &member, new));
+}
+
+#[test]
+fn member_routes_require_a_live_membership_and_are_scoped_per_room() {
+    let (state, room, owner, member) = paired_room();
+    let (tx, _rx) = mpsc::channel(1);
+    assert_eq!(
+        state.register_conn(&RoomId::new().to_string(), &member, tx.clone()),
+        Err("unknown room")
+    );
+    assert_eq!(
+        state.register_conn(&room, &DeviceId::new().to_string(), tx.clone()),
+        Err("unknown device")
+    );
+    assert!(state.member_routes.is_empty());
+
+    state.register_conn(&room, &member, tx.clone()).unwrap();
+    assert!(state.is_online(&room, &member));
+    assert!(!state.is_online(&RoomId::new().to_string(), &member));
+    assert!(!state.is_online(&room, &owner));
+}
+
+#[test]
+fn revocation_drops_the_route_returns_its_socket_and_blocks_reregistration() {
+    let (state, room, _, member) = paired_room();
+    let (tx, _rx) = mpsc::channel(1);
+    state.register_conn(&room, &member, tx.clone()).unwrap();
+
+    let removed = state.revoke_member(&room, &member).unwrap().unwrap();
+    assert!(removed.same_channel(&tx));
+    assert!(!state.is_online(&room, &member));
+    assert_eq!(
+        state.register_conn(&room, &member, tx),
+        Err("device revoked")
+    );
+    assert!(state
+        .revoke_member(&room, &DeviceId::new().to_string())
+        .is_none());
+    assert!(!state.revoke(&RoomId::new().to_string(), &member));
 }

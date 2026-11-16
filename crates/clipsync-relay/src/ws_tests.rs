@@ -64,17 +64,17 @@ async fn regression_f98_stale_room_socket_close_does_not_announce_live_replaceme
         let mut peer = connect(address, &member, &rid, &member_token).await;
         let mut old = connect(address, &owner, &rid, &owner_token).await;
         assert!(matches!(control(&mut peer).await, ControlMessage::PeerJoined { device } if device.device_id == owner));
-        let old_sender = state.connections.get(owner.as_str()).unwrap().value().clone();
+        let old_sender = state.member_sender(rid.as_str(), owner.as_str()).unwrap();
         let mut current = connect(address, &owner, &rid, &owner_token).await;
         assert!(matches!(control(&mut peer).await, ControlMessage::PeerJoined { device } if device.device_id == owner));
-        let current_sender = state.connections.get(owner.as_str()).unwrap().value().clone();
+        let current_sender = state.member_sender(rid.as_str(), owner.as_str()).unwrap();
         assert!(!old_sender.same_channel(&current_sender));
 
         old.close(None).await.unwrap();
         // The old writer's receiver closes only after its socket cleanup has
         // queued any leave notification and sent its Close. No blind delay.
         old_sender.closed().await;
-        assert!(state.connections.get(owner.as_str()).unwrap().same_channel(&current_sender));
+        assert!(state.member_sender(rid.as_str(), owner.as_str()).unwrap().same_channel(&current_sender));
         peer.send(ClientMessage::Text(ControlMessage::Ping { ts: 9801 }.encode().unwrap().into())).await.unwrap();
         assert!(matches!(control(&mut peer).await, ControlMessage::Pong { ts: 9801 }),
             "a stale socket must not announce a still-live device as offline");
@@ -90,7 +90,7 @@ async fn regression_f98_stale_room_socket_close_does_not_announce_live_replaceme
         current.close(None).await.unwrap();
         current_sender.closed().await;
         assert!(matches!(control(&mut peer).await, ControlMessage::PeerLeft { device_id } if device_id == owner));
-        assert!(!state.is_online(owner.as_str()));
+        assert!(!state.is_online(rid.as_str(), owner.as_str()));
         peer.send(ClientMessage::Text(ControlMessage::Ping { ts: 9802 }.encode().unwrap().into())).await.unwrap();
         assert!(matches!(control(&mut peer).await, ControlMessage::Pong { ts: 9802 }),
             "retiring the current socket must announce exactly one leave");
@@ -367,7 +367,7 @@ async fn control_messages_require_hello_and_revoke_requires_the_owner() {
     .await
     .unwrap();
     assert!(state.room(rid.as_str()).unwrap().devices[member.as_str()].revoked);
-    assert!(!state.is_online(member.as_str()));
+    assert!(!state.is_online(rid.as_str(), member.as_str()));
 }
 
 #[tokio::test]
@@ -384,7 +384,7 @@ async fn text_queues_offline_but_binary_requires_an_online_peer() {
         version: clipsync_protocol::PROTOCOL_VERSION,
         message_id: MessageId::new(),
         transfer_id: TransferId::new(),
-        room_id: rid,
+        room_id: rid.clone(),
         sender_device_id: owner,
         recipient: Recipient::Broadcast,
         sent_at: chrono::Utc::now(),
@@ -408,7 +408,10 @@ async fn text_queues_offline_but_binary_requires_an_online_peer() {
         }
     ));
     assert_eq!(
-        state.take_queue(member.as_str()).unwrap().ciphertext,
+        state
+            .take_queue(rid.as_str(), member.as_str())
+            .unwrap()
+            .ciphertext,
         "opaque-ciphertext"
     );
     let manifest = ControlMessage::Manifest {
@@ -438,7 +441,9 @@ async fn text_queues_offline_but_binary_requires_an_online_peer() {
         }
     ));
     let (peer_tx, mut peer_rx) = mpsc::channel(32);
-    state.register_conn(member.as_str(), peer_tx);
+    state
+        .register_conn(rid.as_str(), member.as_str(), peer_tx)
+        .unwrap();
     handle_control(&state, &tx, &mut ctx, envelope, None)
         .await
         .unwrap();
@@ -931,7 +936,7 @@ async fn regression_f88_revocation_closes_the_registered_socket_before_discardin
         ),
         "revoked socket was removed from routing without being told to close"
     );
-    assert!(!state.is_online(member.as_str()));
+    assert!(!state.is_online(rid.as_str(), member.as_str()));
     let room = state.room(rid.as_str()).unwrap();
     assert!(room.devices[member.as_str()].revoked);
     assert!(!room.devices[owner.as_str()].revoked);
@@ -950,10 +955,10 @@ async fn regression_f88_revocation_closes_the_registered_socket_before_discardin
         "device revoked"
     );
     assert!(
-        !state.is_online(member.as_str()),
+        !state.is_online(rid.as_str(), member.as_str()),
         "rejected credentials were re-registered as an online device"
     );
-    assert!(state.take_queue(owner.as_str()).is_none());
+    assert!(state.take_queue(rid.as_str(), owner.as_str()).is_none());
 }
 
 #[tokio::test]
@@ -1042,7 +1047,7 @@ async fn regression_f88_revoked_network_peer_is_closed_cannot_send_and_cannot_re
         .await
         .is_err());
     assert_eq!(state.frames_forwarded.load(Ordering::Relaxed), forwarded);
-    assert!(state.take_queue(owner.as_str()).is_none());
+    assert!(state.take_queue(rid.as_str(), owner.as_str()).is_none());
     let (mut rejected, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
     rejected
         .send(ClientMessage::Text(
@@ -1061,7 +1066,7 @@ async fn regression_f88_revoked_network_peer_is_closed_cannot_send_and_cannot_re
     assert!(
         matches!(ControlMessage::decode(&text).unwrap(), ControlMessage::Error { message, .. } if message == "device revoked")
     );
-    assert!(!state.is_online(member.as_str()));
+    assert!(!state.is_online(rid.as_str(), member.as_str()));
     assert_eq!(state.connections_total.load(Ordering::Relaxed), 2);
     owner_socket
         .send(ClientMessage::Text(
@@ -1365,7 +1370,7 @@ async fn regression_f98_expiry_discards_pending_spake_and_prevents_admission_or_
             .unwrap_err(),
         "pairing expired"
     );
-    assert!(!state.is_online(owner.as_str()));
+    assert!(state.pairing(sid.as_str()).unwrap().pairing_senders[0].is_none());
     assert!(owner_rx.try_recv().is_err());
     assert!(state
         .complete_pairing_bound(sid.as_str(), Some(offer.room_id.as_str()))
