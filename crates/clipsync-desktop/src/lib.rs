@@ -170,6 +170,8 @@ mod command_tests {
     }
 
     /// Confirmers for two windows whose users compare the codes they see.
+    /// Only the Unix-only full pairing test uses it.
+    #[cfg(unix)]
     fn sas_comparison() -> (SasConfirm, SasConfirm) {
         fn side(
             mine: tokio::sync::oneshot::Sender<String>,
