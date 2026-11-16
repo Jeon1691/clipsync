@@ -23,10 +23,10 @@ pub fn seal(
     plaintext: &[u8],
 ) -> Result<Vec<u8>, AeadError> {
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| AeadError::Encrypt)?;
-    let nonce = Nonce::from_slice(nonce);
+    let nonce = Nonce::from(*nonce);
     cipher
         .encrypt(
-            nonce,
+            &nonce,
             Payload {
                 msg: plaintext,
                 aad,
@@ -42,10 +42,10 @@ pub fn open(
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, AeadError> {
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| AeadError::Decrypt)?;
-    let nonce = Nonce::from_slice(nonce);
+    let nonce = Nonce::from(*nonce);
     cipher
         .decrypt(
-            nonce,
+            &nonce,
             Payload {
                 msg: ciphertext,
                 aad,

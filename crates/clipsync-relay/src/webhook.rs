@@ -4,7 +4,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use anyhow::Context;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use url::Url;
 
@@ -35,7 +35,7 @@ async fn deliver_event(
 ) -> anyhow::Result<()> {
     let body = serde_json::to_vec(&event)?;
     let ts = chrono::Utc::now().timestamp().to_string();
-    let event_id = ulid::Ulid::new().to_string();
+    let event_id = ulid::Ulid::generate().to_string();
     let mut mac =
         HmacSha256::new_from_slice(secret.as_bytes()).map_err(|e| anyhow::anyhow!("{e}"))?;
     mac.update(ts.as_bytes());

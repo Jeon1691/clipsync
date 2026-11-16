@@ -91,12 +91,11 @@ impl NoiseSession {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use rand::rngs::OsRng;
 
     #[test]
     fn noise_kk_handshake() {
-        let a = StaticSecret::random_from_rng(OsRng);
-        let b = StaticSecret::random_from_rng(OsRng);
+        let a = StaticSecret::random();
+        let b = StaticSecret::random();
         let a_pub = PublicKey::from(&a);
         let b_pub = PublicKey::from(&b);
         let mut init = NoiseHandshake::initiator(&a, &b_pub).unwrap();

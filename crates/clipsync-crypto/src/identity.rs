@@ -1,6 +1,5 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
-use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -25,7 +24,7 @@ pub struct StoredIdentity {
 
 impl DeviceIdentity {
     pub fn generate() -> Self {
-        let secret = StaticSecret::random_from_rng(OsRng);
+        let secret = StaticSecret::random();
         Self {
             device_id: DeviceId::new(),
             secret: secret.to_bytes(),

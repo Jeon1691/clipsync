@@ -14,7 +14,7 @@ struct Inbox(PathBuf);
 
 impl Inbox {
     fn new() -> Self {
-        Self(std::env::temp_dir().join(format!("clipsync-regression-{}", ulid::Ulid::new())))
+        Self(std::env::temp_dir().join(format!("clipsync-regression-{}", ulid::Ulid::generate())))
     }
 
     fn staging(&self) -> StagingArea {
