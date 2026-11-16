@@ -189,3 +189,67 @@ pub fn ignore_sighup() {
         let _ = signal(SIGHUP, SIG_IGN);
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    fn request(status: &str, pid: u32) -> PairingWait {
+        PairingWait {
+            status: status.into(),
+            pairing_code: "123 456".into(),
+            room_id: "room".into(),
+            expires_at: "2026-11-17T00:00:00Z".into(),
+            pid,
+            error: None,
+            sas: None,
+            peer_device_name: None,
+            sas_decision: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_live_background_pairing_blocks_a_new_create_with_its_next_step() {
+        let root = tempfile::tempdir().unwrap();
+        let app = App::open_from(clipsync_storage::AppPaths::from_root(
+            root.path().to_path_buf(),
+        ))
+        .unwrap();
+        let live = std::process::id();
+        for (status, next) in [
+            ("waiting", "join with: clipsync room join 123 456"),
+            (
+                crate::sas_prompt::STATUS_CONFIRM_SAS,
+                "compare codes with: clipsync room confirm",
+            ),
+        ] {
+            app.store.save_pairing_wait(&request(status, live)).unwrap();
+            let error = spawn_background_create(&app, None, false, false, false)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("already waiting in background"), "{error}");
+            assert!(error.contains(next), "{next:?}: {error}");
+            // The live request is left for its worker.
+            assert_eq!(
+                app.store.load_pairing_wait().unwrap().unwrap().status,
+                status
+            );
+        }
+    }
+
+    #[test]
+    fn worker_log_errors_prefer_the_last_relay_or_error_line() {
+        let log = "starting\nerror: relay create http://relay: refused\n\nbye\n";
+        assert_eq!(
+            extract_error_line(log).as_deref(),
+            Some("relay create http://relay: refused")
+        );
+        assert_eq!(
+            extract_error_line("websocket closed\n").as_deref(),
+            Some("websocket closed")
+        );
+        assert_eq!(extract_error_line("all good\n"), None);
+    }
+}

@@ -352,6 +352,14 @@ mod tests {
 
     impl spake2_rand_core::CryptoRng for SeededRng {}
 
+    /// A fresh pairing code for tests whose outcome must not depend on a
+    /// particular secret; only the pinned vectors use fixed inputs.
+    fn random_code() -> String {
+        // Six decimal digits, the relay's pairing-code format.
+        const PAIRING_CODE_SPACE: u32 = 1_000_000;
+        format!("{:06}", rand::random_range(0..PAIRING_CODE_SPACE))
+    }
+
     fn seeded(
         role: PairingRole,
         seed: u64,
@@ -372,11 +380,12 @@ mod tests {
 
     #[test]
     fn honest_peers_derive_the_same_sas() {
+        let code = random_code();
         let session = PairingSessionId::new();
         let a = DeviceId::from("dev-a");
         let b = DeviceId::from("dev-b");
-        let sa = start_pairing_a("482913", session.clone(), a.clone(), b.clone()).unwrap();
-        let sb = start_pairing_b("482913", session, a, b).unwrap();
+        let sa = start_pairing_a(&code, session.clone(), a.clone(), b.clone()).unwrap();
+        let sb = start_pairing_b(&code, session, a, b).unwrap();
         let (msg_a, msg_b) = (sa.outbound.clone(), sb.outbound.clone());
         let ka = finish_pairing(sa, &msg_b).unwrap();
         let kb = finish_pairing(sb, &msg_a).unwrap();
@@ -394,7 +403,7 @@ mod tests {
         let session = PairingSessionId::new();
         let a = DeviceId::from("dev-a");
         let b = DeviceId::from("dev-b");
-        let code = "482913";
+        let code = &random_code();
         let honest_a = seeded(PairingRole::A, 1, code, &session, &a, &b);
         let relay_as_b = seeded(PairingRole::B, 2, code, &session, &a, &b);
         let relay_as_a = seeded(PairingRole::A, 3, code, &session, &a, &b);
@@ -434,8 +443,9 @@ mod tests {
         let a = DeviceId::from("dev-a");
         let guesser = DeviceId::from("dev-guesser");
         let intended = DeviceId::from("dev-intended");
-        let creator = seeded(PairingRole::A, 5, "482913", &session, &a, &guesser);
-        let joiner = seeded(PairingRole::B, 6, "482913", &session, &a, &guesser);
+        let code = random_code();
+        let creator = seeded(PairingRole::A, 5, &code, &session, &a, &guesser);
+        let joiner = seeded(PairingRole::B, 6, &code, &session, &a, &guesser);
         let (msg_a, msg_b) = (creator.outbound.clone(), joiner.outbound.clone());
         let creator_keys = finish_pairing(creator, &msg_b).unwrap();
         let guesser_keys = finish_pairing(joiner, &msg_a).unwrap();
@@ -443,8 +453,8 @@ mod tests {
             short_authentication_string(&creator_keys),
             short_authentication_string(&guesser_keys)
         );
-        let other_a = seeded(PairingRole::A, 7, "482913", &session, &a, &intended);
-        let other_b = seeded(PairingRole::B, 8, "482913", &session, &a, &intended);
+        let other_a = seeded(PairingRole::A, 7, &code, &session, &a, &intended);
+        let other_b = seeded(PairingRole::B, 8, &code, &session, &a, &intended);
         let (msg_a, msg_b) = (other_a.outbound.clone(), other_b.outbound.clone());
         let intended_keys = finish_pairing(other_b, &msg_a).unwrap();
         let _ = finish_pairing(other_a, &msg_b).unwrap();

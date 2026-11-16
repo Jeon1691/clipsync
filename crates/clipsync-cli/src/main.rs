@@ -1,5 +1,6 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 mod cli;
 mod output;
 mod pairing_bg;

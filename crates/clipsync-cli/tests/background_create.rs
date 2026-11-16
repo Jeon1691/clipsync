@@ -595,7 +595,7 @@ async fn mismatched_or_rejected_verification_codes_store_nothing_on_either_devic
         for home in [a.path(), b.path()] {
             let rooms = json_out(&clipsync(home, &relay, &["--json", "room", "list"]));
             assert_eq!(rooms, serde_json::json!([]));
-            assert!(secrets_in(home).is_empty(), "{:?}", secrets_in(home));
+            assert!(secrets_in(home).is_empty());
         }
     }
     relay_task.abort();
