@@ -93,6 +93,36 @@ no client override; for a private CA, supply its public root PEM through
 `CLIPSYNC_CA_FILE`. This extends trust and preserves hostname/issuer validation.
 Never distribute the server private key to clients.
 
+## Cloudflare Tunnel
+
+`cloudflared` connects to the relay from the tunnel host, so without trusted
+proxies every visitor shares one pairing-join budget: one guesser, or a few
+mistyped codes from different users, refuses every pairing until the window
+ends. Cloudflare appends the address it received each request from to
+`X-Forwarded-For`, keeping any value the visitor sent, and `cloudflared`
+forwards that header to the origin. Trust only the address `cloudflared`
+connects from, and the relay uses that appended visitor address:
+
+- `cloudflared` on the Docker host, relay port published on host loopback (the
+  [Proxmox manifest](../deploy/proxmox/docker-compose.yml)): connections reach
+  the container from its network gateway. Pin the network's subnet and gateway
+  and trust the gateway, as the manifest does with `10.207.76.1`. If you change
+  the subnet, change `CLIPSYNC_RELAY_TRUSTED_PROXIES` with it.
+- `cloudflared` in a container on the same Compose network: give it a fixed
+  address on that network and trust that address.
+- `cloudflared` on the relay host without Docker: trust `127.0.0.1`.
+
+The relay does not read `CF-Connecting-IP` or other Cloudflare-specific headers.
+`X-Forwarded-For` is enough, and like every forwarded header it is honored only
+on connections from a trusted proxy. Two zone settings change what the relay
+sees. The *Remove visitor IP headers* Managed Transform drops the visitor
+address, so all visitors share the gateway's budget again. *Pseudo IPv4:
+Overwrite Headers* replaces IPv6 visitor addresses with pseudo IPv4 addresses
+in `X-Forwarded-For`; IPv6 visitors are then counted by that pseudo IPv4
+address instead of by their /64 prefix. Do not publish the relay port beyond
+host loopback: any client that can connect from a trusted address can claim any
+client address.
+
 ## Pairing-join limits
 
 The default budgets suit a small self-hosted relay. To tune them, set:
@@ -119,6 +149,11 @@ The live relay runs on the Proxmox host at `/opt/clipsync`:
 - container `clipsync-relay` bound to `127.0.0.1:7600`
 - Cloudflare Tunnel hostname `clipsync.develicit.dev` → that origin
 - public URL `https://clipsync.develicit.dev`
+- Compose network pinned to `10.207.76.0/29`, with its gateway `10.207.76.1`
+  as the only trusted proxy (see [Cloudflare Tunnel](#cloudflare-tunnel))
+
+Applying this manifest to a running deployment recreates the container on the
+pinned network. That restart loses in-memory rooms and pairing sessions.
 
 ```bash
 ssh proxmox

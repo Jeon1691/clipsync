@@ -33,7 +33,8 @@ address with a guesser is refused until the window ends. Anyone who can spend
 the relay-wide budget can keep blocking new pairings. This is a deliberate
 trade-off: guessing becomes a denial of service instead of a room compromise.
 Per-client limits use the TCP peer address unless trusted proxies are configured;
-see [self-hosting](self-hosting.md).
+see [self-hosting](self-hosting.md). The production Compose deployment trusts
+its pinned network gateway, so each Cloudflare visitor has its own budget.
 Operators can change these budgets, but startup rejects a relay-wide limit above
 50 per pairing TTL, which keeps the chance of guessing one session at or below
 10^-4. `/metrics` reports refused joins as `clipsync_pairing_throttled`.

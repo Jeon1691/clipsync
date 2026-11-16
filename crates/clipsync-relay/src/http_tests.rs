@@ -3,6 +3,7 @@
 use super::*;
 use axum::extract::ConnectInfo;
 use clipsync_protocol::{DeviceId, PairingSessionId, PROTOCOL_VERSION};
+use std::net::IpAddr;
 use tokio::net::TcpListener;
 
 #[tokio::test]
@@ -399,6 +400,82 @@ async fn exhausted_relay_wide_budget_answers_unknown_and_correct_codes_identical
     assert_eq!(
         serde_json::to_string(&unknown.1 .0).unwrap(),
         serde_json::to_string(&correct.1 .0).unwrap()
+    );
+}
+
+/// The production Compose manifest, so the test follows its real settings.
+const PROXMOX_COMPOSE: &str = include_str!("../../../deploy/proxmox/docker-compose.yml");
+
+/// The value of the first `key: value` line in `manifest`, unquoted.
+fn manifest_value<'a>(manifest: &'a str, key: &str) -> &'a str {
+    manifest
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(key)?.strip_prefix(':'))
+        .unwrap_or_else(|| panic!("{key} missing from the deploy manifest"))
+        .trim()
+        .trim_matches('"')
+}
+
+/// Regression for one shared pairing budget in the production deployment:
+/// cloudflared reaches the loopback-published port, so the relay sees every
+/// visitor as the Compose network gateway. The manifest must trust exactly that
+/// gateway, so the visitor address Cloudflare appends to `X-Forwarded-For`
+/// identifies the client and one guesser cannot lock out everyone else.
+#[tokio::test]
+async fn proxmox_cloudflare_tunnel_chain_gives_each_visitor_its_own_join_budget() {
+    let gateway: IpAddr = manifest_value(PROXMOX_COMPOSE, "gateway").parse().unwrap();
+    let subnet: ipnet::IpNet = manifest_value(PROXMOX_COMPOSE, "- subnet").parse().unwrap();
+    assert!(
+        subnet.contains(&gateway),
+        "gateway outside the pinned subnet"
+    );
+    let trusted: Vec<ipnet::IpNet> =
+        manifest_value(PROXMOX_COMPOSE, "CLIPSYNC_RELAY_TRUSTED_PROXIES")
+            .split(',')
+            .map(|entry| client_ip::parse_trusted_proxy(entry).unwrap())
+            .collect();
+    assert!(
+        trusted.iter().any(|net| net.contains(&gateway)),
+        "the deploy manifest does not trust its own network gateway"
+    );
+    let state = Arc::new(
+        RelayState::with_join_policy(
+            RelayConfig {
+                bind: "127.0.0.1:0".parse().unwrap(),
+                public_url: "http://127.0.0.1".into(),
+                token_secret: vec![35; 32],
+                webhook_url: None,
+                webhook_secret: None,
+            },
+            trusted,
+            PairingJoinLimits::default(),
+        )
+        .unwrap(),
+    );
+    let offer = create_offer(&state).await;
+    let tunnel = SocketAddr::new(gateway, 41_000);
+    // Cloudflare keeps whatever the visitor sent and appends the address it
+    // received the request from; cloudflared forwards the header unchanged.
+    let mut not_found = 0;
+    for (n, code) in wrong_codes(&offer).take(50).enumerate() {
+        let edge = forwarded_for(&format!("192.0.2.{n}, 198.51.100.20"));
+        match join_status(&state, tunnel, edge, &code).await {
+            StatusCode::NOT_FOUND => not_found += 1,
+            StatusCode::TOO_MANY_REQUESTS => break,
+            other => panic!("unexpected status {other}"),
+        }
+    }
+    assert_eq!(not_found, IP_FAILED_JOIN_LIMIT, "guesser was not limited");
+    assert_eq!(
+        join_status(
+            &state,
+            tunnel,
+            forwarded_for("203.0.113.20"),
+            &offer.pairing_code
+        )
+        .await,
+        StatusCode::OK,
+        "a different visitor was locked out by the guesser"
     );
 }
 
