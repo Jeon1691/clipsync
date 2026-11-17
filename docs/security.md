@@ -65,11 +65,24 @@ assurance case for current evidence and scope.
 
 ## Local storage
 
-For identity and room/epoch keys, the current implementation reads private files first and mirrors them to
-macOS Keychain / Windows Credential Manager when available. Linux currently
-uses private files; a Secret Service backend is not enabled. Secret files have
-mode `0600` on Unix. Unix data/inbox directories use `0700`; Windows relies on
-the user's profile-directory access controls rather than POSIX modes.
+The canonical copy of the device identity (`identity.json`) and of each room
+and epoch key (`room-<id>.secret`, `epoch-<id>.secret`) is a private file in
+the data directory, and loads read that file first. On macOS and Windows every
+save also mirrors the value to Keychain / Credential Manager on a best-effort
+basis (a failure is logged and the file remains authoritative). The mirror is
+consulted only when the file is missing; a recovered identity is re-cached as
+the private file, while recovered room/epoch keys are not. Linux and other Unix
+platforms use the private files only; there is no Secret Service backend.
+
+Every secret file, and `pairing.json` (which holds the live pairing code), is
+written through one helper: a temporary file in the destination directory is
+restricted to mode `0600` on Unix before any bytes are written, synced, and
+atomically renamed over the destination, followed by a parent-directory sync on
+Unix. A secret is therefore never readable under the process umask while being
+written, a crash leaves the previous file rather than a truncated one, and a
+link planted at the destination is replaced rather than followed. Unix
+data/inbox directories are set to `0700` (best effort) when storage opens; Windows
+relies on the user's profile-directory access controls rather than POSIX modes.
 Received filenames are sanitized to basenames.
 
 Device tokens are stored separately as `device-token-<hex-room-id>.secret`;
