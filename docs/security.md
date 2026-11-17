@@ -64,13 +64,20 @@ is not authenticated; only the code is.
 
 **The peer name is fixed before SPAKE2.** The creator takes the joiner's
 device ID and name from the relay's first `peer_joined`, and SPAKE2 starts
-only after it; the joiner takes the creator's from the join response. At that
-point the relay cannot know either code. A relay running both SPAKE2 sessions
-learns both codes afterwards, so it could otherwise announce the peer again
-under a name that spells the other device's code. Any later `peer_joined`
-with a different device ID or name aborts the pairing with nothing stored;
-an identical repeat changes nothing. The honest relay sends `peer_joined`
-during pairing only once, to the creator.
+only after it; the joiner takes the creator's from the join response. Any
+later `peer_joined` with a different device ID or name aborts the pairing
+with nothing stored; an identical repeat changes nothing. The honest relay
+announces the joiner to the creator again when a pairing connection
+re-registers, always with the same device, so those repeats are ignored.
+Pinning the name does not keep it from naming a code: a relay running both
+SPAKE2 sessions can finish the one with the joiner before it announces the
+joiner to the creator, so it already knows the joiner's code and can pick a
+name such as `verification code: 123 456`. What keeps such a name from
+passing for the code line is how it is shown (below): sanitized, quoted, on
+its own line labelled `other device:` and at most 40 columns wide. A name
+that only looks like a code line inside its quotes is still possible, so
+users compare the unquoted `verification code:` line, which carries no
+untrusted text.
 
 **Untrusted text next to the code.** The relay chooses the peer name it
 reports and the text of its error messages. Printed raw, terminal escape
@@ -90,7 +97,12 @@ escapes:
   en/em and other spaces), the remaining default-ignorable code points
   (soft hyphen, combining grapheme joiner, Hangul fillers U+115F, U+1160,
   U+3164 and U+FFA0, Khmer inherent vowels, Mongolian selectors, variation
-  selectors, tags), and the braille blank U+2800.
+  selectors, tags), and the braille blank U+2800;
+- combining marks past two on one base character, counted in the combining
+  diacritical marks blocks (U+0300-U+036F, U+1AB0-U+1AFF, U+1DC0-U+1DFF),
+  the marks for symbols U+20D0-U+20FF, the half marks U+FE20-U+FE2F and the
+  Cyrillic marks U+0483-U+0489, so a stack cannot draw over the code line.
+  Marks of a particular script are not counted.
 
 It also collapses runs of spaces and bounds the rendered width in terminal
 columns, counting two for every non-ASCII character: names to 40 columns,
@@ -98,9 +110,11 @@ relay messages to 256. The CLI prints the quoted peer name on an
 `other device:` line before the code, which sits alone on its own line with
 nothing untrusted printed after it; at 40 columns the name line cannot wrap on
 a terminal 56 columns or wider, and on a terminal at least 30 columns wide it
-cannot wrap into a row holding a whole forged code. The desktop app and the
-mobile `SasVerifier` receive the sanitized name and show it apart from the
-code.
+cannot wrap into a row holding a whole forged code. On a terminal 26 to 29
+columns wide the name can wrap into such a row; the real code line still
+follows the name line. Below 26 columns the real code line wraps too. The
+desktop app and the mobile `SasVerifier` receive the sanitized name and show
+it apart from the code.
 
 **Relay-chosen codes and IDs.** The pairing code, room ID and peer device ID
 that the CLI prints come from the relay. The client accepts a pairing code

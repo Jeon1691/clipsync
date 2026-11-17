@@ -9,7 +9,8 @@
 //! verification code shown next to it. Blank-looking or invisible characters
 //! (ideographic space, braille blank, Hangul fillers, zero-width and other
 //! default-ignorable code points) could pad a name until it wraps into a row
-//! that looks like the code. [`sanitize_untrusted`] keeps the text readable
+//! that looks like the code, and a tall stack of combining marks could draw
+//! over the lines next to it. [`sanitize_untrusted`] keeps the text readable
 //! but makes every such character visible and inert, and bounds how many
 //! terminal columns it can fill.
 
@@ -18,7 +19,8 @@
 /// `other device: "…"` label the line stays within 56 columns, so it cannot
 /// wrap on a terminal of that width or more; on any terminal at least 30
 /// columns wide the name is too short to wrap into a row that starts with a
-/// forged `verification code: ddd ddd` (26 columns).
+/// forged `verification code: ddd ddd` (26 columns). On one 26 to 29 columns
+/// wide it can, but the real code line still follows it.
 pub const MAX_PEER_NAME_COLUMNS: usize = 40;
 /// Widest relay-supplied error message shown, in terminal columns: enough for
 /// the relay's own one-line errors, short of flooding the terminal.
@@ -28,6 +30,10 @@ pub const MAX_RELAY_MESSAGE_COLUMNS: usize = 256;
 /// while keeping a printed line short.
 pub const MAX_IDENTIFIER_LEN: usize = 64;
 
+/// Most combining marks shown on one base character. Real text needs at most
+/// two (a Vietnamese tone on a vowel mark, a diaeresis with an accent); a
+/// taller stack draws over the lines above and below, such as the code line.
+pub const MAX_COMBINING_MARKS_PER_BASE: usize = 2;
 /// Marks text cut at the width bound.
 const TRUNCATION_MARK: char = '…';
 /// Columns counted for an ASCII character.
@@ -47,8 +53,9 @@ fn columns(c: char) -> usize {
 }
 
 /// Replace every character that can move the cursor, reorder text, or show
-/// as blank or nothing with a visible `\u{…}` escape, collapse runs of spaces
-/// to one, and cut the result to at most `max_columns` terminal columns
+/// as blank or nothing with a visible `\u{…}` escape, as well as combining
+/// marks stacked past [`MAX_COMBINING_MARKS_PER_BASE`], collapse runs of
+/// spaces to one, and cut the result to at most `max_columns` terminal columns
 /// (including a trailing `…` when cut). Applying it again changes nothing.
 pub fn sanitize_untrusted(raw: &str, max_columns: usize) -> String {
     let budget = max_columns.saturating_sub(columns(TRUNCATION_MARK));
@@ -57,12 +64,19 @@ pub fn sanitize_untrusted(raw: &str, max_columns: usize) -> String {
     // Length of `out` before the first piece that overflows `budget`: where
     // the text is cut, leaving room for the mark, if it ends up too wide.
     let mut cut_at = None;
+    // Combining marks since the last other character.
+    let mut marks_on_base = 0;
     for c in raw.chars() {
         // Padding made of plain spaces collapses to one.
         if c == ' ' && out.ends_with(' ') {
             continue;
         }
-        let piece = if must_escape(c) {
+        marks_on_base = if is_combining_mark(c) {
+            marks_on_base + 1
+        } else {
+            0
+        };
+        let piece = if must_escape(c) || marks_on_base > MAX_COMBINING_MARKS_PER_BASE {
             c.escape_unicode().to_string()
         } else {
             c.to_string()
@@ -107,6 +121,29 @@ pub fn shown_identifier(id: &str) -> String {
 
 fn must_escape(c: char) -> bool {
     rewrites_display(c) || looks_blank_or_invisible(c)
+}
+
+/// Combining marks that stack on any base character, the kind used to draw
+/// over neighbouring lines: the combining diacritical marks and their
+/// extended and supplement blocks, the marks for symbols, the combining half
+/// marks, and the Cyrillic combining and enclosing marks. Marks of a
+/// particular script (Hebrew points, Thai vowels, …) are not counted.
+fn is_combining_mark(c: char) -> bool {
+    matches!(
+        c,
+        // Combining diacritical marks.
+        '\u{0300}'..='\u{036f}'
+        // Cyrillic combining and enclosing marks.
+        | '\u{0483}'..='\u{0489}'
+        // Combining diacritical marks extended.
+        | '\u{1ab0}'..='\u{1aff}'
+        // Combining diacritical marks supplement.
+        | '\u{1dc0}'..='\u{1dff}'
+        // Combining diacritical marks for symbols.
+        | '\u{20d0}'..='\u{20ff}'
+        // Combining half marks.
+        | '\u{fe20}'..='\u{fe2f}'
+    )
 }
 
 /// Characters a terminal or text view acts on instead of showing: C0 and C1
@@ -314,6 +351,41 @@ mod tests {
         assert!(!shown.contains("verification code"), "{shown:?}");
         assert!(rendered_columns(&shown) <= MAX_PEER_NAME_COLUMNS);
         for raw in [wide.as_str(), forged.as_str(), "a   b\u{3000}\u{3000}c"] {
+            let once = sanitize_untrusted(raw, MAX_PEER_NAME_COLUMNS);
+            assert_eq!(sanitize_untrusted(&once, MAX_PEER_NAME_COLUMNS), once);
+        }
+    }
+
+    #[test]
+    fn stacked_combining_marks_are_capped_per_base_character() {
+        // Accents an ordinary name needs render as they are.
+        for name in ["e\u{301}", "a\u{308}\u{301}x", "Pixel\u{20dd}"] {
+            assert_eq!(sanitize_untrusted(name, MAX_PEER_NAME_COLUMNS), name);
+        }
+        // Marks stacked past the cap would draw over the lines above and
+        // below the name, so the extra ones are shown as escapes.
+        let stacked = format!("a{}b", "\u{30d}".repeat(MAX_COMBINING_MARKS_PER_BASE + 2));
+        let kept = "\u{30d}".repeat(MAX_COMBINING_MARKS_PER_BASE);
+        let escaped = "\\u{30d}".repeat(2);
+        assert_eq!(
+            sanitize_untrusted(&stacked, MAX_RELAY_MESSAGE_COLUMNS),
+            format!("a{kept}{escaped}b")
+        );
+        // Every combining block counts towards the same cap, and the count
+        // starts again at the next base character, including an escape.
+        let mixed = "x\u{300}\u{1ab0}\u{1dc0}\u{20d0}\u{fe20}y\u{483}\u{489}\u{36f}\u{1b}\u{300}";
+        assert_eq!(
+            sanitize_untrusted(mixed, MAX_RELAY_MESSAGE_COLUMNS),
+            "x\u{300}\u{1ab0}\\u{1dc0}\\u{20d0}\\u{fe20}y\u{483}\u{489}\\u{36f}\\u{1b}\u{300}"
+        );
+        // Marks with no base character before them are capped too.
+        let leading = "\u{301}".repeat(MAX_COMBINING_MARKS_PER_BASE + 1);
+        let shown = sanitize_untrusted(&leading, MAX_PEER_NAME_COLUMNS);
+        assert_eq!(
+            shown.chars().filter(|&c| c == '\u{301}').count(),
+            MAX_COMBINING_MARKS_PER_BASE
+        );
+        for raw in [stacked.as_str(), mixed, leading.as_str()] {
             let once = sanitize_untrusted(raw, MAX_PEER_NAME_COLUMNS);
             assert_eq!(sanitize_untrusted(&once, MAX_PEER_NAME_COLUMNS), once);
         }

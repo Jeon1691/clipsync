@@ -469,19 +469,26 @@ where
                         match &peer_id {
                             // The creator learns the joiner here, and SPAKE2
                             // starts right after: pin the identity and name
-                            // now, while the relay cannot know any code.
+                            // now. A relay running both SPAKE2 sessions may
+                            // already know the joiner's code and pick a name
+                            // that spells it; the quoted, labelled,
+                            // width-bounded name line is what keeps that from
+                            // passing for the code line.
                             None => {
                                 check_relay_ids(&room_id, Some(&device.device_id))?;
                                 peer_id = Some(device.device_id);
                                 peer_name = Some(device.device_name);
                             }
-                            // A repeated announcement changes nothing.
+                            // A repeated announcement changes nothing: the
+                            // honest relay re-sends it when a pairing
+                            // connection re-registers.
                             Some(pinned)
                                 if *pinned == device.device_id
                                     && peer_name.as_deref() == Some(device.device_name.as_str()) => {}
                             // A relay running both SPAKE2 sessions knows both
                             // codes by now and could pick a name that forges
-                            // a code line. The honest relay never does this.
+                            // a code line. The honest relay never changes the
+                            // announced device.
                             Some(_) => {
                                 let _ = conn
                                     .send_control(ControlMessage::Error {
