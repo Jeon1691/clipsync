@@ -254,8 +254,12 @@ impl ReceiveMark {
     fn backfill(&self, dir: &Path) {
         #[cfg(target_os = "macos")]
         {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                return;
+            let entries = match std::fs::read_dir(dir) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    tracing::warn!(%error, "could not list received files to quarantine");
+                    return;
+                }
             };
             for entry in entries.flatten() {
                 if entry.file_type().is_ok_and(|kind| kind.is_file()) {
@@ -434,6 +438,8 @@ fn publish(
                 // even that fails, keep it: the next sweep restores it.
                 if std::fs::rename(&retired.path, dest_dir).is_err() {
                     retired.keep();
+                } else {
+                    mark.backfill(dest_dir);
                 }
                 return Err(err.into());
             }
@@ -522,12 +528,11 @@ fn sweep_stale_staging(root: &Path, now: SystemTime, max_age: Duration) -> usize
             let dest = root.join(id);
             match std::fs::symlink_metadata(&dest) {
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    let restored = std::fs::rename(&path, &dest).is_ok();
-                    if restored {
-                        // Its own receive event, not the running commit's.
-                        ReceiveMark::new().backfill(&dest);
-                    }
-                    restored
+                    // Mark while the directory is still private, so a crash
+                    // between the two steps never publishes unmarked files.
+                    // Its own receive event, not the running commit's.
+                    ReceiveMark::new().backfill(&path);
+                    std::fs::rename(&path, &dest).is_ok()
                 }
                 Ok(_) => std::fs::remove_dir_all(&path).is_ok(),
                 Err(_) => false,
