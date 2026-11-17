@@ -178,10 +178,16 @@ pub async fn join_room(
         return Err(CoreError::Pairing(format!("relay join {url}: {error}")));
     }
     if !resp.status().is_success() {
+        let throttled = resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS;
         let body = resp.text().await.unwrap_or_default();
         if body.contains("code_invalid") || body.contains("code_expired") {
             return Err(CoreError::Pairing(
                 "unknown or expired pairing code; on the other device run `clipsync room create` again".into(),
+            ));
+        }
+        if throttled || body.contains("too_many_attempts") {
+            return Err(CoreError::Pairing(
+                "the relay is limiting pairing attempts; wait a few minutes, then run `clipsync room create` again on the other device and retry with the new code".into(),
             ));
         }
         return Err(CoreError::Pairing(format!("join failed: {body}")));
@@ -781,10 +787,14 @@ mod tests {
         let store =
             LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
         let identity = DeviceIdentity::from_bytes("http-failure".into(), [31; 32]);
-        for body in [
-            "code_invalid",
-            "code_expired",
-            "busy: joiner already connected",
+        for (status, body) in [
+            (StatusCode::CONFLICT, "code_invalid"),
+            (StatusCode::CONFLICT, "code_expired"),
+            (StatusCode::CONFLICT, "busy: joiner already connected"),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                r#"{"code":"too_many_attempts","message":"pairing attempt limit reached"}"#,
+            ),
         ] {
             let server = crate::test_relay::Server::http(
                 Router::new()
@@ -794,7 +804,7 @@ mod tests {
                     )
                     .route(
                         "/v1/pairing/join",
-                        post(move || async move { (StatusCode::CONFLICT, body) }),
+                        post(move || async move { (status, body) }),
                     ),
             )
             .await;
@@ -809,6 +819,8 @@ mod tests {
                 .unwrap_err();
             if body.starts_with("code_") {
                 assert!(join.to_string().contains("unknown or expired pairing code"));
+            } else if status == StatusCode::TOO_MANY_REQUESTS {
+                assert!(join.to_string().contains("limiting pairing attempts"));
             } else {
                 assert!(join.to_string().contains(body));
             }

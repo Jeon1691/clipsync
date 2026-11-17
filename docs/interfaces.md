@@ -194,7 +194,7 @@ limit is 393,216 bytes (384 KiB).
 | Endpoint | Request | Success response |
 | --- | --- | --- |
 | `GET /healthz` | No body or authentication. | `200`, JSON `{ok: true, service: "clipsync-relay"}`. |
-| `GET /metrics` | No body or authentication. | `200`, plain text metric lines: `clipsync_ws_connections`, `clipsync_frames_forwarded`, `clipsync_pairing_ok`, `clipsync_pairing_fail`, `clipsync_expired`, each followed by a numeric value and newline. |
+| `GET /metrics` | No body or authentication. | `200`, plain text metric lines: `clipsync_ws_connections`, `clipsync_frames_forwarded`, `clipsync_pairing_ok`, `clipsync_pairing_fail`, `clipsync_pairing_throttled` (joins refused because a failed-join budget was spent), `clipsync_expired`, each followed by a numeric value and newline. |
 | `POST /v1/pairing/create` | `{pairing_session_id, device_id, device_name, os: string, protocol_version: u16, ttl_secs?: u64\|null}`. Version must be `1`. | `{room_id, pairing_code, pairing_token: string, expires_at: time, ws_path: "/v1/ws"}`. Pairing code is a six-character decimal string, valid for 120 seconds. `ttl_secs` defaults to 60 and is clamped to 10–300 as the room's stored default TTL. |
 | `POST /v1/pairing/join` | `{pairing_code, device_id, device_name, os: string, protocol_version: u16}`. Version must be `1`; joiner must be a different device. | `{pairing_session_id, room_id, pairing_token: string, peer: PeerInfo, expires_at: time, ws_path: "/v1/ws"}`. `peer` describes the creator. One joiner per session. |
 | `GET /v1/ws[?token=TOKEN]` | Standard WebSocket upgrade; optional query token. Authentication occurs in the `hello` text frame after upgrade. | `101 Switching Protocols`, then the messages below. |
@@ -208,7 +208,7 @@ Handler-generated HTTP failures have the JSON shape
 | create / 400 | `pairing_create` | Pairing creation failed, for example code allocation failure. |
 | join / 404 | `code_invalid` | Unknown code, including expired sessions already removed by cleanup. |
 | join / 410 | `code_expired` | Session exists but has expired. |
-| join / 429 | `too_many_attempts` | Pairing attempt limit reached. |
+| join / 429 | `too_many_attempts` | Pairing attempt limit reached: the session's attempts, the client's failed joins, or the relay-wide failed-join budget. Returned even for a correct code once a failure budget is spent. |
 | join / 409 | `busy` | Session already has a joiner or is completed. |
 | join / 400 | `join_failed` | Other join rejection, including using the creator's device ID. |
 
