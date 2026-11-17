@@ -73,6 +73,14 @@ pub struct SasMode {
 /// REDUCED line, or the command was given `--accept-reduced-protection`.
 /// `pairing.require_commitment` never gets this far: the pairing is refused
 /// before any code exists.
+/// True when the answer will come from a person who has just read the
+/// announcement: the text (not JSON) went to a terminal, and the answer is
+/// read from one. Output redirected to a file, or a program driving the CLI
+/// through JSON, has not shown the REDUCED line to anyone.
+fn person_sees_the_prompt(mode: SasMode) -> bool {
+    !mode.json && io::stdin().is_terminal() && io::stdout().is_terminal()
+}
+
 fn unacknowledged_reduced_protection(
     protection: SasProtection,
     mode: SasMode,
@@ -99,9 +107,11 @@ pub fn terminal_confirmer(mode: SasMode) -> SasConfirm {
                 );
                 return SasDecision::Rejected;
             }
-            if let Some(refusal) =
-                unacknowledged_reduced_protection(check.protection, mode, io::stdin().is_terminal())
-            {
+            if let Some(refusal) = unacknowledged_reduced_protection(
+                check.protection,
+                mode,
+                person_sees_the_prompt(mode),
+            ) {
                 eprintln!("error: {refusal}; pairing aborted and nothing was stored");
                 return SasDecision::Rejected;
             }
@@ -305,7 +315,7 @@ where
         // request can still be confirmed with the acknowledgement or rejected.
         state_protection(mode, protection);
         if let Some(refusal) = unacknowledged_reduced_protection(protection, mode, false) {
-            return Err(CoreError::Pairing(refusal.into()));
+            return Err(still_open(refusal));
         }
         if entered == sas {
             SasDecision::Confirmed
@@ -320,9 +330,9 @@ where
             ));
         }
         if let Some(refusal) =
-            unacknowledged_reduced_protection(protection, mode, io::stdin().is_terminal())
+            unacknowledged_reduced_protection(protection, mode, person_sees_the_prompt(mode))
         {
-            return Err(CoreError::Pairing(refusal.into()));
+            return Err(still_open(refusal));
         }
         // The worker keeps running while the user compares. If the pairing
         // ends meanwhile (the other device rejected, it expired, `room
@@ -549,6 +559,13 @@ async fn pairing_ended(app: &App, asked: &PairingWait, deadline: Instant) -> Cor
 )]
 fn load_live(app: &App) -> Result<PairingWait, CoreError> {
     app.store.load_pairing_wait()?.ok_or_else(no_pairing)
+}
+
+/// A refusal that recorded nothing: the background pairing keeps waiting.
+fn still_open(refusal: &str) -> CoreError {
+    CoreError::Message(format!(
+        "{refusal}; the pairing request is still open (confirm it again, or run `clipsync room reject`)"
+    ))
 }
 
 fn no_pairing() -> CoreError {

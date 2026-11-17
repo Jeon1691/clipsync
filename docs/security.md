@@ -198,8 +198,8 @@ local text, apart from the peer's name) before the answer counts; `room
 confirm CODE`, which shows no code, prints it once `CODE` has been read. Under
 `protection: REDUCED` a match is trustworthy only on a relay the user trusts,
 so an answer that no person gave right after seeing the REDUCED line (`room
-confirm CODE`, or a prompt answer read from a pipe or file) is refused before
-comparing unless the command was given `--accept-reduced-protection`.
+confirm CODE`, a prompt answer read from a pipe or file, or a prompt whose
+output is redirected or in `--json`) is refused before comparing unless the command was given `--accept-reduced-protection`.
 Otherwise a relay that downgraded the creator could have a scripted
 confirmation approve a code it searched for without the warning reaching
 anyone. With `pairing.require_commitment` set, the pairing is refused before

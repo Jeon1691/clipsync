@@ -123,7 +123,13 @@ fn clipsync(home: &Path, args: &[&str], answer: Option<&str>) -> Output {
         .expect("run clipsync");
     if let Some(answer) = answer {
         let mut stdin = child.stdin.take().unwrap();
-        stdin.write_all(answer.as_bytes()).unwrap();
+        // A refusal may exit before reading its answer; that is not an error.
+        match stdin.write_all(answer.as_bytes()) {
+            Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => {
+                panic!("write answer: {error}")
+            }
+            _ => {}
+        }
     }
     let deadline = Instant::now() + RUN_BUDGET;
     while child.try_wait().unwrap().is_none() {
@@ -218,6 +224,7 @@ fn piped_prompt_answer_under_reduced_protection_needs_acknowledgement() {
     let refused = clipsync(home.path(), &["room", "confirm"], Some(&answer));
     let shown_refused = shown(&refused);
     assert!(!refused.status.success(), "{shown_refused}");
+    assert!(shown_refused.contains("still open"), "{shown_refused}");
     assert!(shown_refused.contains(REDUCED_LINE), "{shown_refused}");
     assert!(shown_refused.contains(ACKNOWLEDGE_FLAG), "{shown_refused}");
     assert_eq!(decision(&store), None, "{shown_refused}");
