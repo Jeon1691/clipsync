@@ -31,7 +31,7 @@ use clipsync_protocol::{
 pub use join_limits::PairingJoinLimits;
 #[cfg(test)]
 use join_limits::IP_FAILED_JOIN_LIMIT;
-pub use state::RelayState;
+pub use state::{RelayState, MAX_MEMBER_SOCKETS};
 pub use transport::RelayTransportConfig;
 
 #[derive(Clone, Debug)]
