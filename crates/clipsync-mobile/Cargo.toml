@@ -36,6 +36,7 @@ tempfile.workspace = true
 axum.workspace = true
 chrono.workspace = true
 clipsync-relay = { path = "../clipsync-relay" }
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

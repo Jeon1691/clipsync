@@ -6,14 +6,17 @@ fn pending_pairing(state: &RelayState) -> (PairingSessionId, ConnCtx) {
     let sid = PairingSessionId::new();
     let device = DeviceId::new();
     let offer = state
-        .create_pairing(CreatePairingRequest {
-            protocol_version: clipsync_protocol::PROTOCOL_VERSION,
-            pairing_session_id: sid.clone(),
-            device_id: device.clone(),
-            device_name: "owner".into(),
-            os: "fixture".into(),
-            ttl_secs: Some(60),
-        })
+        .create_pairing(
+            CreatePairingRequest {
+                protocol_version: clipsync_protocol::PROTOCOL_VERSION,
+                pairing_session_id: sid.clone(),
+                device_id: device.clone(),
+                device_name: "owner".into(),
+                os: "fixture".into(),
+                ttl_secs: Some(60),
+            },
+            std::net::Ipv4Addr::LOCALHOST.into(),
+        )
         .unwrap();
     (
         sid.clone(),
@@ -23,6 +26,11 @@ fn pending_pairing(state: &RelayState) -> (PairingSessionId, ConnCtx) {
             pairing_sid: Some(sid.to_string()),
             device_role: DeviceRole::Owner,
             pairing_side: None,
+            client: TEST_CLIENT,
+            member_conn: None,
+            presence: None,
+            pairing_deadline: None,
+            _live: state.live_connection(),
         },
     )
 }
@@ -55,7 +63,6 @@ async fn pairing_registration_rejects_wrong_room_completion_and_identity_without
             .expect("invalid admission was accepted");
         assert_eq!(error, expected, "{case}");
         assert!(ctx.pairing_side.is_none(), "{case}");
-        assert!(state.connections.is_empty(), "{case}");
         assert!(rx.try_recv().is_err(), "{case}");
         assert!(state
             .pairing(sid.as_str())
@@ -63,6 +70,7 @@ async fn pairing_registration_rejects_wrong_room_completion_and_identity_without
             .pairing_senders
             .iter()
             .all(Option::is_none));
+        assert!(state.member_routes.is_empty(), "{case}");
     }
 }
 
@@ -152,12 +160,10 @@ async fn repeated_hello_cannot_switch_authenticated_identity_or_replace_its_rout
     );
     assert_eq!(ctx.as_ref().unwrap().device_id, owner.as_str());
     assert_eq!(ctx.as_ref().unwrap().device_role, DeviceRole::Owner);
-    assert!(state
-        .connections
-        .get(owner.as_str())
-        .unwrap()
-        .same_channel(&tx));
-    assert!(!state.is_online(member.as_str()));
+    let senders = state.member_senders(rid.as_str(), owner.as_str());
+    assert_eq!(senders.len(), 1);
+    assert!(senders[0].1.same_channel(&tx));
+    assert!(!state.is_online(rid.as_str(), member.as_str()));
     assert!(rx.try_recv().is_err());
 }
 
@@ -183,7 +189,7 @@ async fn revoking_an_offline_member_and_reporting_client_errors_preserve_the_own
     .await
     .unwrap();
     assert!(state.room(rid.as_str()).unwrap().devices[member.as_str()].revoked);
-    assert!(state.is_online(owner.as_str()));
+    assert!(state.is_online(rid.as_str(), owner.as_str()));
     for authenticated in [false, true] {
         let error = ControlMessage::Error {
             code: "client-report".into(),
@@ -198,7 +204,7 @@ async fn revoking_an_offline_member_and_reporting_client_errors_preserve_the_own
                 .await
                 .unwrap();
         }
-        assert!(state.is_online(owner.as_str()));
+        assert!(state.is_online(rid.as_str(), owner.as_str()));
         assert!(state.room(rid.as_str()).is_some());
     }
     handle_control(&state, &tx, &mut ctx, ControlMessage::Ping { ts: 77 }, None)

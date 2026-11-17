@@ -32,6 +32,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: 1.95.0
+          targets: aarch64-linux-android
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Linux desktop dependencies
         run: |
@@ -39,6 +40,19 @@ jobs:
           sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev
       - name: Check minimum supported Rust version
         run: cargo +1.95.0 check --workspace --all-targets --locked
+      # The mobile library runs the engine, whose replay-state lock lives in
+      # clipsync-storage. std's File::lock is Unsupported on Android before
+      # Rust 1.98, so the lock calls flock directly; check that it builds.
+      # ring and blake3 compile C: use the NDK preinstalled on the runner.
+      - name: Check storage for Android at minimum Rust
+        env:
+          # Oldest API level the current NDK supports; it only selects C headers.
+          ANDROID_API_LEVEL: "21"
+        run: |
+          ndk_bin="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="$ndk_bin/aarch64-linux-android${ANDROID_API_LEVEL}-clang"
+          export AR_aarch64_linux_android="$ndk_bin/llvm-ar"
+          cargo +1.95.0 check -p clipsync-storage --target aarch64-linux-android --locked
 
   test:
     name: ${{ matrix.platform }}

@@ -963,7 +963,6 @@ dependencies = [
  "clipsync-protocol",
  "clipsync-relay",
  "clipsync-storage",
- "humantime",
  "libc",
  "serde",
  "serde_json",
@@ -979,6 +978,7 @@ dependencies = [
  "arboard",
  "async-trait",
  "clipsync-protocol",
+ "clipsync-transfer",
  "directories",
  "image",
  "infer",
@@ -987,6 +987,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "parking_lot 0.13.0",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -1102,6 +1103,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "uniffi",
 ]
 
@@ -1147,6 +1149,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "subtle",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -1169,6 +1172,7 @@ dependencies = [
  "directories",
  "hex",
  "keyring",
+ "rustix 1.1.6",
  "serde",
  "serde_json",
  "tempfile",
@@ -1183,11 +1187,15 @@ name = "clipsync-transfer"
 version = "0.2.0"
 dependencies = [
  "blake3",
+ "chrono",
  "clipsync-crypto",
  "clipsync-protocol",
+ "libc",
+ "rustix 1.1.6",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tracing",
  "ulid",
 ]
 
@@ -2544,12 +2552,6 @@ name = "httpdate"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
-
-[[package]]
-name = "humantime"
-version = "2.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15cdd26707701c53297e2fa6afb323d55fbc1d0810c3aec078ae3ef0424c3c15"
 
 [[package]]
 name = "hybrid-array"

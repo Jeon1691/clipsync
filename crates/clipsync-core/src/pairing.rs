@@ -23,7 +23,7 @@ use clipsync_transport::{join_ws, Incoming, RelayConnection};
 use crate::untrusted_text::{
     is_plain_identifier, sanitize_untrusted, MAX_PEER_NAME_COLUMNS, MAX_RELAY_MESSAGE_COLUMNS,
 };
-use crate::{current_os, device_name, http_client, CoreError};
+use crate::{current_os, device_name, http_client, relay_redirect_error, CoreError};
 
 /// Advisory error code sent to the relay when the local user rejects the SAS.
 /// The relay aborts the pairing session on any client `Error` frame.
@@ -101,8 +101,25 @@ fn malformed(what: &str) -> CoreError {
     ))
 }
 
+/// Decode a create or join response. The protocol types refuse a room or
+/// device ID that breaks the wire rule (`clipsync_protocol::validate_id`)
+/// while decoding, so that failure, like any other bad body, is reported as
+/// a malformed response instead of a bare decoding error. The decoder's own
+/// message is left out: it may quote relay-chosen text.
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
+async fn decode_pairing_response<T: serde::de::DeserializeOwned>(
+    resp: reqwest::Response,
+) -> Result<T, CoreError> {
+    let body = resp.bytes().await?;
+    serde_json::from_slice(&body).map_err(|_| malformed("pairing response"))
+}
+
 /// Check the values of a create or join response that the CLI prints and
-/// the store keeps before anything is shown or stored.
+/// the store keeps before anything is shown or stored. Decoding already
+/// enforces the ID rule; this re-check covers IDs built unchecked (`From`).
 #[expect(
     clippy::result_large_err,
     reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
@@ -309,8 +326,9 @@ pub async fn begin_create_room(
         protocol_version: PROTOCOL_VERSION,
         ttl_secs: Some(ttl_secs),
     };
+    let security = clipsync_transport::check_relay_url(&cfg.relay_url)?;
     let url = format!("{}/v1/pairing/create", cfg.relay_url.trim_end_matches('/'));
-    let resp = http_client()
+    let resp = http_client(security)
         .post(&url)
         .json(&req)
         .send()
@@ -321,11 +339,14 @@ pub async fn begin_create_room(
                 crate::error::format_error(&e)
             ))
         })?;
+    if let Some(error) = relay_redirect_error(&resp) {
+        return Err(CoreError::Pairing(format!("relay create {url}: {error}")));
+    }
     if !resp.status().is_success() {
         let body = relay_text(&resp.text().await.unwrap_or_default());
         return Err(CoreError::Pairing(format!("create failed: {body}")));
     }
-    let created: CreatePairingResponse = resp.json().await?;
+    let created: CreatePairingResponse = decode_pairing_response(resp).await?;
     // The code and room ID are printed and the room ID is stored.
     if !is_pairing_code(&created.pairing_code) {
         return Err(malformed("pairing code"));
@@ -405,8 +426,9 @@ where
         os: current_os().into(),
         protocol_version: PROTOCOL_VERSION,
     };
+    let security = clipsync_transport::check_relay_url(&cfg.relay_url)?;
     let url = format!("{}/v1/pairing/join", cfg.relay_url.trim_end_matches('/'));
-    let resp = http_client()
+    let resp = http_client(security)
         .post(&url)
         .json(&req)
         .send()
@@ -417,17 +439,26 @@ where
                 crate::error::format_error(&e)
             ))
         })?;
+    if let Some(error) = relay_redirect_error(&resp) {
+        return Err(CoreError::Pairing(format!("relay join {url}: {error}")));
+    }
     if !resp.status().is_success() {
+        let throttled = resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS;
         let body = resp.text().await.unwrap_or_default();
         if body.contains("code_invalid") || body.contains("code_expired") {
             return Err(CoreError::Pairing(
                 "unknown or expired pairing code; on the other device run `clipsync room create` again".into(),
             ));
         }
+        if throttled || body.contains("too_many_attempts") {
+            return Err(CoreError::Pairing(
+                "the relay is limiting pairing attempts; wait a few minutes, then run `clipsync room create` again on the other device and retry with the new code".into(),
+            ));
+        }
         let body = relay_text(&body);
         return Err(CoreError::Pairing(format!("join failed: {body}")));
     }
-    let joined: JoinPairingResponse = resp.json().await?;
+    let joined: JoinPairingResponse = decode_pairing_response(resp).await?;
     check_relay_ids(&joined.room_id, Some(&joined.peer.device_id))?;
     let ws = join_ws(&cfg.relay_url, &joined.ws_path);
     let conn = connect_relay_ws(&ws).await?;
@@ -977,6 +1008,8 @@ fn device_bind_nonce(
 async fn connect_relay_ws(ws: &str) -> Result<RelayConnection, CoreError> {
     match RelayConnection::connect(ws).await {
         Ok(conn) => Ok(conn),
+        // A policy refusal will not change on retry; keep its usage exit code.
+        Err(clipsync_transport::TransportError::RelayUrl(e)) => Err(e.into()),
         Err(e) => {
             tracing::warn!(error = %e, %ws, "websocket connect failed; retrying");
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -2430,16 +2463,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pairing_refuses_plaintext_relays_before_sending_the_code() {
+        // The pairing code is the SPAKE2 password; it must never be POSTed to
+        // a plaintext non-loopback relay. A refused policy check returns
+        // immediately, well inside this bound, while a real request to the
+        // non-routable documentation address would hang until its timeout.
+        const POLICY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+        // Clear an ambient opt-in so the result does not depend on the shell
+        // that runs the suite.
+        std::env::remove_var(clipsync_transport::ALLOW_INSECURE_RELAY_ENV);
+        let directory = tempfile::TempDir::new().unwrap();
+        let store =
+            LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+        let identity = DeviceIdentity::from_bytes("plaintext-relay".into(), [41; 32]);
+        for relay_url in ["http://192.0.2.1:7600", "relay.example.test"] {
+            let cfg = AppConfig {
+                relay_url: relay_url.into(),
+                ..Default::default()
+            };
+            let create =
+                tokio::time::timeout(POLICY_DEADLINE, begin_create_room(&identity, &cfg, 60))
+                    .await
+                    .expect("create contacted the relay")
+                    .err()
+                    .unwrap();
+            assert!(matches!(create, CoreError::RelayUrl(_)), "{create}");
+            let join = tokio::time::timeout(
+                POLICY_DEADLINE,
+                join_room(&store, &identity, &cfg, "123456", |_| async {
+                    SasDecision::Rejected
+                }),
+            )
+            .await
+            .expect("join contacted the relay")
+            .unwrap_err();
+            assert!(matches!(join, CoreError::RelayUrl(_)), "{join}");
+            assert_eq!(join.exit_code(), crate::ExitCode::Usage as i32);
+        }
+        let ws = tokio::time::timeout(
+            POLICY_DEADLINE,
+            connect_relay_ws("ws://192.0.2.1:7600/v1/ws"),
+        )
+        .await
+        .expect("websocket refusal was retried")
+        .err()
+        .unwrap();
+        assert!(matches!(ws, CoreError::RelayUrl(_)), "{ws}");
+    }
+
+    #[tokio::test]
+    async fn pairing_never_follows_relay_redirects() {
+        use axum::{
+            http::{header::LOCATION, StatusCode},
+            routing::post,
+            Router,
+        };
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        // A followed redirect re-POSTs the pairing code to a host the relay
+        // policy never checked. Refusing it returns at once, well inside this
+        // bound, while a hop to the non-routable documentation address would
+        // hang until the HTTP client's own timeout.
+        const POLICY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+        let captured = Arc::new(AtomicUsize::new(0));
+        let capture = {
+            let captured = captured.clone();
+            crate::test_relay::Server::http(Router::new().route(
+                "/steal",
+                post(move || async move {
+                    captured.fetch_add(1, Ordering::SeqCst);
+                    "{}"
+                }),
+            ))
+            .await
+        };
+        let directory = tempfile::TempDir::new().unwrap();
+        let store =
+            LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+        let identity = DeviceIdentity::from_bytes("redirecting-relay".into(), [43; 32]);
+        for target in [
+            format!("{}/steal", capture.url),
+            "http://192.0.2.1:7600/steal".to_string(),
+        ] {
+            for status in [
+                StatusCode::TEMPORARY_REDIRECT,
+                StatusCode::PERMANENT_REDIRECT,
+            ] {
+                let location = target.clone();
+                let redirect = move || {
+                    let location = location.clone();
+                    async move { (status, [(LOCATION, location)]) }
+                };
+                let relay = crate::test_relay::Server::http(
+                    Router::new()
+                        .route("/v1/pairing/create", post(redirect.clone()))
+                        .route("/v1/pairing/join", post(redirect)),
+                )
+                .await;
+                let cfg = AppConfig {
+                    relay_url: relay.url.clone(),
+                    ..Default::default()
+                };
+                let create =
+                    tokio::time::timeout(POLICY_DEADLINE, begin_create_room(&identity, &cfg, 60))
+                        .await
+                        .expect("create followed the redirect")
+                        .err()
+                        .unwrap();
+                let join = tokio::time::timeout(
+                    POLICY_DEADLINE,
+                    join_room(&store, &identity, &cfg, "123456", |_| async {
+                        SasDecision::Rejected
+                    }),
+                )
+                .await
+                .expect("join followed the redirect")
+                .unwrap_err();
+                for err in [create, join] {
+                    let message = err.to_string();
+                    assert!(message.contains("redirect"), "{target} {status}: {message}");
+                    assert!(message.contains(&target), "{target} {status}: {message}");
+                }
+            }
+        }
+        assert_eq!(
+            captured.load(Ordering::SeqCst),
+            0,
+            "the redirect target received the pairing request"
+        );
+        assert!(store.load_state().unwrap().rooms.is_empty());
+    }
+
+    #[tokio::test]
     async fn http_pairing_failures_preserve_relay_details_and_expired_code_guidance() {
         use axum::{http::StatusCode, routing::post, Router};
         let directory = tempfile::TempDir::new().unwrap();
         let store =
             LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
         let identity = DeviceIdentity::from_bytes("http-failure".into(), [31; 32]);
-        for body in [
-            "code_invalid",
-            "code_expired",
-            "busy: joiner already connected",
+        for (status, body) in [
+            (StatusCode::CONFLICT, "code_invalid"),
+            (StatusCode::CONFLICT, "code_expired"),
+            (StatusCode::CONFLICT, "busy: joiner already connected"),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                r#"{"code":"too_many_attempts","message":"pairing attempt limit reached"}"#,
+            ),
         ] {
             let server = crate::test_relay::Server::http(
                 Router::new()
@@ -2449,7 +2620,7 @@ mod tests {
                     )
                     .route(
                         "/v1/pairing/join",
-                        post(move || async move { (StatusCode::CONFLICT, body) }),
+                        post(move || async move { (status, body) }),
                     ),
             )
             .await;
@@ -2464,6 +2635,8 @@ mod tests {
                 .unwrap_err();
             if body.starts_with("code_") {
                 assert!(join.to_string().contains("unknown or expired pairing code"));
+            } else if status == StatusCode::TOO_MANY_REQUESTS {
+                assert!(join.to_string().contains("limiting pairing attempts"));
             } else {
                 assert!(join.to_string().contains(body));
             }
@@ -2514,11 +2687,11 @@ mod tests {
         let identity = DeviceIdentity::from_bytes("malformed-response".into(), [32; 32]);
         assert!(matches!(
             create_room(&store, &identity, &cfg, 60, accept).await,
-            Err(CoreError::Http(_))
+            Err(CoreError::Pairing(message)) if message.contains("malformed pairing response")
         ));
         assert!(matches!(
             join_room(&store, &identity, &cfg, &TEST_CODE, accept).await,
-            Err(CoreError::Http(_))
+            Err(CoreError::Pairing(message)) if message.contains("malformed pairing response")
         ));
         assert!(store.load_state().unwrap().rooms.is_empty());
     }
@@ -2530,6 +2703,9 @@ mod tests {
         // them right after "pairing code:" or "room:".
         const OSC: &str = "\u{1b}]52;c;aGk=\u{7}";
         const CSI: &str = "\u{9b}2J";
+        // A room or device ID the wire rule refuses fails the whole response
+        // while it is decoded, before any field is looked at.
+        const PAIRING_RESPONSE: &str = "pairing response";
         let good_room = clipsync_protocol::RoomId::new();
         let creates = [
             (format!("12345{OSC}"), good_room.clone(), "pairing code"),
@@ -2543,7 +2719,7 @@ mod tests {
             (
                 TEST_CODE.clone(),
                 clipsync_protocol::RoomId::from(format!("room{CSI}")),
-                "room ID",
+                PAIRING_RESPONSE,
             ),
         ];
         let peer = |device_id: &str| clipsync_protocol::PeerInfo {
@@ -2557,14 +2733,16 @@ mod tests {
             (
                 clipsync_protocol::RoomId::from(format!("room{OSC}")),
                 peer("creator"),
-                "room ID",
+                PAIRING_RESPONSE,
             ),
             (
                 good_room.clone(),
                 peer(&format!("creator{CSI}")),
-                "device ID",
+                PAIRING_RESPONSE,
             ),
-            (good_room.clone(), peer(""), "device ID"),
+            (good_room.clone(), peer(""), PAIRING_RESPONSE),
+            // Passed the old client-only check, refused by the wire rule.
+            (good_room.clone(), peer(".."), PAIRING_RESPONSE),
         ];
         let directory = tempfile::TempDir::new().unwrap();
         let store =
@@ -2587,11 +2765,15 @@ mod tests {
                 relay_url: server.url.clone(),
                 ..Default::default()
             };
-            let error = begin_create_room(&identity, &cfg, 60).await.err().unwrap();
+            let error = create_room(&store, &identity, &cfg, 60, accept)
+                .await
+                .err()
+                .unwrap();
             assert!(
                 error.to_string().contains(&format!("malformed {what}")),
                 "{error}"
             );
+            assert_nothing_stored(&store);
         }
         for (room_id, peer, what) in joins {
             let joined = JoinPairingResponse {
@@ -2618,9 +2800,15 @@ mod tests {
                 error.to_string().contains(&format!("malformed {what}")),
                 "{error}"
             );
+            assert_nothing_stored(&store);
         }
+    }
+
+    /// No room, room key, device credential or pairing file was written.
+    fn assert_nothing_stored(store: &LocalStore) {
         assert!(store.load_state().unwrap().rooms.is_empty());
-        assert!(secret_files(&store).is_empty());
+        assert!(secret_files(store).is_empty());
+        assert!(!store.paths.pairing_file().exists());
     }
 
     #[tokio::test]

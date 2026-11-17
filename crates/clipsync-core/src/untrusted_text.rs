@@ -14,6 +14,8 @@
 //! but makes every such character visible and inert, and bounds how many
 //! terminal columns it can fill.
 
+use clipsync_protocol::{validate_id, ID_MAX_LEN};
+
 /// Widest device name shown, in terminal columns. Names are for recognition
 /// only, and a host name rarely needs more. With the CLI's
 /// `other device: "…"` label the line stays within 56 columns, so it cannot
@@ -25,10 +27,6 @@ pub const MAX_PEER_NAME_COLUMNS: usize = 40;
 /// Widest relay-supplied error message shown, in terminal columns: enough for
 /// the relay's own one-line errors, short of flooding the terminal.
 pub const MAX_RELAY_MESSAGE_COLUMNS: usize = 256;
-/// Longest identifier (room or device ID) accepted from the relay or a peer.
-/// IDs are 26-character ULIDs; the bound leaves room for older or test IDs
-/// while keeping a printed line short.
-pub const MAX_IDENTIFIER_LEN: usize = 64;
 
 /// Most combining marks shown on one base character. Real text needs at most
 /// two (a Vietnamese tone on a vowel mark, a diaeresis with an accent); a
@@ -99,14 +97,11 @@ pub fn sanitize_untrusted(raw: &str, max_columns: usize) -> String {
     out
 }
 
-/// A room or device ID made of ASCII letters, digits, `-`, `_` and `.` only,
-/// at most [`MAX_IDENTIFIER_LEN`] long: safe to print as is.
+/// A room or device ID that passes the wire rule
+/// ([`clipsync_protocol::validate_id`]): ASCII letters, digits, `-`, `_` and
+/// non-edge single `.` only, at most [`ID_MAX_LEN`] bytes. Safe to print as is.
 pub fn is_plain_identifier(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= MAX_IDENTIFIER_LEN
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    validate_id(id).is_ok()
 }
 
 /// An ID for printing: unchanged when [`is_plain_identifier`], otherwise
@@ -115,7 +110,8 @@ pub fn shown_identifier(id: &str) -> String {
     if is_plain_identifier(id) {
         id.to_owned()
     } else {
-        sanitize_untrusted(id, MAX_IDENTIFIER_LEN)
+        // One printed column per byte the wire rule allows.
+        sanitize_untrusted(id, ID_MAX_LEN)
     }
 }
 
@@ -397,9 +393,12 @@ mod tests {
             assert!(is_plain_identifier(id), "{id}");
             assert_eq!(shown_identifier(id), id);
         }
-        let too_long = "a".repeat(MAX_IDENTIFIER_LEN + 1);
+        let too_long = "a".repeat(ID_MAX_LEN + 1);
         for id in [
             "",
+            "..",
+            ".hidden",
+            "a..b",
             "room\u{1b}]52;c;aGk=\u{7}",
             "a b",
             "Ｒoom",

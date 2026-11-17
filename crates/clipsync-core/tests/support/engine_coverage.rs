@@ -1,7 +1,7 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
 use super::*;
-use crate::test_relay::{receive, send, Server};
+use crate::test_relay::{close, receive, send, Server};
 use clipsync_protocol::PeerInfo;
 
 fn online_peer(identity: &DeviceIdentity) -> PeerInfo {
@@ -78,7 +78,10 @@ async fn sessions_complete_real_noise_as_initiator_and_responder_before_continui
             send(&mut socket, presence()).await;
             send(
                 &mut socket,
-                encrypted_text(text_routing(), "after authentication"),
+                encrypted_text(
+                    routing_from(&room, "device-m", ItemKind::Text),
+                    "after authentication",
+                ),
             )
             .await;
             assert!(matches!(
@@ -130,7 +133,7 @@ async fn live_presence_and_untrusted_noise_do_not_replace_the_last_authenticated
                 routing,
                 nonce,
                 mut ciphertext,
-            } = encrypted_text(text_routing(), "forged queued text")
+            } = encrypted_text(text_routing(&room), "forged queued text")
             else {
                 unreachable!()
             };
@@ -152,7 +155,7 @@ async fn live_presence_and_untrusted_noise_do_not_replace_the_last_authenticated
             send(
                 &mut socket,
                 ControlMessage::HelloOk {
-                    room_id: room,
+                    room_id: room.clone(),
                     peer_online: true,
                     peers: if case == "no-peers" {
                         vec![]
@@ -184,16 +187,36 @@ async fn live_presence_and_untrusted_noise_do_not_replace_the_last_authenticated
             .await;
             send(
                 &mut socket,
-                encrypted_text(text_routing(), "valid after hostile presence"),
+                encrypted_text(
+                    routing_from(
+                        &room,
+                        if case == "responder" {
+                            "000-first"
+                        } else {
+                            SCRIPT_SENDER
+                        },
+                        ItemKind::Text,
+                    ),
+                    "valid after hostile presence",
+                ),
             )
             .await;
-            assert!(matches!(
-                receive(&mut socket).await,
-                ControlMessage::Ack {
-                    status: AckStatus::Delivered,
-                    ..
-                }
-            ));
+            // A room without pinned peers accepts no sender, so nothing is acknowledged.
+            if case != "no-peers" {
+                assert!(matches!(
+                    receive(&mut socket).await,
+                    ControlMessage::Ack {
+                        status: AckStatus::Delivered,
+                        ..
+                    }
+                ));
+            }
+            // The client's connect-time heartbeat is still unread here, notably when no
+            // Ack was awaited; dropping the socket would reset the connection and could
+            // discard the frames above before the session reads them. A graceful close
+            // delivers them all, so the session handles the final envelope before it
+            // reports the disconnect.
+            close(socket).await;
         })
         .await;
         let peer = scripted_peer(&server.url, room_id);
@@ -222,6 +245,13 @@ async fn live_presence_and_untrusted_noise_do_not_replace_the_last_authenticated
         .unwrap_err();
         server.finish().await;
         assert!(error.to_string().contains("relay disconnected"), "{case}");
+        if case == "no-peers" {
+            assert!(
+                clipboard.get().is_none(),
+                "unpinned sender reached the clipboard"
+            );
+            continue;
+        }
         assert!(
             matches!(clipboard.get(), Some(ClipboardItem::Text { text }) if text == "valid after hostile presence")
         );

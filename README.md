@@ -221,7 +221,8 @@ blocks until the joiner arrives.
 
 | Variable | Purpose |
 | --- | --- |
-| `CLIPSYNC_RELAY_URL` | Relay base URL (default `https://clipsync.develicit.dev`) |
+| `CLIPSYNC_RELAY_URL` | Relay base URL (default `https://clipsync.develicit.dev`); must be `https://` unless the host is loopback |
+| `CLIPSYNC_ALLOW_INSECURE_RELAY` | Set to `1` to allow a plaintext `http://` relay on a non-loopback host (logged as a warning; pairing codes and tokens are then sent unencrypted) |
 | `CLIPSYNC_HOME` | Isolated data/config root (useful for two devices on one machine) |
 | `CLIPSYNC_CA_FILE` | Extra PEM bundle of private/self-signed CAs |
 | `CLIPSYNC_NO_DAEMON` | Set to `1` to skip auto-starting the login daemon |
@@ -253,6 +254,7 @@ clipsync room create
 - Text latest-one in-memory queue, 60s TTL; images/files are online-only 256 KiB chunks
 - Pairing code TTL 120s, 3 attempts, single joiner
 - Identity in a 0600 file, plus macOS Keychain / Windows Credential Manager when available
+- Clients refuse plaintext `http://`/`ws://` relays except on loopback (`127.0.0.0/8`, `::1`, `localhost`) unless `CLIPSYNC_ALLOW_INSECURE_RELAY=1`; URLs without a scheme are rejected
 
 See [docs/security.md](docs/security.md) and [docs/protocol.md](docs/protocol.md).
 

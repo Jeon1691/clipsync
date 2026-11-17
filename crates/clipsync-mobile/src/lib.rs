@@ -871,6 +871,12 @@ mod tests {
             return;
         };
         let home = std::env::var("CLIPSYNC_TEST_MOBILE_HOME").unwrap();
+        // Background pairings report failures only through `warn!`; print
+        // them on stderr, which the parent test shows when this child fails.
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(std::io::stderr)
+            .try_init();
         let created = ClipSyncClient::new(
             home,
             "http://127.0.0.1:0".into(),
@@ -924,6 +930,7 @@ mod tests {
             token_secret: vec![3; 32],
             webhook_url: None,
             webhook_secret: None,
+            metrics_token: None,
         };
         let server = client.rt.spawn(async move {
             axum::serve(
@@ -1042,30 +1049,23 @@ mod tests {
             .unwrap();
         assert_eq!(joined, offer.room_id);
         let until = std::time::Instant::now() + Duration::from_secs(5);
-        // The creator stores its room before its configuration, and Windows
-        // refuses to open a file that is being replaced. Wait until both are
-        // committed and readable, treating a read error as not yet.
-        let committed = |client: &ClipSyncClient| {
-            client
-                .status()
-                .is_ok_and(|status| status.room_id.as_deref() == Some(joined.as_str()))
-                && client
-                    .app
-                    .store
-                    .load_config()
-                    .is_ok_and(|cfg| cfg.sync.enabled)
-        };
-        while !committed(&verified_creator) {
+        // The creator stores its room before its configuration. Wait until
+        // both are committed; a failed read is a failure, not "not yet".
+        loop {
+            let room = verified_creator.status().unwrap().room_id;
+            let enabled = verified_creator
+                .app
+                .store
+                .load_config()
+                .unwrap()
+                .sync
+                .enabled;
+            if room.as_deref() == Some(joined.as_str()) && enabled {
+                break;
+            }
             assert!(
                 std::time::Instant::now() < until,
-                "verified creator did not commit completed pairing: status={:?} config={:?} pairing={:?}",
-                verified_creator.status().map(|status| status.room_id),
-                verified_creator
-                    .app
-                    .store
-                    .load_config()
-                    .map(|cfg| cfg.sync.enabled),
-                verified_creator.app.store.load_pairing_wait(),
+                "verified creator did not commit completed pairing: room={room:?} sync.enabled={enabled}"
             );
             std::thread::sleep(Duration::from_millis(5));
         }

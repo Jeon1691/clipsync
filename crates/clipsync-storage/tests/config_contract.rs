@@ -42,6 +42,9 @@ url = "https://hooks.example.test/π"
         assert_eq!(config.sync.types, ["files", "image", "text"]);
         assert_eq!(config.sync.debounce_ms, 341);
         assert_eq!(config.sync.ttl_secs, 60);
+        // Files written before the envelope v2 transition omit this key.
+        assert!(!config.sync.legacy_envelopes);
+        assert!(!config.sync.strict_envelopes);
         assert!(!config.notify.enabled);
         assert!(config.notify.preview);
         let webhook = config.webhook.as_ref().unwrap();
@@ -87,6 +90,10 @@ fn supported_configuration_keys_roundtrip_and_unknown_keys_do_not_mutate() {
         ("notify.enabled", "1", "true"),
         ("notify.preview", "on", "true"),
         ("sync.ttl_secs", "60", "60"),
+        ("sync.legacy_envelopes", "on", "true"),
+        ("sync.legacy_envelopes", "no", "false"),
+        ("sync.strict_envelopes", "on", "true"),
+        ("sync.strict_envelopes", "no", "false"),
         ("pairing.require_commitment", "on", "true"),
     ] {
         assert!(config.set(key, value));
