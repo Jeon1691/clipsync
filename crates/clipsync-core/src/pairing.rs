@@ -77,6 +77,7 @@ pub async fn begin_create_room(
         protocol_version: PROTOCOL_VERSION,
         ttl_secs: Some(ttl_secs),
     };
+    clipsync_transport::check_relay_url(&cfg.relay_url)?;
     let url = format!("{}/v1/pairing/create", cfg.relay_url.trim_end_matches('/'));
     let resp = http_client()
         .post(&url)
@@ -157,6 +158,7 @@ pub async fn join_room(
         os: current_os().into(),
         protocol_version: PROTOCOL_VERSION,
     };
+    clipsync_transport::check_relay_url(&cfg.relay_url)?;
     let url = format!("{}/v1/pairing/join", cfg.relay_url.trim_end_matches('/'));
     let resp = http_client()
         .post(&url)
@@ -476,6 +478,8 @@ fn device_bind_nonce(
 async fn connect_relay_ws(ws: &str) -> Result<RelayConnection, CoreError> {
     match RelayConnection::connect(ws).await {
         Ok(conn) => Ok(conn),
+        // A policy refusal will not change on retry; keep its usage exit code.
+        Err(clipsync_transport::TransportError::RelayUrl(e)) => Err(e.into()),
         Err(e) => {
             tracing::warn!(error = %e, %ws, "websocket connect failed; retrying");
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -632,6 +636,50 @@ mod tests {
         let nonce_a = derive_nonce(&keys_a.pairing_wrap_key, 1).unwrap();
         let nonce_b = device_bind_nonce(&keys_b.pairing_wrap_key, PairingRole::B).unwrap();
         assert_bind_exchange(&session, &keys_a, &keys_b, nonce_a, nonce_b);
+    }
+
+    #[tokio::test]
+    async fn pairing_refuses_plaintext_relays_before_sending_the_code() {
+        // The pairing code is the SPAKE2 password; it must never be POSTed to
+        // a plaintext non-loopback relay. A refused policy check returns
+        // immediately, well inside this bound, while a real request to the
+        // non-routable documentation address would hang until its timeout.
+        const POLICY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+        let directory = tempfile::TempDir::new().unwrap();
+        let store =
+            LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+        let identity = DeviceIdentity::from_bytes("plaintext-relay".into(), [41; 32]);
+        for relay_url in ["http://192.0.2.1:7600", "relay.example.test"] {
+            let cfg = AppConfig {
+                relay_url: relay_url.into(),
+                ..Default::default()
+            };
+            let create =
+                tokio::time::timeout(POLICY_DEADLINE, begin_create_room(&identity, &cfg, 60))
+                    .await
+                    .expect("create contacted the relay")
+                    .err()
+                    .unwrap();
+            assert!(matches!(create, CoreError::RelayUrl(_)), "{create}");
+            let join = tokio::time::timeout(
+                POLICY_DEADLINE,
+                join_room(&store, &identity, &cfg, "123456"),
+            )
+            .await
+            .expect("join contacted the relay")
+            .unwrap_err();
+            assert!(matches!(join, CoreError::RelayUrl(_)), "{join}");
+            assert_eq!(join.exit_code(), crate::ExitCode::Usage as i32);
+        }
+        let ws = tokio::time::timeout(
+            POLICY_DEADLINE,
+            connect_relay_ws("ws://192.0.2.1:7600/v1/ws"),
+        )
+        .await
+        .expect("websocket refusal was retried")
+        .err()
+        .unwrap();
+        assert!(matches!(ws, CoreError::RelayUrl(_)), "{ws}");
     }
 
     #[tokio::test]

@@ -5,7 +5,7 @@ use clipsync_crypto::{AeadError, CryptoError};
 use clipsync_daemon::DaemonError;
 use clipsync_storage::StorageError;
 use clipsync_transfer::TransferError;
-use clipsync_transport::TransportError;
+use clipsync_transport::{RelayUrlError, TransportError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
@@ -19,6 +19,8 @@ pub enum CoreError {
     Clipboard(String),
     #[error("transport: {0}")]
     Transport(#[from] TransportError),
+    #[error("{0}")]
+    RelayUrl(#[from] RelayUrlError),
     #[error("transfer: {0}")]
     Transfer(#[from] TransferError),
     #[error("daemon: {0}")]
@@ -71,6 +73,10 @@ impl CoreError {
             Self::Pairing(_) => ExitCode::PairingFailed as i32,
             Self::Crypto(_) => ExitCode::Crypto as i32,
             Self::Clipboard(_) => ExitCode::Clipboard as i32,
+            // A refused relay URL is fixed by changing configuration, not by retrying.
+            Self::RelayUrl(_) | Self::Transport(TransportError::RelayUrl(_)) => {
+                ExitCode::Usage as i32
+            }
             Self::Transport(_) | Self::Http(_) => ExitCode::Network as i32,
             Self::Timeout => ExitCode::Timeout as i32,
             _ => ExitCode::Error as i32,
@@ -120,6 +126,11 @@ mod tests {
                 7,
             ),
             (CoreError::Transport(TransportError::Closed), 5),
+            (CoreError::RelayUrl(RelayUrlError::MissingScheme), 2),
+            (
+                CoreError::Transport(TransportError::RelayUrl(RelayUrlError::MissingHost)),
+                2,
+            ),
             (CoreError::Timeout, 10),
             (CoreError::Io(std::io::Error::other("disk full")), 1),
             (CoreError::Transfer(TransferError::Integrity), 1),

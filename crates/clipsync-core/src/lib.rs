@@ -60,6 +60,10 @@ impl App {
     }
 
     pub fn init(&self, relay_url: Option<String>) -> Result<DeviceIdentity, CoreError> {
+        // Refuse an insecure relay before creating any local state.
+        if let Some(url) = &relay_url {
+            clipsync_transport::check_relay_url(url)?;
+        }
         // Absence is handled by load_config; errors must not reset user data.
         let mut cfg = self.store.load_config()?;
         let identity = match self.store.secrets.load_identity() {
@@ -272,6 +276,9 @@ impl App {
     }
 
     pub fn config_set(&self, key: &str, value: &str) -> Result<(), CoreError> {
+        if key == "relay_url" {
+            clipsync_transport::check_relay_url(value)?;
+        }
         let mut cfg = self.store.load_config()?;
         if !cfg.set(key, value) {
             return Err(CoreError::Message(format!("unknown config key {key}")));
@@ -438,6 +445,9 @@ pub(crate) fn http_client() -> reqwest::Client {
 }
 
 async fn check_relay(url: &str) -> serde_json::Value {
+    if let Err(e) = clipsync_transport::check_relay_url(url) {
+        return serde_json::json!({"ok": false, "error": e.to_string()});
+    }
     let health = format!("{}/healthz", url.trim_end_matches('/'));
     match http_client().get(&health).send().await {
         Ok(r) => serde_json::json!({"ok": r.status().is_success(), "status": r.status().as_u16()}),
@@ -559,6 +569,33 @@ mod regression_tests {
                 .unwrap()
                 .unwrap();
         });
+    }
+
+    #[tokio::test]
+    async fn doctor_reports_a_refused_relay_url_without_contacting_it() {
+        // The documentation address never routes, so only a policy refusal
+        // can return before the HTTP client's own timeout.
+        const POLICY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+        let report = tokio::time::timeout(POLICY_DEADLINE, super::check_relay("http://192.0.2.1"))
+            .await
+            .expect("doctor contacted a refused relay");
+        assert_eq!(report["ok"], false);
+        let error = report["error"].as_str().unwrap();
+        assert!(error.contains("refusing plaintext http://"), "{error}");
+        assert!(error.contains("CLIPSYNC_ALLOW_INSECURE_RELAY"), "{error}");
+    }
+
+    #[test]
+    fn init_refuses_an_insecure_relay_before_creating_an_identity() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let app =
+            super::App::open_from(super::AppPaths::from_root(directory.path().into())).unwrap();
+        let Err(err) = app.init(Some("http://relay.example.test".into())) else {
+            panic!("plaintext relay accepted");
+        };
+        assert!(matches!(err, super::CoreError::RelayUrl(_)), "{err}");
+        assert!(!app.store.paths.identity_file().exists());
+        assert!(!app.store.paths.config_file().exists());
     }
 }
 

@@ -3,6 +3,7 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 //! WebSocket client with reconnect, heartbeat, and typed frames.
 
+mod relay_policy;
 mod tls;
 
 use std::time::{Duration, SystemTime};
@@ -21,9 +22,12 @@ use tokio_tungstenite::{
     Connector,
 };
 
+pub use relay_policy::{
+    check_relay_url, insecure_relay_opt_in, relay_url_security, RelaySecurity, RelayUrlError,
+    ALLOW_INSECURE_RELAY_ENV,
+};
 pub use tls::{ca_file_path, configure_reqwest, CA_FILE_ENV};
 use tracing::{debug, warn};
-use url::Url;
 
 use clipsync_protocol::{ControlMessage, CHUNK_MAGIC, HEARTBEAT_SECS};
 
@@ -31,6 +35,8 @@ use clipsync_protocol::{ControlMessage, CHUNK_MAGIC, HEARTBEAT_SECS};
 pub enum TransportError {
     #[error("url: {0}")]
     Url(#[from] url::ParseError),
+    #[error("{0}")]
+    RelayUrl(#[from] RelayUrlError),
     #[error("websocket: {0}")]
     Ws(#[from] tokio_tungstenite::tungstenite::Error),
     #[error("protocol: {0}")]
@@ -73,10 +79,13 @@ impl RelayConnection {
         reason = "Preserve the public TransportError payload and conversions; see docs/compiler-warnings.md."
     )]
     pub async fn connect(ws_url: &str) -> Result<Self> {
-        let _ = Url::parse(ws_url)?;
+        // Re-check at connect time: configs written before this policy, or
+        // `CLIPSYNC_RELAY_URL`, never went through `config set`.
+        check_relay_url(ws_url)?;
         let mut req = ws_url
             .into_client_request()
             .map_err(|e| TransportError::Protocol(e.to_string()))?;
+        relay_policy::require_canonical_host(ws_url, req.uri().host())?;
         req.headers_mut().insert(
             USER_AGENT,
             HeaderValue::from_static(concat!("clipsync-cli/", env!("CARGO_PKG_VERSION"))),
@@ -227,15 +236,16 @@ fn chrono_now() -> i64 {
         .unwrap_or(0)
 }
 
+/// Map an HTTP(S) relay base to its WebSocket scheme. Input without a known
+/// scheme is returned unchanged rather than guessed as plaintext `ws://`, so
+/// [`check_relay_url`] rejects it at connect time.
 pub fn http_to_ws(http_url: &str) -> String {
     if let Some(rest) = http_url.strip_prefix("https://") {
         format!("wss://{rest}")
     } else if let Some(rest) = http_url.strip_prefix("http://") {
         format!("ws://{rest}")
-    } else if http_url.starts_with("ws://") || http_url.starts_with("wss://") {
-        http_url.to_string()
     } else {
-        format!("ws://{http_url}")
+        http_url.to_string()
     }
 }
 
@@ -446,9 +456,10 @@ mod tests {
     #[tokio::test]
     async fn invalid_urls_and_invalid_websocket_protocol_close_with_useful_errors() {
         tokio::time::timeout(Duration::from_secs(10), async {
+            // Scheme-less input gets the relay policy's actionable error.
             assert!(matches!(
                 RelayConnection::connect("not a URL").await,
-                Err(TransportError::Url(_))
+                Err(TransportError::RelayUrl(RelayUrlError::MissingScheme))
             ));
             assert!(RelayConnection::connect("https://127.0.0.1/")
                 .await
