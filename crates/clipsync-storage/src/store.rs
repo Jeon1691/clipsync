@@ -157,11 +157,13 @@ impl LocalStore {
     }
 
     pub fn load_pairing_wait(&self) -> Result<Option<PairingWait>> {
-        let path = self.paths.pairing_file();
-        if !path.exists() {
-            return Ok(None);
-        }
-        let raw = std::fs::read_to_string(path)?;
+        // Read without checking first: `room leave` may remove the file at
+        // any moment, and a file gone mid-read means no pairing, not an error.
+        let raw = match std::fs::read_to_string(self.paths.pairing_file()) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
         Ok(Some(serde_json::from_str(&raw)?))
     }
 
@@ -399,6 +401,35 @@ mod failure_tests {
         ] {
             assert!(path.is_dir());
         }
+    }
+
+    #[test]
+    fn a_pairing_file_removed_while_it_is_read_reads_as_no_pairing() {
+        // `room leave` may remove the file between any two steps of a read.
+        // Enough rounds for the removal to land inside a read on a typical
+        // machine; each round is a few file operations.
+        const ROUNDS: usize = 4000;
+        let (_root, store) = fixture();
+        let remover = store.clone();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = stop.clone();
+        let churn = std::thread::spawn(move || {
+            while !stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                remover.save_pairing_wait(&waiting()).unwrap();
+                let _ = std::fs::remove_file(remover.paths.pairing_file());
+            }
+        });
+        let failures = (0..ROUNDS)
+            .filter_map(|_| store.load_pairing_wait().err())
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        churn.join().unwrap();
+        assert!(
+            failures.is_empty(),
+            "{:?}",
+            &failures[..failures.len().min(3)]
+        );
     }
 
     #[test]
