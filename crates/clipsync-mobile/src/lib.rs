@@ -999,22 +999,22 @@ mod tests {
         assert_eq!(joined, offer.room_id);
         let until = std::time::Instant::now() + Duration::from_secs(5);
         // The creator stores its room before its configuration. Wait until
-        // both are committed, keeping what the creator last reported so a
-        // timeout shows it.
-        let observe = |client: &ClipSyncClient| {
-            (
-                client.status().map(|status| status.room_id),
-                client.app.store.load_config().map(|cfg| cfg.sync.enabled),
-            )
-        };
+        // both are committed; a failed read is a failure, not "not yet".
         loop {
-            let seen = observe(&verified_creator);
-            if matches!(&seen, (Ok(Some(room)), Ok(true)) if *room == joined) {
+            let room = verified_creator.status().unwrap().room_id;
+            let enabled = verified_creator
+                .app
+                .store
+                .load_config()
+                .unwrap()
+                .sync
+                .enabled;
+            if room.as_deref() == Some(joined.as_str()) && enabled {
                 break;
             }
             assert!(
                 std::time::Instant::now() < until,
-                "verified creator did not commit completed pairing: {seen:?}"
+                "verified creator did not commit completed pairing: room={room:?} sync.enabled={enabled}"
             );
             std::thread::sleep(Duration::from_millis(5));
         }
