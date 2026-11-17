@@ -308,14 +308,16 @@ async fn forget_socket(state: &Arc<RelayState>, tx: &mpsc::Sender<WsOut>, c: &Co
 /// per-member socket cap, or a stalled outbound queue). Returns the context,
 /// if any, for cleanup.
 ///
-/// A socket that is not a room member (before `hello`, or holding a pairing
-/// token) has a fixed deadline: the hello deadline, then its pairing
-/// session's expiry. No message extends it. It stays evictable, and its
-/// messages are handled under that deadline and eviction, so a client that
-/// never reads cannot stall the loop past either. `hello` itself never waits
-/// (see `handle_control_from`), so cancelling a handler never leaves a
+/// A socket that is not a room member stays evictable and has a deadline.
+/// Before `hello` it is the hello deadline, which no message extends. A
+/// pairing-token socket is closed after `read_idle` of silence or when its
+/// pairing session expires, whichever comes first; a message restarts only
+/// the silence limit. Its messages are handled under that deadline and
+/// eviction, so a client that never reads, or a peer that stopped reading,
+/// cannot stall the loop past either. `hello` itself never waits (see
+/// `handle_control_from`), so cancelling a handler never leaves a
 /// half-registered socket. A member socket is closed after `read_idle` of
-/// silence instead.
+/// silence and is never evicted this way.
 async fn read_loop<S>(
     stream: &mut S,
     state: &Arc<RelayState>,
