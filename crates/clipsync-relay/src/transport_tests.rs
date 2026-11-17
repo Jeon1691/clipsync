@@ -85,4 +85,14 @@ fn trusted_proxies_default_to_none_and_parse_comma_separated_ranges() {
         parse(&["--trusted-proxies", "127.0.0.1, ,10.0.0.0/8,"]).unwrap(),
         ["127.0.0.1/32", "10.0.0.0/8"].map(|net| net.parse::<ipnet::IpNet>().unwrap())
     );
+    // The list is one value: a repeated flag fails at startup instead of
+    // silently keeping only one of the lists.
+    let repeated = parse(&[
+        "--trusted-proxies",
+        "127.0.0.1",
+        "--trusted-proxies",
+        "10.0.0.1",
+    ])
+    .unwrap_err();
+    assert_eq!(repeated.kind(), clap::error::ErrorKind::ArgumentConflict);
 }

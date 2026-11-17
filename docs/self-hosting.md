@@ -66,7 +66,8 @@ when an entry covers a whole address family (`0.0.0.0/0`, `::/0`). IPv4-mapped
 IPv6 entries such as `::ffff:127.0.0.1` match the same IPv4 peers and hops as
 `127.0.0.1`. An IPv6 range that contains all of `::ffff:0:0/96` also trusts
 every IPv4 address. Empty entries are ignored, so an empty value or a trailing
-comma leaves the setting unset. The setting affects pairing-join limits only.
+comma leaves the setting unset. Give the whole list as one value; repeating
+`--trusted-proxies` is rejected at startup. The setting affects pairing-join limits only.
 Leave it unset when clients connect to the relay directly.
 
 For a container, mount the certificate directory read-only and pass the paths
