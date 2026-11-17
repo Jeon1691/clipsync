@@ -14,6 +14,9 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Scrape credential for the facade relay; the readiness fence reads `/metrics`.
+const FACADE_METRICS_TOKEN: &str = "facade-metrics-scrape-token-0123456789";
+
 const WORKER: &str = "CLIPSYNC_FACADE_WORKER";
 
 fn child_case(name: &str) -> bool {
@@ -220,6 +223,9 @@ fn explicit_pairing_without_auto_sync_returns_matching_rooms_and_installs_no_ser
                 token_secret: vec![65; 32],
                 webhook_url: None,
                 webhook_secret: None,
+                metrics_token: Some(
+                    clipsync_relay::MetricsToken::new(FACADE_METRICS_TOKEN).unwrap(),
+                ),
             };
             let server = crate::test_relay::Server::http(clipsync_relay::router(config)).await;
             let home = std::path::PathBuf::from(std::env::var_os("CLIPSYNC_HOME").unwrap());
@@ -257,6 +263,7 @@ fn explicit_pairing_without_auto_sync_returns_matching_rooms_and_installs_no_ser
                 loop {
                     let metrics = client
                         .get(format!("{}/metrics", server.url))
+                        .bearer_auth(FACADE_METRICS_TOKEN)
                         .send()
                         .await
                         .unwrap()

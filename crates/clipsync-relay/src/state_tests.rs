@@ -15,6 +15,7 @@ fn fixture() -> (
         token_secret: vec![21; 32],
         webhook_url: None,
         webhook_secret: None,
+        metrics_token: None,
     });
     let sid = PairingSessionId::new();
     let owner = DeviceId::new();

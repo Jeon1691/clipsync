@@ -134,6 +134,7 @@ fn state() -> Arc<RelayState> {
         token_secret: vec![42; 32],
         webhook_url: None,
         webhook_secret: None,
+        metrics_token: None,
     }))
 }
 

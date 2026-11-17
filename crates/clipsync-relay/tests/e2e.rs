@@ -7,7 +7,10 @@ use clipsync_clipboard::{ClipboardItem, FileRef, ImageMime, MockClipboard, Syste
 use clipsync_core::{begin_create_room, join_room, App};
 use clipsync_crypto::blake3_hex;
 use clipsync_protocol::{FILE_MAX_COUNT, FRAME_HARD_CAP, IMAGE_MAX_BYTES, TEXT_MAX_BYTES};
-use clipsync_relay::{router, RelayConfig};
+use clipsync_relay::{router, MetricsToken, RelayConfig};
+
+/// Scrape credential for this fixture's relay; readiness polls read `/metrics`.
+const METRICS_TEST_TOKEN: &str = "e2e-metrics-scrape-token-0123456789";
 use clipsync_storage::AppPaths;
 use clipsync_transfer::safe_filename;
 use tempfile::TempDir;
@@ -39,6 +42,7 @@ async fn start_relay() -> (String, tokio::task::JoinHandle<()>) {
         token_secret: b"test-secret-test-secret-test-sec".to_vec(),
         webhook_url: None,
         webhook_secret: None,
+        metrics_token: Some(MetricsToken::new(METRICS_TEST_TOKEN).unwrap()),
     };
     let app = router(cfg);
     let handle = tokio::spawn(async move {
@@ -197,16 +201,22 @@ async fn start_pairing_observer(
             let client = http_client.clone();
             async move {
                 let method = request.method().clone();
+                // Forward the scrape credential so readiness polls reach `/metrics`.
+                let authorization = request
+                    .headers()
+                    .get(axum::http::header::AUTHORIZATION)
+                    .cloned();
                 let body = axum::body::to_bytes(request.into_body(), FRAME_HARD_CAP)
                     .await
                     .unwrap();
-                let response = client
+                let mut upstream_request = client
                     .request(method, upstream)
-                    .header("content-type", "application/json")
-                    .body(body)
-                    .send()
-                    .await
-                    .unwrap();
+                    .header("content-type", "application/json");
+                if let Some(authorization) = authorization {
+                    upstream_request =
+                        upstream_request.header(axum::http::header::AUTHORIZATION, authorization);
+                }
+                let response = upstream_request.body(body).send().await.unwrap();
                 (response.status(), response.bytes().await.unwrap())
             }
         }));
@@ -347,6 +357,7 @@ async fn wait_for_connection_count(relay: &str, expected: usize) {
         loop {
             let metrics = client
                 .get(format!("{relay}/metrics"))
+                .bearer_auth(METRICS_TEST_TOKEN)
                 .send()
                 .await
                 .expect("relay metrics request")

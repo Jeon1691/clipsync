@@ -171,6 +171,7 @@ mod command_tests {
             token_secret: vec![3; 32],
             webhook_url: None,
             webhook_secret: None,
+            metrics_token: None,
         };
         let server = tokio::spawn(async move {
             axum::serve(
@@ -255,6 +256,7 @@ mod command_tests {
                         token_secret: vec![13; 32],
                         webhook_url: None,
                         webhook_secret: None,
+                        metrics_token: None,
                     })
                     .into_make_service_with_connect_info::<std::net::SocketAddr>(),
                 )

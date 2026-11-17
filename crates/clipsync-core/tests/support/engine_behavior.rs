@@ -17,6 +17,8 @@ use std::net::SocketAddr;
 use tempfile::TempDir;
 
 const EPOCH: [u8; 32] = [7; 32];
+/// Scrape credential for the fixture relay; readiness polls read `/metrics`.
+const ENGINE_METRICS_TOKEN: &str = "engine-metrics-scrape-token-0123456789";
 const PNG: &[u8] = &[
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0, 0,
     1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89, 0, 0, 0, 0x0a, 0x49, 0x44, 0x41, 0x54,
@@ -195,6 +197,7 @@ impl Pair {
             token_secret: vec![41; 32],
             webhook_url: None,
             webhook_secret: None,
+            metrics_token: Some(clipsync_relay::MetricsToken::new(ENGINE_METRICS_TOKEN).unwrap()),
         });
         let server = tokio::spawn(async move {
             axum::serve(
@@ -329,6 +332,7 @@ impl Pair {
 async fn client_connection_count(url: &str, expected: usize) -> bool {
     client()
         .get(format!("{url}/metrics"))
+        .bearer_auth(ENGINE_METRICS_TOKEN)
         .send()
         .await
         .unwrap()
