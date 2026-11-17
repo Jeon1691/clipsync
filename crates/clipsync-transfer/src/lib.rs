@@ -3,6 +3,8 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 //! Chunked transfer, path sanitization, staging, and BLAKE3 commit.
 
+#[cfg(target_os = "macos")]
+pub mod quarantine;
 mod sanitize;
 mod staging;
 

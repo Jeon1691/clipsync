@@ -2212,6 +2212,67 @@ async fn pull_reports_output_file_failures_for_each_item_kind_without_overwritin
     }
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn pull_output_files_carry_launch_services_quarantine_attribute() {
+    use clipsync_transfer::quarantine::{value_of, QUARANTINE_AGENT};
+    let root = TempDir::new().unwrap();
+    let output = root.path().join("output");
+    // A destination name that already exists as a symlink: the write follows
+    // it, so the attribute must land on the file that received the bytes.
+    let redirected = root.path().join("redirected.command");
+    std::fs::create_dir(&output).unwrap();
+    std::os::unix::fs::symlink(&redirected, output.join("linked.command")).unwrap();
+    let file = |name: &str, bytes: &[u8]| FileRef {
+        name: name.into(),
+        bytes: bytes.to_vec(),
+        mime: None,
+        staged_path: None,
+    };
+    let items = [
+        ClipboardItem::Files {
+            files: vec![
+                file("run.command", b"#!/bin/sh\necho hi\n"),
+                file("linked.command", b"#!/bin/sh\necho linked\n"),
+            ],
+        },
+        ClipboardItem::Image {
+            mime: ImageMime::Png,
+            bytes: PNG.to_vec(),
+            width: None,
+            height: None,
+        },
+        ClipboardItem::Text {
+            text: "peer text".into(),
+        },
+    ];
+    for item in items {
+        finish_pull(item, false, Some(output.clone()))
+            .await
+            .unwrap();
+    }
+
+    for path in [
+        output.join("run.command"),
+        redirected,
+        output.join("clipboard.png"),
+        output.join("clipboard.txt"),
+    ] {
+        let value = value_of(&path)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{} lacks com.apple.quarantine", path.display()));
+        let fields: Vec<&str> = value.split(';').collect();
+        assert_eq!(fields.len(), 4, "unexpected quarantine value {value:?}");
+        assert_eq!(fields[0], "0081");
+        assert_eq!(fields[2], QUARANTINE_AGENT);
+    }
+    assert_eq!(
+        std::fs::read(output.join("run.command")).unwrap(),
+        b"#!/bin/sh\necho hi\n"
+    );
+    assert_eq!(std::fs::read(output.join("clipboard.png")).unwrap(), PNG);
+}
+
 #[test]
 fn manifest_rejection_distinguishes_encoding_authentication_and_authenticated_json_errors() {
     let routing = legacy_routing();

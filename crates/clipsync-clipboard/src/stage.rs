@@ -43,6 +43,13 @@ pub fn stage_image_in(dir: &Path, mime: ImageMime, bytes: &[u8]) -> Result<PathB
     ));
     std::fs::write(&partial, bytes)?;
     restrict_file(&partial);
+    // The sidecar holds peer-received bytes that Finder can paste elsewhere;
+    // quarantine it before the rename makes it visible, with the same policy
+    // as the inbox (a failure is logged and the image is still delivered).
+    clipsync_transfer::quarantine::mark_or_warn(
+        &partial,
+        &clipsync_transfer::quarantine::quarantine_value(),
+    );
     std::fs::rename(&partial, &path)?;
     restrict_file(&path);
     Ok(path)
@@ -163,6 +170,22 @@ mod tests {
         );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn staged_image_sidecar_carries_launch_services_quarantine_attribute() {
+        use clipsync_transfer::quarantine::{value_of, QUARANTINE_AGENT};
+        let root = tempfile::tempdir().unwrap();
+        let path = with_stage_root(root.path(), || {
+            stage_image(ImageMime::Png, b"\x89PNG\r\n\x1a\nrest").unwrap()
+        });
+        let value = value_of(&path)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{} lacks com.apple.quarantine", path.display()));
+        let fields: Vec<&str> = value.split(';').collect();
+        assert_eq!(fields.len(), 4, "unexpected quarantine value {value:?}");
+        assert_eq!(fields[0], "0081");
+        assert_eq!(fields[2], QUARANTINE_AGENT);
     }
 
     #[test]
