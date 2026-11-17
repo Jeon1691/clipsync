@@ -17,7 +17,8 @@
 //! The sequence is committed only after AEAD succeeds so forged headers cannot
 //! advance the persisted high-water mark.
 
-use chrono::{DateTime, Duration, Utc};
+use clipsync_protocol::Timestamp;
+use time::Duration;
 
 use clipsync_protocol::{
     DeviceId, ItemKind, Recipient, RoutingHeader, CLOCK_SKEW_SECS, ENVELOPE_VERSION_AUTHENTICATED,
@@ -165,8 +166,8 @@ pub(crate) fn version_for_room_state(
 
 /// Floor for outgoing `seq`: microseconds since the Unix epoch, so numbers keep
 /// increasing even if the persisted counter is lost or two processes send.
-pub(crate) fn sequence_floor(now: DateTime<Utc>) -> u64 {
-    u64::try_from(now.timestamp_micros()).unwrap_or(0)
+pub(crate) fn sequence_floor(now: Timestamp) -> u64 {
+    u64::try_from(now.unix_timestamp_micros()).unwrap_or(0)
 }
 
 /// Header checks that do not need the key. For v1 they run on unauthenticated
@@ -177,7 +178,7 @@ pub(crate) fn check_header(
     room: &RoomRecord,
     local: &DeviceId,
     expected_kind: Option<ItemKind>,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<(), EnvelopeRejection> {
     if routing.version != ENVELOPE_VERSION_LEGACY
         && routing.version != ENVELOPE_VERSION_AUTHENTICATED
@@ -212,7 +213,7 @@ pub(crate) fn check_header(
     // (process abort in release builds). Overflow rejects the envelope.
     if routing.version == ENVELOPE_VERSION_AUTHENTICATED {
         let latest_sent = now
-            .checked_add_signed(skew)
+            .checked_add(skew)
             .ok_or(EnvelopeRejection::NotYetValid)?;
         if routing.sent_at > latest_sent {
             return Err(EnvelopeRejection::NotYetValid);
@@ -220,7 +221,7 @@ pub(crate) fn check_header(
     }
     let honoured_until = routing
         .expires_at
-        .checked_add_signed(skew)
+        .checked_add(skew)
         .ok_or(EnvelopeRejection::LifetimeTooLong)?;
     if honoured_until < now {
         return Err(EnvelopeRejection::Expired);

@@ -1,9 +1,9 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{DeviceId, MessageId, PairingSessionId, RoomId, TransferId};
+use crate::Timestamp;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -57,8 +57,8 @@ pub struct RoutingHeader {
     pub room_id: RoomId,
     pub sender_device_id: DeviceId,
     pub recipient: Recipient,
-    pub sent_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
+    pub sent_at: Timestamp,
+    pub expires_at: Timestamp,
     pub item_kind: ItemKind,
     pub seq: u64,
 }
@@ -234,7 +234,7 @@ pub struct CreatePairingResponse {
     pub room_id: RoomId,
     pub pairing_code: String,
     pub pairing_token: String,
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
     pub ws_path: String,
 }
 
@@ -253,7 +253,7 @@ pub struct JoinPairingResponse {
     pub room_id: RoomId,
     pub pairing_token: String,
     pub peer: PeerInfo,
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
     pub ws_path: String,
 }
 

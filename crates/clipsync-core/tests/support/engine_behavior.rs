@@ -115,7 +115,7 @@ impl Peer {
                 room_id: room_id.clone(),
                 epoch: 1,
                 role,
-                created_at: Utc::now(),
+                created_at: Timestamp::now(),
                 device_token: token,
                 peers: vec![PeerRecord {
                     device_id: other.identity.device_id.clone(),
@@ -623,7 +623,7 @@ async fn authenticated_but_invalid_text_is_ignored_and_the_next_message_still_ar
     let b = Session::start(&pair.b).await;
     let mut sender = pair.member(&pair.a).await;
     let room = pair.a.app.store.current_room().unwrap();
-    let now = Utc::now();
+    let now = Timestamp::now();
     let routing = RoutingHeader {
         version: PROTOCOL_VERSION,
         message_id: MessageId::new(),
@@ -632,7 +632,7 @@ async fn authenticated_but_invalid_text_is_ignored_and_the_next_message_still_ar
         sender_device_id: pair.a.identity.device_id.clone(),
         recipient: Recipient::Broadcast,
         sent_at: now,
-        expires_at: now + ChronoDuration::seconds(60),
+        expires_at: now + TimeDuration::seconds(60),
         item_kind: ItemKind::Text,
         seq: 1,
     };
@@ -1119,7 +1119,7 @@ static SCRIPT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 
 /// Authenticated (v2) header a pinned `sender` would emit into `room`.
 fn routing_from(room: &RoomId, sender: &str, kind: ItemKind) -> RoutingHeader {
-    let now = Utc::now();
+    let now = Timestamp::now();
     RoutingHeader {
         version: ENVELOPE_VERSION_AUTHENTICATED,
         message_id: MessageId::new(),
@@ -1128,7 +1128,7 @@ fn routing_from(room: &RoomId, sender: &str, kind: ItemKind) -> RoutingHeader {
         sender_device_id: sender.into(),
         recipient: Recipient::Broadcast,
         sent_at: now,
-        expires_at: now + ChronoDuration::seconds(60),
+        expires_at: now + TimeDuration::seconds(60),
         item_kind: kind,
         seq: SCRIPT_SEQ.fetch_add(1, Ordering::Relaxed),
     }
@@ -1739,7 +1739,7 @@ async fn create_failure_retains_the_offer_and_error_for_background_status() {
                         room_id,
                         pairing_code: "482913".into(),
                         pairing_token: "fixture".into(),
-                        expires_at: Utc::now() + ChronoDuration::seconds(60),
+                        expires_at: Timestamp::now() + TimeDuration::seconds(60),
                         ws_path: "/v1/ws".into(),
                     })
                 }

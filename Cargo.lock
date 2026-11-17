@@ -867,18 +867,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "chrono"
-version = "0.4.45"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
-dependencies = [
- "iana-time-zone",
- "num-traits",
- "serde",
- "windows-link",
-]
-
-[[package]]
 name = "cipher"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -954,7 +942,6 @@ name = "clipsync-cli"
 version = "0.2.0"
 dependencies = [
  "axum",
- "chrono",
  "clap",
  "clipsync-clipboard",
  "clipsync-core",
@@ -1002,7 +989,6 @@ dependencies = [
  "axum",
  "base64",
  "blake3",
- "chrono",
  "clipsync-clipboard",
  "clipsync-crypto",
  "clipsync-daemon",
@@ -1023,6 +1009,7 @@ dependencies = [
  "sha2 0.11.1",
  "tempfile",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1057,7 +1044,6 @@ dependencies = [
 name = "clipsync-daemon"
 version = "0.2.0"
 dependencies = [
- "chrono",
  "clipsync-protocol",
  "clipsync-storage",
  "serde",
@@ -1091,7 +1077,6 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
- "chrono",
  "clipsync-clipboard",
  "clipsync-core",
  "clipsync-crypto",
@@ -1111,10 +1096,10 @@ dependencies = [
 name = "clipsync-protocol"
 version = "0.2.0"
 dependencies = [
- "chrono",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "time",
  "ulid",
 ]
 
@@ -1126,7 +1111,6 @@ dependencies = [
  "axum",
  "axum-server",
  "base64",
- "chrono",
  "clap",
  "clipsync-clipboard",
  "clipsync-core",
@@ -1152,6 +1136,7 @@ dependencies = [
  "subtle",
  "tempfile",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite 0.26.2",
@@ -1166,7 +1151,6 @@ dependencies = [
 name = "clipsync-storage"
 version = "0.2.0"
 dependencies = [
- "chrono",
  "clipsync-crypto",
  "clipsync-protocol",
  "directories",
@@ -1187,13 +1171,13 @@ name = "clipsync-transfer"
 version = "0.2.0"
 dependencies = [
  "blake3",
- "chrono",
  "clipsync-crypto",
  "clipsync-protocol",
  "libc",
  "rustix 1.1.6",
  "tempfile",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tracing",
  "ulid",
@@ -2624,30 +2608,6 @@ dependencies = [
  "tower-service",
  "tracing",
  "windows-registry",
-]
-
-[[package]]
-name = "iana-time-zone"
-version = "0.1.65"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e31bc9ad994ba00e440a8aa5c9ef0ec67d5cb5e5cb0cc7f8b744a35b389cc470"
-dependencies = [
- "android_system_properties",
- "core-foundation-sys",
- "iana-time-zone-haiku",
- "js-sys",
- "log",
- "wasm-bindgen",
- "windows-core",
-]
-
-[[package]]
-name = "iana-time-zone-haiku"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
-dependencies = [
- "cc",
 ]
 
 [[package]]
@@ -5173,6 +5133,7 @@ dependencies = [
  "powerfmt",
  "serde_core",
  "time-core",
+ "time-macros",
 ]
 
 [[package]]
@@ -5180,6 +5141,16 @@ name = "time-core"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
+
+[[package]]
+name = "time-macros"
+version = "0.2.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85"
+dependencies = [
+ "num-conv",
+ "time-core",
+]
 
 [[package]]
 name = "tiny-skia"

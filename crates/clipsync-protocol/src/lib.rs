@@ -9,6 +9,7 @@ mod envelope;
 mod ids;
 mod limits;
 mod messages;
+mod timestamp;
 
 pub use capabilities::{HandshakeCapabilities, LEGACY_HANDSHAKE_PAYLOAD_MAX_BYTES};
 pub use chunk::{decode_chunk_frame, encode_chunk_frame, ChunkFrame, CHUNK_MAGIC};
@@ -21,6 +22,7 @@ pub use ids::{
 };
 pub use limits::*;
 pub use messages::*;
+pub use timestamp::{Timestamp, TimestampParseError};
 
 /// Hello/pairing protocol version checked by the relay. Envelope AAD is
 /// versioned separately in `RoutingHeader.version`, so v2 envelopes work with

@@ -80,7 +80,7 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
     assert_eq!(error.1 .0.code, "join_failed");
     request.device_id = DeviceId::new();
     state.pairing_mut(sid.as_str()).unwrap().expires_at =
-        chrono::Utc::now() - chrono::Duration::seconds(1);
+        clipsync_protocol::Timestamp::now() - time::Duration::seconds(1);
     let error = join_pairing(
         ConnectInfo(address),
         State(state.clone()),
@@ -92,7 +92,7 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
     assert_eq!(error.0, StatusCode::GONE);
     assert_eq!(error.1 .0.code, "code_expired");
     state.pairing_mut(sid.as_str()).unwrap().expires_at =
-        chrono::Utc::now() + chrono::Duration::seconds(60);
+        clipsync_protocol::Timestamp::now() + time::Duration::seconds(60);
     let joined = join_pairing(
         ConnectInfo(address),
         State(state.clone()),

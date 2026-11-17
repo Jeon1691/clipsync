@@ -1,9 +1,10 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
-use chrono::{Duration, Utc};
+use clipsync_protocol::Timestamp;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use time::Duration;
 
 use clipsync_protocol::{DeviceId, DeviceRole, RoomId};
 
@@ -34,7 +35,7 @@ pub fn issue_token(
         did: device_id.clone(),
         role,
         sid: session_id.map(|s| s.to_string()),
-        exp: (Utc::now() + Duration::seconds(ttl_secs)).timestamp(),
+        exp: (Timestamp::now() + Duration::seconds(ttl_secs)).unix_timestamp(),
     };
     let payload = serde_json::to_vec(&claims).expect("token json");
     let mut mac = HmacSha256::new_from_slice(secret).expect("hmac key");
@@ -57,7 +58,7 @@ pub fn verify_token(secret: &[u8], token: &str) -> Result<TokenClaims, &'static 
     mac.update(&payload);
     mac.verify_slice(&tag).map_err(|_| "bad signature")?;
     let claims: TokenClaims = serde_json::from_slice(&payload).map_err(|_| "bad json")?;
-    if claims.exp < Utc::now().timestamp() {
+    if claims.exp < Timestamp::now().unix_timestamp() {
         return Err("expired");
     }
     Ok(claims)

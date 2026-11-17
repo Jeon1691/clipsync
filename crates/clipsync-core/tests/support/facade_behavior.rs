@@ -172,7 +172,7 @@ fn readonly_status_reports_corrupt_identity_and_missing_room_credentials_without
             room_id: RoomId::new(),
             epoch: 1,
             role: DeviceRole::Owner,
-            created_at: chrono::Utc::now(),
+            created_at: clipsync_protocol::Timestamp::now(),
             device_token: "synthetic-device-token".into(),
             peers: Vec::new(),
         };
@@ -466,7 +466,7 @@ fn doctor_preserves_bad_metadata_and_reports_private_clipboard_caps_and_health_f
             room_id: RoomId::new(),
             epoch: 1,
             role: DeviceRole::Owner,
-            created_at: chrono::Utc::now(),
+            created_at: clipsync_protocol::Timestamp::now(),
             device_token: "doctor-private-token".into(),
             peers: Vec::new(),
         };
