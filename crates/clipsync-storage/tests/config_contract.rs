@@ -121,6 +121,44 @@ fn supported_configuration_keys_roundtrip_and_unknown_keys_do_not_mutate() {
     assert!(config.get("unknown.key").is_none());
 }
 
+/// A boolean key takes only an explicit boolean. Before, any other string
+/// stored false, so a mistyped `config set pairing.require_commitment` (or
+/// `sync.strict_envelopes`) silently left the security opt-in off.
+#[test]
+fn boolean_keys_reject_values_that_are_not_an_explicit_boolean() {
+    const BOOLEAN_KEYS: [&str; 7] = [
+        "sync.enabled",
+        "sync.auto_start",
+        "sync.legacy_envelopes",
+        "sync.strict_envelopes",
+        "notify.enabled",
+        "notify.preview",
+        "pairing.require_commitment",
+    ];
+    for key in BOOLEAN_KEYS {
+        let mut config = AppConfig::default();
+        for (value, expected) in [
+            ("1", "true"),
+            ("true", "true"),
+            ("yes", "true"),
+            ("on", "true"),
+            ("0", "false"),
+            ("false", "false"),
+            ("no", "false"),
+            ("off", "false"),
+        ] {
+            assert!(config.set(key, value), "{key} = {value}");
+            assert_eq!(config.get(key).as_deref(), Some(expected), "{key}");
+        }
+        assert!(config.set(key, "true"));
+        let previous = serde_json::to_value(&config).unwrap();
+        for value in ["", "ture", "enable", "2", " true", "TRUE", "maybe"] {
+            assert!(!config.set(key, value), "{key} accepted {value:?}");
+            assert_eq!(serde_json::to_value(&config).unwrap(), previous, "{key}");
+        }
+    }
+}
+
 #[test]
 fn configuration_clamps_ttl_and_never_serializes_a_legacy_webhook_secret() {
     let mut config: AppConfig = toml::from_str("relay_url='http://127.0.0.1'\n[webhook]\nurl='https://hooks.example.test'\nsecret='synthetic-legacy-value'").unwrap();

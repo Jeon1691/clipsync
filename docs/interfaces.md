@@ -118,7 +118,7 @@ define room/peer output.
 | `config get` / `set` key | Values accepted by `set`; default |
 | --- | --- |
 | `relay_url` | `https://` or `wss://` URL; plaintext `http://`/`ws://` only for a loopback host (`127.0.0.0/8`, `::1`, `localhost`) or with `CLIPSYNC_ALLOW_INSECURE_RELAY=1`. A URL without a scheme is rejected, as is a host not written in the canonical form the client dials (for example `0x7f.1` or `[0:0:0:0:0:0:0:1]`). The parsed, normalized URL is saved. Default `CLIPSYNC_RELAY_URL` or `https://clipsync.develicit.dev`. Relay HTTP requests do not follow redirects; plaintext relays are contacted directly, ignoring `HTTP_PROXY`/`ALL_PROXY` and system proxies, while `https://` relays honor them. |
-| `sync.enabled`, `sync.auto_start`, `notify.enabled` | `1`, `true`, `yes`, `on` mean true; all other strings mean false. Default true. |
+| `sync.enabled`, `sync.auto_start`, `notify.enabled` | `1`, `true`, `yes`, `on` mean true; `0`, `false`, `no`, `off` mean false; any other value fails and leaves the setting unchanged. Default true. |
 | `notify.preview` | Same boolean syntax; default false. |
 | `pairing.require_commitment` | Same boolean syntax; default false. When true, refuse to pair without the [commitment round](security.md#commitment-round) instead of falling back to reduced protection. Against a malicious relay it counts on the device that runs `room create`. |
 | `sync.direction` | `both`, `send-only`/`send_only`, `receive-only`/`receive_only`; default `both`. Single-key `get` currently returns `sendonly`/`receiveonly`, while full JSON uses underscores. |
@@ -128,7 +128,7 @@ define room/peer output.
 
 `sync.types` (default text/image/files), `sync.debounce_ms` (default 200), and
 `webhook` appear in the full config but have no `config set` key. An unknown key
-or invalid direction/integer fails. `send_only` currently does not block
+or invalid boolean/direction/integer fails. `send_only` currently does not block
 received clipboard writes; `receive_only` blocks the sending watch path.
 Restart a running daemon after changing configuration to reload its snapshot.
 

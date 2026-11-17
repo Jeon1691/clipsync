@@ -117,28 +117,18 @@ impl AppConfig {
         }
     }
 
+    /// Set `key` from its `config set` string. Returns false, leaving the
+    /// config unchanged, for an unknown key or a value the key does not take.
     pub fn set(&mut self, key: &str, value: &str) -> bool {
         match key {
             "relay_url" => {
                 self.relay_url = value.to_string();
                 true
             }
-            "sync.enabled" => {
-                self.sync.enabled = parse_bool(value);
-                true
-            }
-            "sync.auto_start" => {
-                self.sync.auto_start = parse_bool(value);
-                true
-            }
-            "sync.legacy_envelopes" => {
-                self.sync.legacy_envelopes = parse_bool(value);
-                true
-            }
-            "sync.strict_envelopes" => {
-                self.sync.strict_envelopes = parse_bool(value);
-                true
-            }
+            "sync.enabled" => set_bool(&mut self.sync.enabled, value),
+            "sync.auto_start" => set_bool(&mut self.sync.auto_start, value),
+            "sync.legacy_envelopes" => set_bool(&mut self.sync.legacy_envelopes, value),
+            "sync.strict_envelopes" => set_bool(&mut self.sync.strict_envelopes, value),
             "sync.direction" => {
                 self.sync.direction = match value {
                     "both" => SyncDirection::Both,
@@ -156,23 +146,33 @@ impl AppConfig {
                     false
                 }
             }
-            "notify.enabled" => {
-                self.notify.enabled = parse_bool(value);
-                true
-            }
-            "notify.preview" => {
-                self.notify.preview = parse_bool(value);
-                true
-            }
-            "pairing.require_commitment" => {
-                self.pairing.require_commitment = parse_bool(value);
-                true
-            }
+            "notify.enabled" => set_bool(&mut self.notify.enabled, value),
+            "notify.preview" => set_bool(&mut self.notify.preview, value),
+            "pairing.require_commitment" => set_bool(&mut self.pairing.require_commitment, value),
             _ => false,
         }
     }
 }
 
-fn parse_bool(v: &str) -> bool {
-    matches!(v, "1" | "true" | "yes" | "on")
+/// Parse an explicit boolean. Anything else is rejected rather than read as
+/// false, so a typo cannot silently leave an opt-in such as
+/// `pairing.require_commitment` or `sync.strict_envelopes` turned off.
+fn parse_bool(v: &str) -> Option<bool> {
+    match v {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// Store `value` in `field` if it is an explicit boolean; otherwise leave
+/// `field` unchanged and report the value as invalid.
+fn set_bool(field: &mut bool, value: &str) -> bool {
+    match parse_bool(value) {
+        Some(parsed) => {
+            *field = parsed;
+            true
+        }
+        None => false,
+    }
 }

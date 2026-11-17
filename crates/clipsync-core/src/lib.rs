@@ -336,7 +336,13 @@ impl App {
         };
         let mut cfg = self.store.load_config()?;
         if !cfg.set(key, value) {
-            return Err(CoreError::Message(format!("unknown config key {key}")));
+            // `get` knows every settable key, so a refused `set` of a known
+            // key means the value was invalid.
+            return Err(CoreError::Message(if cfg.get(key).is_some() {
+                format!("invalid value for config key {key}")
+            } else {
+                format!("unknown config key {key}")
+            }));
         }
         self.store.save_config(&cfg)?;
         Ok(())
