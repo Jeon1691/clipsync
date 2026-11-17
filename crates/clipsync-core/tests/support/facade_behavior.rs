@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Scrape credential for the facade relay; the readiness fence reads `/metrics`.
+#[cfg(unix)]
 const FACADE_METRICS_TOKEN: &str = "facade-metrics-scrape-token-0123456789";
 
 const WORKER: &str = "CLIPSYNC_FACADE_WORKER";
