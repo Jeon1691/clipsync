@@ -161,7 +161,7 @@ they can allocate. The defaults suit a small self-hosted relay:
 | `CLIPSYNC_RELAY_PAIRING_CLIENT_CREATE_LIMIT` | `20` | 1 to the relay-wide creation limit; pairings one client address (IPv6: one /64) may create per client creation window |
 | `CLIPSYNC_RELAY_PAIRING_CLIENT_CREATE_WINDOW_SECS` | `900` | `120` (one pairing TTL) to `86400` |
 | `CLIPSYNC_RELAY_PAIRING_RELAY_CREATE_LIMIT` | `100` | 1 to `500`; pairings all clients together may create per 120-second pairing TTL |
-| `CLIPSYNC_RELAY_MAX_ROOMS` | `10000` | at least 1; rooms held at once |
+| `CLIPSYNC_RELAY_MAX_ROOMS` | `10000` | more than `CLIPSYNC_RELAY_MAX_CONNECTIONS` plus 1,000; rooms held at once |
 | `CLIPSYNC_RELAY_MAX_CONNECTIONS` | `512` | at least 1; WebSocket connections at once |
 | `CLIPSYNC_RELAY_MAX_CLIENT_CONNECTIONS` | `32` | 1 to `CLIPSYNC_RELAY_MAX_CONNECTIONS`; WebSocket connections from one client address (IPv6: one /64) at once |
 
@@ -170,30 +170,49 @@ The CLI equivalents are `--pairing-client-create-limit`,
 `--max-rooms`, `--max-connections` and `--max-client-connections`. Values
 outside these ranges stop startup.
 
-A spent creation budget answers `429 too_many_pairings`. The relay also holds
-at most 1,000 open pairing sessions, a fixed 0.1% of the 10^6 pairing codes, so
-a new session always gets a fresh code; open sessions that could still complete
-also count against `CLIPSYNC_RELAY_MAX_ROOMS`. At either cap, creation answers
+Each IPv6 /48 gets three clients' worth of the per-client creation limit and
+connection cap, so one site cannot multiply its share by spreading over many
+/64s. A spent creation budget answers `429 too_many_pairings`. The relay also
+holds at most 1,000 open pairing sessions, a fixed 0.1% of the 10^6 pairing
+codes, so a new session always gets a fresh code. At that cap, creation answers
 `503 relay_full`. The relay-wide creation limit stops at 500 so that creations
 within the limit cannot fill the session cap on their own. Connections past a
 cap are refused before the WebSocket upgrade, with `429 too_many_connections`
-for one client or `503 relay_full` for the whole relay. The default connection
-cap stays below the common 1024 open-file limit; raise that limit before
-raising `CLIPSYNC_RELAY_MAX_CONNECTIONS`.
+for one client or site, or `503 relay_full` for the whole relay. Sockets that
+are not room members yet (before `hello`, or while pairing) may hold 75% of
+the connection slots. Past that, a new socket evicts the oldest of them
+instead.
 
-Rooms persist until every device in a room has been revoked, or until its
-device tokens expire, one year after pairing, with none of its devices
-connected. So a full room cap does not clear by itself: anyone can fill it by
-pairing their own devices within the creation budgets. Size
-`CLIPSYNC_RELAY_MAX_ROOMS` for your users and watch `clipsync_rooms`; a restart
-clears the cap but also drops every room, because rooms are held in memory. A
-WebSocket that sends no valid `hello` within 10 seconds of the upgrade, or
+Each connection takes one file descriptor, so `CLIPSYNC_RELAY_MAX_CONNECTIONS`
+must fit under the relay process's open-file soft limit, with room for the
+listener, up to 128 TLS handshakes and webhooks. Linux and systemd services
+default to 1024, which fits the default of 512. A shell on macOS defaults to
+256, so before starting the relay from one, run `ulimit -n 1024` or lower
+`CLIPSYNC_RELAY_MAX_CONNECTIONS`. Raise the limit (for example `LimitNOFILE=`
+in a systemd unit) before raising `CLIPSYNC_RELAY_MAX_CONNECTIONS`.
+
+Open sessions that could still complete count against
+`CLIPSYNC_RELAY_MAX_ROOMS`. The room cap never blocks pairing: at the cap, a
+new pairing evicts the least recently used room that has no device online. A
+room is used when one of its devices authenticates, sends anything, or
+disconnects. Rooms with a device online are never evicted. Startup requires the
+cap to exceed `CLIPSYNC_RELAY_MAX_CONNECTIONS` plus the 1,000 open sessions, so
+there is always a room to evict. An evicted room's devices get `unknown room`
+when they reconnect and must pair again, the same outcome as a relay restart,
+because rooms are held in memory. Size `CLIPSYNC_RELAY_MAX_ROOMS` well above
+the rooms your users keep, so that only long-unused rooms are evicted. Watch
+`clipsync_rooms` and `clipsync_rooms_evicted`. Otherwise rooms persist until
+every device in a room has been revoked, or until its device tokens expire,
+one year after pairing, with none of its devices connected.
+
+A WebSocket that sends no valid `hello` within 10 seconds of the upgrade, or
 that goes silent for 60 seconds after authenticating, is closed and frees its
-connection slot. Offline text is queued for at most 256 recipients at once, each
-envelope until its TTL ends (at most 300 seconds). `/metrics` reports
-`clipsync_ws_sockets`, `clipsync_ws_refused`, `clipsync_pairing_sessions`,
-`clipsync_pairing_create_throttled`, `clipsync_pairing_create_full`,
-`clipsync_rooms` and `clipsync_queue_full`.
+connection slot. Offline text is queued for at most 256 recipients at once, at
+most 16 of them from one client address, each envelope for at most 60 seconds.
+`/metrics` reports `clipsync_ws_sockets`, `clipsync_ws_refused`,
+`clipsync_pairing_sessions`, `clipsync_pairing_create_throttled`,
+`clipsync_pairing_create_full`, `clipsync_rooms`, `clipsync_queue_full` and
+`clipsync_rooms_evicted`.
 
 ## Production (Proxmox)
 
@@ -262,7 +281,7 @@ location / {
 | `CLIPSYNC_RELAY_PAIRING_CLIENT_CREATE_LIMIT` | Pairings one client may create per window; default `20` (see [resource limits](#resource-limits)) |
 | `CLIPSYNC_RELAY_PAIRING_CLIENT_CREATE_WINDOW_SECS` | Per-client creation window in seconds; default `900` |
 | `CLIPSYNC_RELAY_PAIRING_RELAY_CREATE_LIMIT` | Pairings created relay-wide per pairing TTL; default `100`, at most `500` |
-| `CLIPSYNC_RELAY_MAX_ROOMS` | Rooms held at once; default `10000` |
+| `CLIPSYNC_RELAY_MAX_ROOMS` | Rooms held at once before the least recently used idle room is evicted; default `10000` |
 | `CLIPSYNC_RELAY_MAX_CONNECTIONS` | WebSocket connections at once; default `512` |
 | `CLIPSYNC_RELAY_MAX_CLIENT_CONNECTIONS` | WebSocket connections per client address at once; default `32` |
 | `CLIPSYNC_RELAY_TOKEN_SECRET_FILE` | Optional private file of exact HMAC key bytes; at least 32 bytes; cannot be combined with `CLIPSYNC_RELAY_TOKEN_SECRET` |
