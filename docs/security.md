@@ -112,9 +112,36 @@ protocol changes; the current v1 format is retained for existing clients.
 ## Relay
 
 The relay routes opaque ciphertext. It stores at most one latest encrypted text
-envelope per recipient in memory for 60 seconds. Image and file frames are
-forwarded only while the peer is online and are never assembled or written to
-disk.
+envelope per recipient device in each room, in memory until the sender's
+expiry and never longer than 60 seconds. Image and file frames are forwarded
+only while the peer is online and are never assembled or written to disk.
+
+Room traffic and presence reach only sockets authenticated with a device token
+for a current, non-revoked room member, and routes are keyed by room and device
+ID. Device IDs are not secret, and the pairing endpoints issue pairing tokens
+for any device ID without authentication. A pairing socket therefore exchanges
+frames only within its own pairing session; it cannot send room traffic, or
+receive, displace or take offline a room member's route, and a device in one
+room cannot shadow the same device ID in another room. A member may hold up to
+four routed sockets at once, such as its sync daemon beside a CLI `push` or
+`pull`, and the relay delivers the member's room traffic to each of them. A
+fifth socket evicts the member's oldest, and an older socket whose outbound
+queue stays full for 30 seconds is evicted instead of stalling delivery. The
+relay sends to all of a member's sockets at once, so stalled sockets delay a
+delivery by at most 30 seconds in total. A socket that sends nothing for 60
+seconds, three missed client heartbeats, is closed and loses its route. A
+half-open socket left behind by a reconnect therefore stops counting the member
+as online within that time: text is queued for it again and its peers see it
+leave. Only a routed socket may send room traffic, and closing one socket
+removes only its own registration. Revocation removes all of the member's routes
+and closes every one of its sockets. A socket checks that it is still routed
+before it forwards each frame, and the check and forward are not atomic, so a
+frame that passed the check just before the revocation is still forwarded: at
+most one frame per socket of the revoked member, because each socket handles its
+frames one at a time. After that none of its sockets can send room traffic.
+Pairing requests that name a device ID already connected to a room are not
+rejected: such a check would reveal presence to unauthenticated callers and stop
+a device from pairing into another room, while routing no longer depends on it.
 
 Webhooks carry metadata only: opaque IDs, item kind, encrypted size, timestamp,
 status. Destination checks must include DNS results, IPv4/IPv6 special ranges,
@@ -128,7 +155,12 @@ macOS Keychain / Windows Credential Manager when available. Linux currently
 uses private files; a Secret Service backend is not enabled. Secret files have
 mode `0600` on Unix. Unix data/inbox directories use `0700`; Windows relies on
 the user's profile-directory access controls rather than POSIX modes.
-Received filenames are sanitized to basenames.
+Received filenames are sanitized to basenames. A file transfer whose names
+differ only by letter case is rejected whole on every platform, because
+case-insensitive filesystems (macOS, Windows) would store them as one file.
+Names the receiving filesystem otherwise resolves to one entry, such as
+Unicode normalization variants on APFS, are rejected when staging writes the
+second one; filesystems that keep them apart (ext4, NTFS) accept both.
 
 `replay-state.json` in the data directory holds envelope sequence numbers, not
 secrets. It is written atomically as a private file. Its integrity matters

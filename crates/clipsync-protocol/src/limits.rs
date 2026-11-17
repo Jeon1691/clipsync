@@ -7,6 +7,8 @@ pub const PAIRING_MAX_JOINERS: u32 = 1;
 pub const DEFAULT_TTL_SECS: u64 = 60;
 pub const MIN_TTL_SECS: u64 = 10;
 pub const HARD_MAX_TTL_SECS: u64 = 300;
+// Longest the relay keeps a queued text envelope for an offline member,
+// whatever expiry its sender chose (see docs/security.md).
 pub const QUEUE_TTL_SECS: u64 = 60;
 
 pub const TEXT_MAX_BYTES: usize = 256 * 1024;

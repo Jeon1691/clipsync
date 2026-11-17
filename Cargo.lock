@@ -1184,6 +1184,7 @@ dependencies = [
  "chrono",
  "clipsync-crypto",
  "clipsync-protocol",
+ "rustix 1.1.6",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
