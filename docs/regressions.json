@@ -2202,6 +2202,41 @@
       "description": "Synchronous pairing credential persistence held runtime workers past the eight-second connection watchdog and closed an authenticated exchange",
       "checks": [],
       "notes": "Three concurrent real relay e2e executables reproduced both pairing_and_text_push_pull and pairing_device_bind_nonces_are_unique on unchanged source 360ebb4: room-key writes blocked 8-10 seconds and the unchanged eight-second watchdog closed the socket after successful cryptographic confirmation. The same workload passes all 30 tests after moving key and room/config persistence to blocking workers. The worker explicitly captures the whole PairingKeys owner to retain ZeroizeOnDrop. macOS CI runs the bounded workload through scripts/test-pairing-concurrency.py and retains logs. This row conservatively receives no regression credit: native keychain latency and scheduler load are not a deterministic portable focused fixture. No unrelated passing test is substituted, and no watchdog threshold is relaxed."
+    },
+    {
+      "id": "F108",
+      "kind": "Runtime",
+      "fixes": [
+        "4512d852324b94b0a88e942b3128d33c1cad3461"
+      ],
+      "description": "Failed pairing joins were never counted, so one client could sweep the 6-digit SPAKE2 password space within a pairing TTL",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/http_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "http_tests::sweeping_wrong_codes_from_one_ip_is_throttled_and_blocks_the_correct_code",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/state_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "state::tests::distributed_wrong_codes_exhaust_the_relay_wide_budget_without_revealing_codes",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "On unchanged 76c63f9 the focused HTTP sweep failed with \"wrong-code sweep was never throttled\": every unknown code returned 404, record_ip_fail had no caller and the correct code then joined. Every failed join now reserves per-client and relay-wide budget before the lookup; the relay-wide check bounds distributed guessing. Pre-merge review variants of the same invariant (one shared budget behind the Proxmox Cloudflare Tunnel, and an opaque client-written X-Forwarded-For hop) have their own focused tests in the same PR and are not counted as separate defects because no released code contained them."
     }
   ]
 }

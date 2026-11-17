@@ -21,7 +21,7 @@ HTTP request/response and error schemas, WebSocket fields, and mobile bindings.
 - `POST /v1/pairing/join`
 - `GET /v1/ws`
 - `GET /healthz`
-- `GET /metrics`
+- `GET /metrics` (operator-only; disabled unless a bearer token is configured)
 
 ## Control messages (JSON text frames)
 

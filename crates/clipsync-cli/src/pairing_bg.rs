@@ -1,6 +1,5 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
-use std::fs::OpenOptions;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -40,13 +39,10 @@ pub async fn spawn_background_create(
 
     let exe = std::env::current_exe().map_err(|e| CoreError::Message(e.to_string()))?;
     let log_path = app.store.paths.log_file();
-    if let Some(parent) = log_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
+    // Creates the log dir owner-only (and narrows an older, wider one).
+    app.store.paths.ensure()?;
+    // The worker's stdout/stderr outlives this command: keep it owner-only.
+    let log = clipsync_storage::open_private_append(&log_path)?;
 
     let mut cmd = Command::new(exe);
     cmd.arg("room").arg("create").arg("--background-worker");

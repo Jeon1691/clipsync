@@ -880,6 +880,7 @@ mod tests {
             token_secret: vec![3; 32],
             webhook_url: None,
             webhook_secret: None,
+            metrics_token: None,
         };
         let server = client.rt.spawn(async move {
             axum::serve(

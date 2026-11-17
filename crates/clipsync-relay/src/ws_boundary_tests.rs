@@ -6,14 +6,17 @@ fn pending_pairing(state: &RelayState) -> (PairingSessionId, ConnCtx) {
     let sid = PairingSessionId::new();
     let device = DeviceId::new();
     let offer = state
-        .create_pairing(CreatePairingRequest {
-            protocol_version: clipsync_protocol::PROTOCOL_VERSION,
-            pairing_session_id: sid.clone(),
-            device_id: device.clone(),
-            device_name: "owner".into(),
-            os: "fixture".into(),
-            ttl_secs: Some(60),
-        })
+        .create_pairing(
+            CreatePairingRequest {
+                protocol_version: clipsync_protocol::PROTOCOL_VERSION,
+                pairing_session_id: sid.clone(),
+                device_id: device.clone(),
+                device_name: "owner".into(),
+                os: "fixture".into(),
+                ttl_secs: Some(60),
+            },
+            std::net::Ipv4Addr::LOCALHOST.into(),
+        )
         .unwrap();
     (
         sid.clone(),
@@ -23,7 +26,10 @@ fn pending_pairing(state: &RelayState) -> (PairingSessionId, ConnCtx) {
             pairing_sid: Some(sid.to_string()),
             device_role: DeviceRole::Owner,
             pairing_side: None,
+            client: TEST_CLIENT,
             member_conn: None,
+            presence: None,
+            pairing_deadline: None,
             _live: state.live_connection(),
         },
     )
