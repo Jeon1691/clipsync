@@ -1545,12 +1545,16 @@ mod liveness {
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >;
 
-    // Stands in for `READ_IDLE_TIMEOUT` so a silent socket is dropped quickly.
-    const TEST_READ_IDLE_TIMEOUT: Duration = Duration::from_millis(800);
+    // Stands in for `READ_IDLE_TIMEOUT` so a silent socket is dropped quickly,
+    // yet stays wide enough that the never-pinging stale socket outlives the
+    // live socket's connect and `PeerJoined` even on a heavily loaded CI
+    // runner; a shorter value could announce `PeerLeft` first and flake.
+    const TEST_READ_IDLE_TIMEOUT: Duration = Duration::from_millis(2_500);
     // Stands in for the client's `HEARTBEAT_SECS`, well inside the idle timeout.
     const TEST_HEARTBEAT: Duration = Duration::from_millis(100);
-    // Bounds every wait, so a regression fails instead of hanging.
-    const FIXTURE_DEADLINE: Duration = Duration::from_secs(10);
+    // Bounds every wait, so a regression fails instead of hanging; several
+    // read-idle timeouts long so one idle drop never races the deadline.
+    const FIXTURE_DEADLINE: Duration = Duration::from_secs(15);
     // Large enough that a few hundred frames fill the loopback socket buffers.
     const TEST_FILL_FRAME_BYTES: usize = 64 * 1024;
     // A send blocked this long means the writer stopped and the queue is full.
