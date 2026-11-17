@@ -5,6 +5,7 @@
 use super::*;
 use crate::envelope::{check_version, sending_version, sequence_floor, EnvelopePolicy};
 use crate::EnvelopeRejection;
+use chrono::DateTime;
 use clipsync_protocol::CLOCK_SKEW_SECS;
 
 /// Routing header a current sender in `pair` would emit from `from` to the room.
@@ -424,6 +425,106 @@ fn header_checks_cover_addressing_lifetime_and_frame_kind() {
         ),
         EnvelopeRejection::WrongItemKind
     );
+}
+
+/// Header timestamps arrive from the relay before authentication. Extremes of
+/// chrono's range must be rejected (or, for an unbound v1 `sent_at`, accepted
+/// as before v2) without panicking: release builds abort on panic, so one
+/// envelope would otherwise stop the receiving client.
+#[test]
+fn extreme_header_timestamps_are_rejected_without_panicking() {
+    let max = DateTime::<Utc>::MAX_UTC;
+    let min = DateTime::<Utc>::MIN_UTC;
+    let fresh_expiry = || Utc::now() + ChronoDuration::seconds(60);
+    // (case, sent_at, expires_at, v1 outcome, v2 outcome); `None` = admitted.
+    type Case = (
+        &'static str,
+        DateTime<Utc>,
+        DateTime<Utc>,
+        Option<EnvelopeRejection>,
+        Option<EnvelopeRejection>,
+    );
+    let cases: Vec<Case> = vec![
+        (
+            "expires_at at the maximum",
+            Utc::now(),
+            max,
+            Some(EnvelopeRejection::LifetimeTooLong),
+            Some(EnvelopeRejection::LifetimeTooLong),
+        ),
+        (
+            "expires_at just below the maximum",
+            Utc::now(),
+            max - ChronoDuration::nanoseconds(1),
+            Some(EnvelopeRejection::LifetimeTooLong),
+            Some(EnvelopeRejection::LifetimeTooLong),
+        ),
+        (
+            "expires_at at the minimum",
+            min,
+            min,
+            Some(EnvelopeRejection::Expired),
+            Some(EnvelopeRejection::Expired),
+        ),
+        (
+            "sent_at at the minimum",
+            min,
+            fresh_expiry(),
+            Some(EnvelopeRejection::LifetimeTooLong),
+            Some(EnvelopeRejection::LifetimeTooLong),
+        ),
+        (
+            // v1 does not bind `sent_at`, so it is not checked there.
+            "sent_at at the maximum",
+            max,
+            fresh_expiry(),
+            None,
+            Some(EnvelopeRejection::NotYetValid),
+        ),
+        (
+            "both at the maximum",
+            max,
+            max,
+            Some(EnvelopeRejection::LifetimeTooLong),
+            Some(EnvelopeRejection::NotYetValid),
+        ),
+        (
+            "sent_at at the minimum, expires_at at the maximum",
+            min,
+            max,
+            Some(EnvelopeRejection::LifetimeTooLong),
+            Some(EnvelopeRejection::LifetimeTooLong),
+        ),
+    ];
+    for version in [ENVELOPE_VERSION_LEGACY, ENVELOPE_VERSION_AUTHENTICATED] {
+        // A fresh receiver per version: an admitted v2 would refuse later v1.
+        let room = RoomId::new();
+        let peer = scripted_peer("http://127.0.0.1:1", room.clone());
+        for (case, sent_at, expires_at, v1, v2) in &cases {
+            let expected = if version == ENVELOPE_VERSION_LEGACY {
+                v1
+            } else {
+                v2
+            };
+            for kind in [ItemKind::Text, ItemKind::Image] {
+                let routing = RoutingHeader {
+                    version,
+                    sent_at: *sent_at,
+                    expires_at: *expires_at,
+                    ..routing_from(&room, SCRIPT_SENDER, kind)
+                };
+                let outcome = match kind {
+                    ItemKind::Text => admit_text(&peer, &routing, "extreme").map(|_| ()),
+                    _ => admit_manifest(&peer, &routing).map(|_| ()),
+                };
+                let context = format!("v{version} {kind:?}: {case}");
+                match expected {
+                    None => outcome.unwrap_or_else(|err| panic!("{context}: {err:?}")),
+                    Some(rejected) => assert_eq!(rejection(outcome), *rejected, "{context}"),
+                }
+            }
+        }
+    }
 }
 
 #[test]

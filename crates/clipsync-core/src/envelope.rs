@@ -207,10 +207,22 @@ pub(crate) fn check_header(
     // Only v2 binds `sent_at`. For v1 a relay can rewrite it, so refusing an
     // early v1 adds nothing and would stop released peers whose clock runs
     // ahead, which synced before v2 existed. Expiry stays for both versions.
-    if routing.version == ENVELOPE_VERSION_AUTHENTICATED && routing.sent_at > now + skew {
-        return Err(EnvelopeRejection::NotYetValid);
+    // Checked arithmetic throughout: header timestamps come from the relay
+    // before authentication, and an overflowing `DateTime + Duration` panics
+    // (process abort in release builds). Overflow rejects the envelope.
+    if routing.version == ENVELOPE_VERSION_AUTHENTICATED {
+        let latest_sent = now
+            .checked_add_signed(skew)
+            .ok_or(EnvelopeRejection::NotYetValid)?;
+        if routing.sent_at > latest_sent {
+            return Err(EnvelopeRejection::NotYetValid);
+        }
     }
-    if routing.expires_at + skew < now {
+    let honoured_until = routing
+        .expires_at
+        .checked_add_signed(skew)
+        .ok_or(EnvelopeRejection::LifetimeTooLong)?;
+    if honoured_until < now {
         return Err(EnvelopeRejection::Expired);
     }
     // Saturate: an unrepresentable TTL can only be "too long".
