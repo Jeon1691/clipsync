@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: MIT
 //! Golden vectors for the pairing expiry the CLI prints and persists.
 //!
-//! `room create` shows the relay's `expires_at` three ways: the `--json` event
-//! (RFC 3339 with `Z`), the human `expires:` line, and the background pairing
-//! file (RFC 3339 with `+00:00`, which `room status` reads back verbatim). A
-//! scripted relay returns fixed instants so the exact strings are pinned.
+//! Foreground `room create` shows the relay's `expires_at` three ways: the
+//! `--json` event (RFC 3339 with `Z`), the human `expires:` line, and the
+//! pairing file (RFC 3339 with `+00:00`, which `room status` reads back
+//! verbatim). Background `room create` prints the pairing file's string in
+//! both its `--json` event and its `expires:` line. A scripted relay returns
+//! fixed instants so the exact strings are pinned.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -110,15 +112,10 @@ async fn scripted_relay(expires_at: &'static str) -> (String, tokio::task::JoinH
     (format!("http://{addr}"), task)
 }
 
-/// Run a foreground `room create`, return the line starting with `prefix`
-/// and the pairing file's `expires_at`, then stop the process.
-async fn create_until(home: &Path, relay: &str, json: bool, prefix: &str) -> (String, String) {
-    let mut args = vec!["room", "create", "--foreground", "--no-auto-sync"];
-    if json {
-        args.insert(0, "--json");
-    }
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_clipsync"))
-        .args(&args)
+/// The CLI binary isolated in `home` and pointed at `relay`.
+fn cli(home: &Path, relay: &str) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_clipsync"));
+    command
         .env("RUST_LOG", "error")
         .env("CLIPSYNC_HOME", home)
         .env("HOME", home)
@@ -128,7 +125,27 @@ async fn create_until(home: &Path, relay: &str, json: bool, prefix: &str) -> (St
         .env("CLIPSYNC_RELAY_URL", relay)
         .env("CLIPSYNC_NO_DAEMON", "1")
         .env_remove("CLIPSYNC_LISTEN")
-        .env_remove("CLIPSYNC_CA_FILE")
+        .env_remove("CLIPSYNC_CA_FILE");
+    command
+}
+
+fn load_pairing_wait(home: &Path) -> clipsync_storage::PairingWait {
+    let store = clipsync_storage::LocalStore::open_from(clipsync_storage::AppPaths::from_root(
+        home.to_path_buf(),
+    ))
+    .unwrap();
+    store.load_pairing_wait().unwrap().expect("pairing file")
+}
+
+/// Run a foreground `room create`, return the line starting with `prefix`
+/// and the pairing file's `expires_at`, then stop the process.
+async fn create_until(home: &Path, relay: &str, json: bool, prefix: &str) -> (String, String) {
+    let mut args = vec!["room", "create", "--foreground", "--no-auto-sync"];
+    if json {
+        args.insert(0, "--json");
+    }
+    let mut child = cli(home, relay)
+        .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -147,11 +164,7 @@ async fn create_until(home: &Path, relay: &str, json: bool, prefix: &str) -> (St
     .await
     .expect("room create output");
     // The pairing file is written before the code is printed.
-    let store = clipsync_storage::LocalStore::open_from(clipsync_storage::AppPaths::from_root(
-        home.to_path_buf(),
-    ))
-    .unwrap();
-    let wait = store.load_pairing_wait().unwrap().expect("pairing file");
+    let wait = load_pairing_wait(home);
     child.kill().await.unwrap();
     (line, wait.expires_at)
 }
@@ -175,6 +188,86 @@ async fn room_create_prints_and_persists_pinned_expiry_strings() {
         assert_eq!(
             line,
             format!("expires: {human_value}"),
+            "{relay_value} human"
+        );
+        assert_eq!(persisted, *file_value, "{relay_value} pairing file (human)");
+
+        task.abort();
+    }
+}
+
+/// Run a background `room create`, which returns once its worker has written
+/// the pairing file, and return the line starting with `prefix` and the
+/// pairing file's `expires_at`. The worker is stopped before returning.
+async fn create_in_background(
+    home: &Path,
+    relay: &str,
+    json: bool,
+    prefix: &str,
+) -> (String, String) {
+    let mut args = vec!["room", "create", "--no-auto-sync"];
+    if json {
+        args.insert(0, "--json");
+    }
+    let output = tokio::time::timeout(
+        OUTPUT_DEADLINE,
+        cli(home, relay).args(&args).stdin(Stdio::null()).output(),
+    )
+    .await
+    .expect("background room create output")
+    .unwrap();
+    let wait = load_pairing_wait(home);
+    stop_worker(wait.pid);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with(prefix))
+        .unwrap_or_else(|| panic!("no {prefix:?} line in {stdout}"));
+    (line.to_owned(), wait.expires_at)
+}
+
+/// Stop a background pairing worker the way the other CLI tests do. Elsewhere
+/// it exits once the scripted relay goes away with the test runtime.
+fn stop_worker(pid: u32) {
+    #[cfg(unix)]
+    {
+        /// POSIX `SIGTERM`: the worker's ordinary shutdown signal.
+        const SIGTERM: i32 = 15;
+        extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        // SAFETY: `kill` takes plain integers; the pid is the worker this
+        // test started.
+        unsafe { kill(i32::try_from(pid).unwrap(), SIGTERM) };
+    }
+    let _ = pid;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn background_room_create_prints_the_pairing_file_expiry_string() {
+    for (relay_value, _, _, file_value) in VECTORS {
+        let (relay, task) = scripted_relay(relay_value).await;
+
+        let home = TempDir::new().unwrap();
+        seed_identity_file(home.path());
+        let (line, persisted) = create_in_background(home.path(), &relay, true, "{").await;
+        let event: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(event["event"], "pairing_code", "{line}");
+        assert_eq!(event["background"], true, "{line}");
+        assert_eq!(event["expires_at"], *file_value, "{relay_value} --json");
+        assert_eq!(persisted, *file_value, "{relay_value} pairing file (json)");
+
+        let home = TempDir::new().unwrap();
+        seed_identity_file(home.path());
+        let (line, persisted) = create_in_background(home.path(), &relay, false, "expires: ").await;
+        assert_eq!(
+            line,
+            format!("expires: {file_value}"),
             "{relay_value} human"
         );
         assert_eq!(persisted, *file_value, "{relay_value} pairing file (human)");

@@ -1176,70 +1176,20 @@ async fn undecodable_joins_test_no_code_and_leave_the_join_budget_to_decodable_g
     task.abort();
 }
 
-/// RFC 3339 exactly as the relay emits it: `YYYY-MM-DDTHH:MM:SS`, then either
-/// nothing or `.` and 3, 6 or 9 digits whose last group of three is not all
-/// zeros (the shortest exact spelling), then `Z`.
-fn is_canonical_utc(value: &str) -> bool {
-    const SECONDS_LEN: usize = "YYYY-MM-DDTHH:MM:SS".len();
-    const FRACTION_GROUP: usize = 3;
-    let Some(body) = value.strip_suffix('Z') else {
-        return false;
-    };
-    if body.len() < SECONDS_LEN {
-        return false;
-    }
-    let (seconds, fraction) = body.split_at(SECONDS_LEN);
-    let digit_at = |i: usize| seconds.as_bytes()[i].is_ascii_digit();
-    let separators_ok = seconds.as_bytes()[4] == b'-'
-        && seconds.as_bytes()[7] == b'-'
-        && seconds.as_bytes()[10] == b'T'
-        && seconds.as_bytes()[13] == b':'
-        && seconds.as_bytes()[16] == b':';
-    let digits_ok = (0..SECONDS_LEN)
-        .filter(|i| ![4, 7, 10, 13, 16].contains(i))
-        .all(digit_at);
-    let fraction_ok = match fraction.strip_prefix('.') {
-        None => fraction.is_empty(),
-        Some(digits) => {
-            [3, 6, 9].contains(&digits.len())
-                && digits.bytes().all(|b| b.is_ascii_digit())
-                && !digits[digits.len() - FRACTION_GROUP..]
-                    .bytes()
-                    .all(|b| b == b'0')
-        }
-    };
-    separators_ok && digits_ok && fraction_ok
-}
-
-#[test]
-fn canonical_utc_shape_check_matches_the_protocol_vectors() {
-    for good in [
-        "2023-11-14T22:13:20Z",
-        "2023-11-14T22:13:20.100Z",
-        "2023-11-14T22:13:20.123456Z",
-        "2023-11-14T22:13:20.000000001Z",
-    ] {
-        assert!(is_canonical_utc(good), "{good}");
-    }
-    for bad in [
-        "2023-11-14T22:13:20+00:00",
-        "2023-11-14T22:13:20.000Z",
-        "2023-11-14T22:13:20.123000Z",
-        "2023-11-14T22:13:20.1Z",
-        "2023-11-14 22:13:20Z",
-        "2023-11-14T22:13:20z",
-    ] {
-        assert!(!is_canonical_utc(bad), "{bad}");
-    }
-}
-
-/// The pairing responses carry `expires_at` in the canonical spelling, and
-/// the joiner sees exactly the creator's string.
+/// The pairing responses carry `expires_at` in the canonical spelling, set
+/// to [`PAIRING_TTL_SECS`] after the request was served, and the joiner sees
+/// exactly the creator's string.
 #[tokio::test]
 async fn pairing_responses_emit_one_canonical_expiry_string() {
+    use crate::timestamp_shape_tests::is_canonical_utc;
+    use clipsync_protocol::Timestamp;
+    use clipsync_protocol::PAIRING_TTL_SECS;
+
+    let ttl = time::Duration::try_from(Duration::from_secs(PAIRING_TTL_SECS)).unwrap();
     let state = join_test_state();
     let (url, server) = spawn_router(router_with_state(state)).await;
     let client = loopback_client();
+    let before = Timestamp::now();
     let create: serde_json::Value = client
         .post(format!("{url}/v1/pairing/create"))
         .json(&CreatePairingRequest {
@@ -1256,8 +1206,16 @@ async fn pairing_responses_emit_one_canonical_expiry_string() {
         .json()
         .await
         .unwrap();
+    let after = Timestamp::now();
     let created = create["expires_at"].as_str().unwrap();
     assert!(is_canonical_utc(created), "{created}");
+    let decoded: clipsync_protocol::CreatePairingResponse =
+        serde_json::from_value(create.clone()).unwrap();
+    let expires_at = decoded.expires_at;
+    assert!(
+        before + ttl <= expires_at && expires_at <= after + ttl,
+        "{created} outside [{before:?}, {after:?}] + {PAIRING_TTL_SECS}s"
+    );
     let join: serde_json::Value = client
         .post(format!("{url}/v1/pairing/join"))
         .json(&join_request(create["pairing_code"].as_str().unwrap()))
