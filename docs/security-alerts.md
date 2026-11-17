@@ -20,9 +20,12 @@ with quinn-proto 0.11.19, and RUSTSEC-2026-0538 with quinn-udp 0.5.16.
 The v0.2.0 workspace requires Rust 1.95, checked in CI, and fuzz jobs validate their
 lockfile with `cargo metadata --locked` before building.
 
-The security workflow audits both committed lockfiles. Vulnerabilities, unsound
-code advisories, and yanked packages fail the audit job. Unmaintained-package
-warnings remain visible; they are not suppressed with an advisory ignore list.
+The security workflow audits the three committed lockfiles (`Cargo.lock`,
+`fuzz/Cargo.lock` and `vendor/test-workspace.Cargo.lock`). Vulnerabilities,
+unsound code advisories, yanked packages and unmaintained packages fail the
+audit job. The only advisory exception is the time-boxed chrono ignore described
+in [Unmaintained time crates](#unmaintained-time-crates); it expires at its
+**2027-02-15** review.
 
 ## Pairing and deployment follow-up
 
@@ -55,8 +58,9 @@ TOML-parser fix, and migrates the AccessKit/AT-SPI source stack to maintained
 zbus 6.3 APIs. Accessibility, native decorations/title text, both graphics
 backends, clipboard formats, and mobile bindings remain enabled.
 
-Both real lockfile audits now report zero vulnerabilities and no warnings,
-without advisory ignores. This is not solely a released-dependency update:
+At that migration both real lockfile audits reported zero vulnerabilities and
+no warnings, without advisory ignores; the later chrono exception is described
+in [Unmaintained time crates](#unmaintained-time-crates). This is not solely a released-dependency update:
 seven explicit compatibility source forks are maintained by ClipSync. Their
 pinned original sources, complete local diffs, upstream licenses, ownership,
 weekly review policy, and retirement conditions are recorded in
@@ -67,6 +71,25 @@ See [dependency migration](dependency-migration.md) for each replacement path,
 actual Rust 1.95 minimum, upstream-source evidence, behavior tests, and remaining
 platform verification limits. The first patch-retirement review is due
 **2026-12-11**. Weekly dependency checks and both lockfile audits remain in place.
+
+## Unmaintained time crates
+
+RustSec published two unmaintained advisories on 2026-09-14, neither with a
+patched release, which failed the required `audit` job:
+
+| Advisory | Package | Resolution |
+| --- | --- | --- |
+| [RUSTSEC-2026-0542](https://rustsec.org/advisories/RUSTSEC-2026-0542) | humantime 2.4.0 | Removed. `room create --ttl` now uses a small in-house parser in `clipsync-cli` that accepts the same units, compound/fractional forms and whitespace and prints the same error text. It reports an overflow error where humantime panicked on one input class. |
+| [RUSTSEC-2026-0543](https://rustsec.org/advisories/RUSTSEC-2026-0543) | chrono 0.4.45 | **Time-boxed ignore** in [`.cargo/audit.toml`](../.cargo/audit.toml), read by all three audits. Owner: maintainer. Review by **2027-02-15**. Tracking: [#38](https://github.com/Jeon1691/clipsync/issues/38). |
+
+chrono has no maintained drop-in replacement. Its `DateTime<Utc>` values are part
+of the RFC 3339 wire format and persisted state, so the replacement (`time` or
+`jiff`) needs its own reviewed PR with migration test vectors that keep those
+formats byte-identical. Until then chrono stays in the dependency graph without
+upstream maintenance. The ignore covers only RUSTSEC-2026-0543: the workflow
+keeps `--deny unmaintained`, so any other unmaintained package still fails the
+audit. At the review date the entry must be removed or renewed with a new date
+and reason.
 
 ## Compiler-warning review and strict checks
 
