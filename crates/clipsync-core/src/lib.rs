@@ -90,8 +90,21 @@ impl App {
         Ok(identity)
     }
 
+    /// The stored identity, or a new one set up as [`Self::init`] does.
+    ///
+    /// Reading a stored identity writes nothing: `status` and every command
+    /// call this while a pairing or `config set` in another process may be
+    /// changing the configuration, and writing back the configuration read
+    /// here would undo that change.
     pub fn identity(&self) -> Result<DeviceIdentity, CoreError> {
-        self.init(None)
+        match self.store.secrets.load_identity() {
+            Ok(identity) => {
+                // Still report an unreadable configuration, as `init` does.
+                self.store.load_config()?;
+                Ok(identity)
+            }
+            Err(_) => self.init(None),
+        }
     }
 
     pub async fn room_create<C, F>(
@@ -583,6 +596,32 @@ pub fn device_id_or_new(store: &LocalStore) -> Result<DeviceId, CoreError> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod regression_tests {
+    #[test]
+    fn reading_the_identity_leaves_the_configuration_file_untouched() {
+        // `status` and every command read the identity while a pairing or
+        // `config set` in another process may be changing the configuration.
+        // Writing back what was read would undo that change.
+        let root = tempfile::tempdir().unwrap();
+        let app = crate::App::open_from(super::AppPaths::from_root(root.path().into())).unwrap();
+        let identity = app.init(None).unwrap();
+        let config = app.store.paths.config_file();
+        let mut cfg = app.store.load_config().unwrap();
+        cfg.sync.enabled = true;
+        app.store.save_config(&cfg).unwrap();
+        // A comment marks the bytes another writer left; a rewrite drops it.
+        let written = format!(
+            "# written by another process\n{}",
+            std::fs::read_to_string(&config).unwrap()
+        );
+        std::fs::write(&config, &written).unwrap();
+        assert_eq!(
+            app.identity().unwrap().device_id,
+            identity.device_id,
+            "the stored identity is returned"
+        );
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), written);
+    }
+
     #[test]
     fn http_requests_identify_the_current_package_version() {
         const CHILD: &str = "CLIPSYNC_TEST_USER_AGENT_CHILD";
