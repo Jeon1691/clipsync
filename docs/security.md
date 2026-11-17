@@ -169,6 +169,16 @@ channel. Use HTTPS/WSS with trusted certificates for public deployments; the
 relay requires a TLS certificate/key pair by default and permits only TLS
 1.2/1.3. Its explicit HTTP opt-in requires TLS termination and network
 restrictions for public deployments; see [self-hosting](self-hosting.md).
+Clients refuse plaintext `http://`/`ws://` relay URLs, and URLs without a
+scheme, when saving configuration and again before each relay request, because
+pairing codes (the PAKE password), pairing tokens and device tokens would
+otherwise cross the network in clear. Loopback hosts (`127.0.0.0/8`, `::1`,
+`localhost`) are exempt; `CLIPSYNC_ALLOW_INSECURE_RELAY=1` overrides the check
+for a trusted network and logs a warning on every use. Relay HTTP requests never
+follow redirects, so a relay or TLS front cannot forward the pairing code to an
+unchecked host or scheme. Plaintext relay requests never use a proxy
+(`HTTP_PROXY`, `ALL_PROXY` or system settings), so loopback traffic stays on
+this machine; `https://` relays still honor proxies.
 Metadata and traffic timing remain visible to the relay. Denial of service,
 delivery by a malicious relay, secure erasure of old copies/backups, and payload
 forward secrecy are not guaranteed. Native libraries, OS trust stores and
