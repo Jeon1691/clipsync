@@ -2073,9 +2073,20 @@ fn pairing_with_stalled_peer(
 /// reading cannot hold the socket's connection slot past its session.
 #[tokio::test(start_paused = true)]
 async fn a_pairing_socket_stalled_on_its_peer_closes_at_its_deadline() {
+    use crate::resource_limits::{HELLO_TIMEOUT, READ_IDLE_TIMEOUT};
     /// The pairing session's remaining lifetime: well inside the read-idle
     /// limit, so the session's expiry is the socket's deadline.
     const PAIRING_LEFT: Duration = Duration::from_secs(2);
+    /// The relay derives the deadline from the session's wall-clock expiry,
+    /// which keeps running while tokio's clock is paused, so the deadline
+    /// lands slightly before `PAIRING_LEFT`; paused timers also fire at
+    /// millisecond granularity just after it. Either way the close stays far
+    /// inside this, which is far below the gap to `HELLO_TIMEOUT`.
+    const TIMER_SLACK: Duration = Duration::from_secs(1);
+    // A close at the hello deadline, or at the read-idle limit, must fall
+    // outside the window this test accepts.
+    const _: () = assert!(PAIRING_LEFT.as_secs() + TIMER_SLACK.as_secs() < HELLO_TIMEOUT.as_secs());
+    const _: () = assert!(PAIRING_LEFT.as_secs() < READ_IDLE_TIMEOUT.as_secs());
     /// Far beyond the deadline: the loop must end at the deadline, not here.
     const HANG: Duration = Duration::from_secs(30);
     let state = state();
@@ -2085,13 +2096,19 @@ async fn a_pairing_socket_stalled_on_its_peer_closes_at_its_deadline() {
     let slot = state.acquire_connection(TEST_CLIENT).unwrap();
     let (tx, _rx) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
     let mut stream = futures_util::stream::iter(requests).chain(futures_util::stream::pending());
+    let started = tokio::time::Instant::now();
     let ctx = tokio::time::timeout(
         HANG,
         read_loop(&mut stream, &state, &tx, None, TEST_CLIENT, &slot),
     )
     .await
     .expect("a pairing forward stalled past the socket's deadline");
+    let stalled = started.elapsed();
     assert!(ctx.is_some_and(|c| c.pairing_side == Some(0) && !c.is_member()));
+    assert!(
+        stalled > PAIRING_LEFT - TIMER_SLACK && stalled < PAIRING_LEFT + TIMER_SLACK,
+        "closed after {stalled:?}, not at the pairing session's deadline"
+    );
 }
 
 /// A pairing socket whose forward waits on its peer's full queue still
@@ -2141,11 +2158,19 @@ async fn a_pairing_socket_stalled_on_its_peer_closes_when_evicted() {
         .connection_counts
         .acquire(TEST_CLIENT, limits)
         .unwrap();
+    let evicted = tokio::time::Instant::now();
     let paired = tokio::time::timeout(HANG, reader)
         .await
         .expect("an evicted pairing socket stayed stalled on its peer")
         .unwrap();
     assert!(paired);
+    // Paused time only advances once every task is idle, and the eviction
+    // wakes the reader without any timer, so the close takes no paused time.
+    let lingered = evicted.elapsed();
+    assert!(
+        lingered < SETTLE,
+        "closed {lingered:?} after its eviction, not at once"
+    );
 }
 
 /// A pairing socket is closed after `read_idle` of silence, even while its
