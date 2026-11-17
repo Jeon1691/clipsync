@@ -744,13 +744,12 @@ where
             if let (Some(st), Some(inbound)) = (state.take(), inbound_spake.clone()) {
                 if let (PairingRole::A, Some(committed)) = (role, &peer_commitment) {
                     if verify_spake2_commitment(&st, committed, &inbound).is_err() {
-                        let _ = conn
-                            .send_control(ControlMessage::Error {
-                                code: COMMITMENT_MISMATCH_CODE.into(),
-                                message: "SPAKE2 message does not open its commitment".into(),
-                            })
-                            .await;
-                        conn.close().await;
+                        abort_pairing(
+                            &mut conn,
+                            COMMITMENT_MISMATCH_CODE,
+                            "SPAKE2 message does not open its commitment",
+                        )
+                        .await;
                         return Err(CoreError::Pairing(
                             "the other device's SPAKE2 message does not match the commitment it sent first; nothing was stored".into(),
                         ));
@@ -927,17 +926,33 @@ where
     }
 }
 
+/// Send `error` so the relay drops the pairing session, close, and keep
+/// reading until the transport has flushed both (see [`SAS_REJECT_FLUSH`]):
+/// dropping the connection at once can discard the queued `error`.
+async fn abort_pairing(conn: &mut RelayConnection, code: &str, message: &str) {
+    let _ = conn
+        .send_control(ControlMessage::Error {
+            code: code.into(),
+            message: message.into(),
+        })
+        .await;
+    conn.close().await;
+    let _ = tokio::time::timeout(SAS_REJECT_FLUSH, async {
+        while conn.incoming.recv().await.is_some() {}
+    })
+    .await;
+}
+
 /// Abort a pairing that would run without the commitment round while
 /// `pairing.require_commitment` is set. Nothing has been sent that commits
 /// anything, and nothing is stored.
 async fn refuse_uncommitted(conn: &mut RelayConnection) -> CoreError {
-    let _ = conn
-        .send_control(ControlMessage::Error {
-            code: COMMITMENT_REQUIRED_CODE.into(),
-            message: "pairing requires the commitment round".into(),
-        })
-        .await;
-    conn.close().await;
+    abort_pairing(
+        conn,
+        COMMITMENT_REQUIRED_CODE,
+        "pairing requires the commitment round",
+    )
+    .await;
     CoreError::Pairing(
         "the other device or the relay does not support the commitment round, and pairing.require_commitment is set; nothing was stored".into(),
     )
