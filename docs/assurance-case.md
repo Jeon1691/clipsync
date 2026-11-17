@@ -27,7 +27,8 @@ verification code (SAS) before anything is stored, which detects this. When
 both devices show full protection, a commitment round limits such a relay to
 one try per pairing at colliding codes; otherwise (an older device or relay,
 or a relay that withheld the commitment, shown as reduced protection on at
-least one device) the relay can search offline for colliding codes; see
+least one device, or a device shows no protection line (older version)) the
+relay can search offline for colliding codes; see
 [security](security.md#commitment-round). Use a trusted relay for pairing, or
 set `pairing.require_commitment`. TLS authenticates the selected service; it does not make a malicious
 service operator trustworthy. This is the honest-but-curious relay model already
