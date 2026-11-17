@@ -72,6 +72,18 @@ impl AppPaths {
         self.data_dir.join("state.json")
     }
 
+    /// Private envelope sequence/replay state; see `LocalStore::next_send_seq`.
+    pub fn replay_state_file(&self) -> PathBuf {
+        self.data_dir.join("replay-state.json")
+    }
+
+    /// Advisory lock serializing every read-modify-write of
+    /// [`Self::replay_state_file`] across processes. A separate file, because
+    /// the state file itself is replaced by rename on each write.
+    pub fn replay_state_lock_file(&self) -> PathBuf {
+        self.data_dir.join("replay-state.lock")
+    }
+
     pub fn identity_file(&self) -> PathBuf {
         self.data_dir.join("identity.json")
     }
@@ -112,11 +124,15 @@ fn set_private_dir(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Owner read/write only, for every file holding keys or replay state.
+#[cfg(unix)]
+pub(crate) const PRIVATE_FILE_MODE: u32 = 0o600;
+
 pub fn set_private_file(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
     }
     let _ = path;
     Ok(())

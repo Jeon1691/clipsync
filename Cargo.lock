@@ -1170,6 +1170,7 @@ dependencies = [
  "directories",
  "hex",
  "keyring",
+ "rustix 1.1.6",
  "serde",
  "serde_json",
  "tempfile",
@@ -1184,8 +1185,10 @@ name = "clipsync-transfer"
 version = "0.2.0"
 dependencies = [
  "blake3",
+ "chrono",
  "clipsync-crypto",
  "clipsync-protocol",
+ "rustix 1.1.6",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",

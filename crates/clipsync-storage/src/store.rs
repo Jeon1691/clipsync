@@ -214,7 +214,8 @@ impl LocalStore {
             .truncate(false)
             .open(&path)?;
         set_private_file(&path)?;
-        file.lock()?;
+        // `flock` on Unix (Android included), `LockFileEx` on Windows.
+        crate::replay::lock_exclusive(&file)?;
         Ok(file)
     }
 

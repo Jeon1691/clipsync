@@ -1,0 +1,12 @@
+# Copyright the ClipSync contributors.
+# SPDX-License-Identifier: MIT
+
+# std's file locks return `Unsupported` on Android before Rust 1.98, above the
+# workspace MSRV. They compile there, so only this lint catches a new use.
+disallowed-methods = [
+    { path = "std::fs::File::lock", reason = "Unsupported on Android before Rust 1.98; lock with rustix::fs::flock on Unix (see clipsync-storage replay.rs)" },
+    { path = "std::fs::File::lock_shared", reason = "Unsupported on Android before Rust 1.98; lock with rustix::fs::flock on Unix" },
+    { path = "std::fs::File::try_lock", reason = "Unsupported on Android before Rust 1.98; lock with rustix::fs::flock on Unix" },
+    { path = "std::fs::File::try_lock_shared", reason = "Unsupported on Android before Rust 1.98; lock with rustix::fs::flock on Unix" },
+    { path = "std::fs::File::unlock", reason = "Unsupported on Android before Rust 1.98; unlock with rustix::fs::flock on Unix" },
+]
