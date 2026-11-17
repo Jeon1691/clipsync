@@ -131,6 +131,11 @@ pub struct RelayState {
     /// Serializes the capacity check with the insert of a new pairing session,
     /// so concurrent creations cannot overshoot the session or room caps.
     pairing_admission: Mutex<()>,
+    /// Test hook: every event handed to [`Self::webhook_spawn`], recorded
+    /// whether or not a webhook is configured, so tests can pin the body
+    /// without a reachable (non-loopback) webhook target.
+    #[cfg(test)]
+    pub(crate) webhook_events: Mutex<Vec<serde_json::Value>>,
     pub(crate) connection_counts: Arc<ConnectionCounts>,
     trusted_proxies: TrustedProxies,
     join_limits: PairingJoinLimits,
@@ -306,6 +311,8 @@ impl RelayState {
             join_budget: Budget::default(),
             create_budget: Budget::default(),
             pairing_admission: Mutex::new(()),
+            #[cfg(test)]
+            webhook_events: Mutex::default(),
             connection_counts: Arc::default(),
             trusted_proxies: TrustedProxies::new(trusted_proxies),
             join_limits,
@@ -1015,6 +1022,11 @@ impl RelayState {
     }
 
     pub fn webhook_spawn(&self, event: serde_json::Value) {
+        #[cfg(test)]
+        self.webhook_events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(event.clone());
         if let (Some(url), Some(secret)) = (
             self.config.webhook_url.clone(),
             self.config.webhook_secret.clone(),
