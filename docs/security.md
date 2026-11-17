@@ -265,6 +265,20 @@ case-insensitive filesystems (macOS, Windows) would store them as one file.
 Names the receiving filesystem otherwise resolves to one entry, such as
 Unicode normalization variants on APFS, are rejected when staging writes the
 second one; filesystems that keep them apart (ext4, NTFS) accept both.
+On macOS, every file ClipSync writes from peer-received bytes carries a
+`com.apple.quarantine` attribute naming `ClipSync` as the agent, so opening a
+received app, script or installer goes through Gatekeeper's first-launch check.
+This covers files committed to the inbox (marked through the open file in the
+private partial directory, before any bytes are written and before the
+directory is published), the files, image or text that
+`clipsync pull --output DIR` writes (marked through the open file before any
+bytes are written), and the pasteboard image file staged for Finder paste
+(marked before it is renamed into place). When a commit reuses an identical
+published directory, or the staging sweep restores an interrupted replacement,
+any of its files that lacks the attribute (for example one written by an older
+version) gets it under the publish lock, and an existing value is never
+replaced. If the volume rejects the attribute, the failure is logged and the
+validated file is still delivered unquarantined.
 Wire IDs are checked when decoded (see [interfaces](interfaces.md)), so a
 relay- or peer-supplied room ID cannot add path separators, `..` or control
 characters to `room-<room-id>.secret` or `epoch-<room-id>.secret`; those

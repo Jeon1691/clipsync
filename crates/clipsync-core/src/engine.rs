@@ -1131,10 +1131,11 @@ async fn finish_pull(
     }
     if let Some(dir) = output {
         tokio::fs::create_dir_all(&dir).await?;
+        let output = PullOutput::new(dir);
         match &item {
             ClipboardItem::Files { files } => {
                 for f in files {
-                    tokio::fs::write(dir.join(&f.name), &f.bytes).await?;
+                    output.write(&f.name, &f.bytes).await?;
                 }
             }
             ClipboardItem::Image { mime, bytes, .. } => {
@@ -1143,10 +1144,10 @@ async fn finish_pull(
                     ImageMime::Jpeg => "clipboard.jpg",
                     ImageMime::Webp => "clipboard.webp",
                 };
-                tokio::fs::write(dir.join(name), bytes).await?;
+                output.write(name, bytes).await?;
             }
             ClipboardItem::Text { text } => {
-                tokio::fs::write(dir.join("clipboard.txt"), text.as_bytes()).await?;
+                output.write("clipboard.txt", text.as_bytes()).await?;
             }
         }
     }
@@ -1159,6 +1160,43 @@ async fn finish_pull(
         summary: item.summary(),
         files: Vec::new(),
     })
+}
+
+/// Destination for `pull --output DIR`. Everything written there came from a
+/// peer, so on macOS each file is quarantined exactly like an inbox commit.
+struct PullOutput {
+    dir: PathBuf,
+    /// One receive event per pull: every written file shares this value.
+    #[cfg(target_os = "macos")]
+    quarantine: String,
+}
+
+impl PullOutput {
+    fn new(dir: PathBuf) -> Self {
+        Self {
+            dir,
+            #[cfg(target_os = "macos")]
+            quarantine: clipsync_transfer::quarantine::quarantine_value(),
+        }
+    }
+
+    async fn write(&self, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+        // Same open semantics as `tokio::fs::write` (create or truncate).
+        let mut file = tokio::fs::File::create(self.dir.join(name)).await?;
+        // Mark through the descriptor before any bytes are written, so the
+        // content is never on disk unquarantined and the attribute lands on
+        // the file actually opened even if the user's directory held a
+        // symlink at that name. The failure policy matches the inbox.
+        #[cfg(target_os = "macos")]
+        clipsync_transfer::quarantine::mark_file_or_warn(
+            std::os::fd::AsFd::as_fd(&file),
+            &self.quarantine,
+        );
+        file.write_all(bytes).await?;
+        // Wait for the last background write so errors surface here.
+        file.flush().await
+    }
 }
 
 pub fn _unused_ws(url: &str) -> String {

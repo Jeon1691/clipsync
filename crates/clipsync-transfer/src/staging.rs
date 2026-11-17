@@ -46,8 +46,13 @@ impl StagingArea {
     /// with one directory rename, so the published directory always holds one
     /// complete manifest and nothing else. A directory that already holds
     /// exactly this manifest (another receiver's commit, which its caller may
-    /// be reading) is reused untouched; any other directory is a stale commit
-    /// of a retried transfer and is swapped out whole.
+    /// be reading) is reused with its contents untouched; any other directory
+    /// is a stale commit of a retried transfer and is swapped out whole.
+    ///
+    /// On macOS every staged file is quarantined in the private partial
+    /// directory before any bytes are written, so a published file never
+    /// lacks Gatekeeper's first-open check; a reused directory gets the
+    /// attribute on any file that lacks it.
     ///
     /// The filesystem work runs to completion on the blocking pool even if
     /// this future is dropped, and the partial directory is removed on every
@@ -164,6 +169,7 @@ fn commit_blocking(
         sweep_stale_staging(root, SystemTime::now(), STALE_STAGING_AGE);
     }
     let dest_dir = root.join(id);
+    let mark = ReceiveMark::new();
     let staged = OwnedDir {
         path: root.join(scratch_name(id, PARTIAL_SUFFIX)),
     };
@@ -174,7 +180,7 @@ fn commit_blocking(
     let mut offset = 0usize;
     for (name, file) in names.iter().zip(files) {
         let end = offset + file.size as usize;
-        write_new_file(&staged.path.join(name), &payload[offset..end]).map_err(|err| {
+        write_new_file(&staged.path.join(name), &payload[offset..end], &mark).map_err(|err| {
             // The directory is fresh and this commit's names are distinct
             // strings, so an existing entry means the filesystem treats this
             // name as one written before (Unicode normalization on APFS and
@@ -191,7 +197,7 @@ fn commit_blocking(
         // Released when `_lock` is dropped at the end of this block, before
         // the retired directory is removed outside the critical section.
         let _lock = publish_lock(root)?;
-        publish(root, id, &staged.path, &dest_dir, &names, files)?
+        publish(root, id, &staged.path, &dest_dir, &names, files, &mark)?
     };
     drop(retired);
     Ok(names.into_iter().map(|name| dest_dir.join(name)).collect())
@@ -200,7 +206,9 @@ fn commit_blocking(
 /// Create `path`, which must not exist yet, owner-only, holding `contents`.
 /// `create_new` fails with `AlreadyExists` when the filesystem resolves the
 /// name to an entry this commit already wrote, instead of overwriting it.
-fn write_new_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+/// The file is quarantined through its descriptor before any bytes land,
+/// while it is still inside the private partial directory.
+fn write_new_file(path: &Path, contents: &[u8], mark: &ReceiveMark) -> std::io::Result<()> {
     use std::io::Write as _;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -209,7 +217,59 @@ fn write_new_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(PRIVATE_FILE_MODE);
     }
-    options.open(path)?.write_all(contents)
+    let mut file = options.open(path)?;
+    mark.apply(&file);
+    file.write_all(contents)
+}
+
+/// One receive event's Gatekeeper quarantine on macOS (a no-op elsewhere).
+/// Every file a commit stages shares one value, as one browser download
+/// does. See `quarantine::mark_or_warn` for why a failure still delivers.
+struct ReceiveMark {
+    #[cfg(target_os = "macos")]
+    value: String,
+}
+
+impl ReceiveMark {
+    fn new() -> Self {
+        Self {
+            #[cfg(target_os = "macos")]
+            value: crate::quarantine::quarantine_value(),
+        }
+    }
+
+    /// Quarantine a file this commit just created.
+    fn apply(&self, file: &std::fs::File) {
+        #[cfg(target_os = "macos")]
+        crate::quarantine::mark_file_or_warn(std::os::fd::AsFd::as_fd(file), &self.value);
+        #[cfg(not(target_os = "macos"))]
+        let _ = file;
+    }
+
+    /// Quarantine the regular files in a published transfer directory this
+    /// commit did not write (one it reuses or the sweep restores) that lack
+    /// the attribute, for example because an older version wrote them. An
+    /// existing value is kept: it may record the user's approval. The caller
+    /// holds the publish lock, and symlinks are neither followed nor marked.
+    fn backfill(&self, dir: &Path) {
+        #[cfg(target_os = "macos")]
+        {
+            let entries = match std::fs::read_dir(dir) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    tracing::warn!(%error, "could not list received files to quarantine");
+                    return;
+                }
+            };
+            for entry in entries.flatten() {
+                if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                    crate::quarantine::mark_if_absent_or_warn(&entry.path(), &self.value);
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = dir;
+    }
 }
 
 /// Exclusive lock on the inbox publish lock file, released on drop. Every
@@ -343,6 +403,7 @@ fn publish(
     dest_dir: &Path,
     names: &[String],
     files: &[FileManifest],
+    mark: &ReceiveMark,
 ) -> Result<Option<OwnedDir>> {
     match std::fs::symlink_metadata(dest_dir) {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -359,8 +420,12 @@ fn publish(
         )
         .into()),
         // Another receiver already published this exact manifest, and its
-        // caller may be reading it: keep it untouched.
-        Ok(_) if holds_exactly(dest_dir, names, files) => Ok(None),
+        // caller may be reading it: keep its contents untouched, only adding
+        // quarantine to files that lack it.
+        Ok(_) if holds_exactly(dest_dir, names, files) => {
+            mark.backfill(dest_dir);
+            Ok(None)
+        }
         Ok(_) => {
             // A stale commit of a retried transfer: move it aside whole so
             // the published directory never mixes two manifests.
@@ -373,6 +438,8 @@ fn publish(
                 // even that fails, keep it: the next sweep restores it.
                 if std::fs::rename(&retired.path, dest_dir).is_err() {
                     retired.keep();
+                } else {
+                    mark.backfill(dest_dir);
                 }
                 return Err(err.into());
             }
@@ -418,7 +485,8 @@ fn file_hash(path: &Path) -> std::io::Result<String> {
 ///   garbage and is removed (its owner may be removing it too).
 /// - A retired directory whose transfer is missing is a replacement
 ///   interrupted between its renames: it is the last committed copy, so it
-///   is restored as the published transfer instead of being deleted.
+///   is restored as the published transfer instead of being deleted, and on
+///   macOS any of its files that lacks quarantine gets it.
 ///
 /// Published transfers, files, symlinks and other entries are never touched.
 fn sweep_stale_staging(root: &Path, now: SystemTime, max_age: Duration) -> usize {
@@ -460,6 +528,10 @@ fn sweep_stale_staging(root: &Path, now: SystemTime, max_age: Duration) -> usize
             let dest = root.join(id);
             match std::fs::symlink_metadata(&dest) {
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    // Mark while the directory is still private, so a crash
+                    // between the two steps never publishes unmarked files.
+                    // Its own receive event, not the running commit's.
+                    ReceiveMark::new().backfill(&path);
                     std::fs::rename(&path, &dest).is_ok()
                 }
                 Ok(_) => std::fs::remove_dir_all(&path).is_ok(),
@@ -1041,5 +1113,141 @@ mod tests {
         std::fs::set_permissions(staging.inbox(), std::fs::Permissions::from_mode(0o700)).unwrap();
         assert!(matches!(result, Err(TransferError::Io(_))));
         assert_eq!(std::fs::read_dir(staging.inbox()).unwrap().count(), 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn committed_files_carry_launch_services_quarantine_attribute() {
+        fn quarantine_of(path: &Path) -> Option<String> {
+            crate::quarantine::value_of(path).unwrap()
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let staging = StagingArea::new(root.path().join("inbox")).unwrap();
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let payload = b"#!/bin/sh\necho hi\nreadme";
+        let (script, readme) = payload.split_at(18);
+        let files = vec![
+            FileManifest {
+                name: "run.command".into(),
+                size: script.len() as u64,
+                mime: None,
+                hash: blake3_hex(script),
+            },
+            FileManifest {
+                name: "README".into(),
+                size: readme.len() as u64,
+                mime: None,
+                hash: blake3_hex(readme),
+            },
+        ];
+        let paths = staging
+            .commit_files(&TransferId::new(), &files, payload)
+            .await
+            .unwrap();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        assert_eq!(paths.len(), 2);
+        for path in &paths {
+            let value = quarantine_of(path)
+                .unwrap_or_else(|| panic!("{} lacks com.apple.quarantine", path.display()));
+            let fields: Vec<&str> = value.split(';').collect();
+            assert_eq!(fields.len(), 4, "unexpected quarantine value {value:?}");
+            assert_eq!(fields[0], "0081");
+            let stamp = u64::from_str_radix(fields[1], 16).unwrap();
+            assert!((before..=after).contains(&stamp), "timestamp {stamp:#x}");
+            assert_eq!(fields[2], "ClipSync");
+            let uuid: Vec<&str> = fields[3].split('-').collect();
+            assert_eq!(
+                uuid.iter().map(|g| g.len()).collect::<Vec<_>>(),
+                [8, 4, 4, 4, 12]
+            );
+            assert!(fields[3].chars().all(|c| c == '-' || c.is_ascii_hexdigit()));
+        }
+    }
+
+    /// A published directory that a commit reuses (identical manifest) or
+    /// that the sweep restores (interrupted replacement) may hold files
+    /// written without the attribute, for example by an older ClipSync. Both
+    /// paths must leave every received file quarantined, without replacing a
+    /// value that is already there (it may record the user's approval).
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn reused_and_restored_commits_quarantine_unmarked_files_and_keep_existing_values() {
+        use crate::quarantine::{mark, value_of, QUARANTINE_AGENT};
+        use std::os::unix::fs::MetadataExt;
+        // A value LaunchServices could have written after the user approved
+        // the file (flag 0x0040 set), from a different agent.
+        const APPROVED: &str = "00c1;5f5e1000;Safari;3F2504E0-4F89-11D3-9A0C-0305E82C3301";
+        let agent_of = |path: &Path| {
+            let value = value_of(path)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{} lacks com.apple.quarantine", path.display()));
+            value.split(';').nth(2).unwrap().to_owned()
+        };
+        let manifest = |name: &str, bytes: &[u8]| FileManifest {
+            name: name.into(),
+            size: bytes.len() as u64,
+            mime: None,
+            hash: blake3_hex(bytes),
+        };
+        let root = tempfile::tempdir().unwrap();
+        let staging = StagingArea::new(root.path().join("inbox")).unwrap();
+
+        // Reuse: the identical commit is already published, unmarked.
+        let reused = TransferId::new();
+        let published = staging.inbox().join(reused.as_str());
+        std::fs::create_dir(&published).unwrap();
+        std::fs::write(published.join("run.command"), b"script").unwrap();
+        std::fs::write(published.join("approved.txt"), b"seen").unwrap();
+        mark(&published.join("approved.txt"), APPROVED).unwrap();
+        let inode = std::fs::metadata(&published).unwrap().ino();
+        let paths = staging
+            .commit_files(
+                &reused,
+                &[
+                    manifest("run.command", b"script"),
+                    manifest("approved.txt", b"seen"),
+                ],
+                b"scriptseen".to_vec(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&published).unwrap().ino(),
+            inode,
+            "not reused"
+        );
+        assert_eq!(agent_of(&paths[0]), QUARANTINE_AGENT);
+        assert_eq!(value_of(&paths[1]).unwrap().as_deref(), Some(APPROVED));
+
+        // Restore: a replacement was interrupted between its two renames.
+        let interrupted = TransferId::new();
+        let orphan = staging
+            .inbox()
+            .join(scratch_name(interrupted.as_str(), RETIRED_SUFFIX));
+        std::fs::create_dir(&orphan).unwrap();
+        std::fs::write(orphan.join("kept.command"), b"payload").unwrap();
+        // An unrelated commit runs the sweep, which restores the orphan.
+        staging
+            .commit_files(
+                &TransferId::new(),
+                &[manifest("b.txt", b"x")],
+                b"x".to_vec(),
+            )
+            .await
+            .unwrap();
+        let restored = staging
+            .inbox()
+            .join(interrupted.as_str())
+            .join("kept.command");
+        assert_eq!(std::fs::read(&restored).unwrap(), b"payload");
+        assert_eq!(agent_of(&restored), QUARANTINE_AGENT);
     }
 }

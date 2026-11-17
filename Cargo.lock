@@ -977,6 +977,7 @@ dependencies = [
  "arboard",
  "async-trait",
  "clipsync-protocol",
+ "clipsync-transfer",
  "directories",
  "image",
  "infer",
@@ -985,6 +986,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "parking_lot 0.13.0",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -1184,10 +1186,12 @@ dependencies = [
  "chrono",
  "clipsync-crypto",
  "clipsync-protocol",
+ "libc",
  "rustix 1.1.6",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tracing",
  "ulid",
 ]
 
