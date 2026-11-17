@@ -29,6 +29,8 @@ pub enum StorageError {
     NotInitialized,
     #[error("not paired with a room")]
     NotPaired,
+    #[error(transparent)]
+    InvalidId(#[from] clipsync_protocol::IdError),
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;

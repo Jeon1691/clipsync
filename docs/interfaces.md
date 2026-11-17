@@ -7,7 +7,11 @@ limits and cryptographic framing, [the security model](security.md) for trust
 boundaries, and [mobile development](mobile.md) for building the native apps.
 
 The linked source definitions are authoritative when changing an interface.
-IDs are JSON strings; generated IDs use ULIDs. Times are RFC 3339 UTC strings
+IDs are JSON strings; generated IDs use ULIDs. Every field typed as a room,
+device, message, transfer or pairing-session ID must be 1–64 bytes of ASCII
+letters, digits, `-`, `_` and `.`, with `.` only between other characters (no
+leading or trailing `.`, no `..`); anything else fails to decode
+([`validate_id`](../crates/clipsync-protocol/src/ids.rs)). Times are RFC 3339 UTC strings
 unless stated otherwise. Fields described as nullable accept `null`; optional
 request fields may also be omitted. Other listed request fields are required.
 Tokens, pairing codes, clipboard data, and full room/configuration output can
@@ -200,6 +204,7 @@ Handler-generated HTTP failures have the JSON shape
 | Endpoint / HTTP status | `code` | Meaning |
 | --- | --- | --- |
 | create or join / 400 | `protocol_version` | Unsupported protocol version. |
+| create or join / 400 | `invalid_request` | Body is not valid JSON or does not match the request type, including an ID that fails the rule above. The message is fixed and does not quote the input. |
 | create / 400 | `pairing_create` | Pairing creation failed, for example code allocation failure. |
 | join / 404 | `code_invalid` | Unknown code, including expired sessions already removed by cleanup. |
 | join / 410 | `code_expired` | Session exists but has expired. |
@@ -207,7 +212,7 @@ Handler-generated HTTP failures have the JSON shape
 | join / 409 | `busy` | Session already has a joiner or is completed. |
 | join / 400 | `join_failed` | Other join rejection, including using the creator's device ID. |
 
-Malformed JSON, missing/wrong content type or fields, oversized bodies,
+A missing/wrong content type, oversized bodies,
 unknown routes, and failed upgrade extraction can be rejected by the HTTP
 framework/body limiter before a handler runs. Their response bodies need not
 use this JSON error shape; clients must check the status before decoding.

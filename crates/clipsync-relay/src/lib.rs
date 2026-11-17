@@ -13,8 +13,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
+use axum::extract::{FromRequest, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -151,7 +153,7 @@ async fn metrics(State(state): State<Arc<RelayState>>) -> String {
 
 async fn create_pairing(
     State(state): State<Arc<RelayState>>,
-    Json(req): Json<CreatePairingRequest>,
+    RequestJson(req): RequestJson<CreatePairingRequest>,
 ) -> Result<Json<CreatePairingResponse>, (StatusCode, Json<ErrorBody>)> {
     if req.protocol_version != clipsync_protocol::PROTOCOL_VERSION {
         return Err(err(
@@ -169,7 +171,7 @@ async fn create_pairing(
 async fn join_pairing(
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
     State(state): State<Arc<RelayState>>,
-    Json(req): Json<JoinPairingRequest>,
+    RequestJson(req): RequestJson<JoinPairingRequest>,
 ) -> Result<Json<JoinPairingResponse>, (StatusCode, Json<ErrorBody>)> {
     if req.protocol_version != clipsync_protocol::PROTOCOL_VERSION {
         return Err(err(
@@ -201,6 +203,40 @@ async fn join_pairing(
             "pairing session already has a joiner",
         )),
         Err(JoinError::Other(m)) => Err(err(StatusCode::BAD_REQUEST, "join_failed", &m)),
+    }
+}
+
+/// A JSON request body. A body that is not valid JSON or does not match the
+/// request type (for example a malformed wire ID) is answered with
+/// `400 Bad Request` and an [`ErrorBody`], where axum's `Json` would answer
+/// `422` with its own text. Other rejections (wrong content type, body too
+/// large) keep axum's response.
+#[derive(FromRequest)]
+#[from_request(via(Json), rejection(RequestBodyRejection))]
+struct RequestJson<T>(T);
+
+/// Rejection for [`RequestJson`]. The decode-failure message is fixed: the
+/// decoder's own message can quote the rejected input, which may hold
+/// control characters.
+struct RequestBodyRejection(Response);
+
+impl From<JsonRejection> for RequestBodyRejection {
+    fn from(rejection: JsonRejection) -> Self {
+        Self(match rejection {
+            JsonRejection::JsonDataError(_) | JsonRejection::JsonSyntaxError(_) => err(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "malformed request body",
+            )
+            .into_response(),
+            other => other.into_response(),
+        })
+    }
+}
+
+impl IntoResponse for RequestBodyRejection {
+    fn into_response(self) -> Response {
+        self.0
     }
 }
 

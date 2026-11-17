@@ -193,10 +193,14 @@ impl LocalStore {
         self.save_state(&state)?;
         if let Some(room) = &removed {
             self.delete_credential(&device_token_name(&room.room_id))?;
-            let _ = self.secrets.delete_named(&format!("room-{}", room.room_id));
-            let _ = self
-                .secrets
-                .delete_named(&format!("epoch-{}", room.room_id));
+            for prefix in [ROOM_ROOT_PREFIX, ROOM_EPOCH_PREFIX] {
+                // Never delete through an ID that cannot name a file: the
+                // name could point outside the data directory, and keys are
+                // never saved under one.
+                if let Ok(name) = room_secret_name(prefix, &room.room_id) {
+                    let _ = self.secrets.delete_named(&name);
+                }
+            }
         }
         Ok(removed)
     }
@@ -241,27 +245,46 @@ impl LocalStore {
         root_key_hex: &str,
         epoch_key_hex: &str,
     ) -> Result<()> {
-        self.secrets
-            .save_named(&format!("room-{room_id}"), root_key_hex)?;
-        self.secrets
-            .save_named(&format!("epoch-{room_id}"), epoch_key_hex)?;
+        let root_name = room_secret_name(ROOM_ROOT_PREFIX, room_id)?;
+        let epoch_name = room_secret_name(ROOM_EPOCH_PREFIX, room_id)?;
+        self.secrets.save_named(&root_name, root_key_hex)?;
+        self.secrets.save_named(&epoch_name, epoch_key_hex)?;
         Ok(())
     }
 
     pub fn load_epoch_key(&self, room_id: &RoomId) -> Result<[u8; 32]> {
-        let hex_str = self.secrets.load_named(&format!("epoch-{room_id}"))?;
+        let hex_str = self
+            .secrets
+            .load_named(&room_secret_name(ROOM_EPOCH_PREFIX, room_id)?)?;
         decode_key(&hex_str)
     }
 
     pub fn load_room_root(&self, room_id: &RoomId) -> Result<[u8; 32]> {
-        let hex_str = self.secrets.load_named(&format!("room-{room_id}"))?;
+        let hex_str = self
+            .secrets
+            .load_named(&room_secret_name(ROOM_ROOT_PREFIX, room_id)?)?;
         decode_key(&hex_str)
     }
 
     pub fn save_epoch_key(&self, room_id: &RoomId, key: &[u8; 32]) -> Result<()> {
-        self.secrets
-            .save_named(&format!("epoch-{room_id}"), &hex::encode(key))
+        self.secrets.save_named(
+            &room_secret_name(ROOM_EPOCH_PREFIX, room_id)?,
+            &hex::encode(key),
+        )
     }
+}
+
+/// Secret-name prefix of a room's root key (`room-{room_id}.secret`).
+const ROOM_ROOT_PREFIX: &str = "room-";
+/// Secret-name prefix of a room's current epoch key (`epoch-{room_id}.secret`).
+const ROOM_EPOCH_PREFIX: &str = "epoch-";
+
+/// Name of a per-room secret. The room ID becomes part of a file name and a
+/// keychain account, so it is checked again here even though decoding
+/// already checked it: a `RoomId` built with `From` is not checked.
+fn room_secret_name(prefix: &str, room_id: &RoomId) -> Result<String> {
+    room_id.validate()?;
+    Ok(format!("{prefix}{room_id}"))
 }
 
 fn device_token_name(room_id: &RoomId) -> String {
@@ -394,6 +417,61 @@ mod failure_tests {
         assert!(matches!(store.current_room(), Err(StorageError::NotPaired)));
         assert!(store.leave_current().unwrap().is_none());
         assert!(store.load_state().unwrap().current_room.is_none());
+    }
+
+    #[test]
+    fn room_key_paths_refuse_identifiers_that_are_not_file_name_components() {
+        let (root, store) = fixture();
+        // A room ID such as `x/../../outside` would resolve to a file next to
+        // the data directory once the `room-x` directory exists.
+        std::fs::create_dir(store.paths.data_dir.join("room-x")).unwrap();
+        std::fs::create_dir(store.paths.data_dir.join("epoch-x")).unwrap();
+        let outside = root.path().join("outside.secret");
+        std::fs::write(&outside, hex::encode([9; 32])).unwrap();
+        let before = std::fs::read(&outside).unwrap();
+        let hostile = RoomId::from("x/../../outside");
+        assert!(matches!(
+            store.load_room_root(&hostile),
+            Err(StorageError::InvalidId(_))
+        ));
+        assert!(matches!(
+            store.load_epoch_key(&hostile),
+            Err(StorageError::InvalidId(_))
+        ));
+        assert!(matches!(
+            store.save_room_keys(&hostile, &hex::encode([1; 32]), &hex::encode([2; 32])),
+            Err(StorageError::InvalidId(_))
+        ));
+        assert!(matches!(
+            store.save_epoch_key(&hostile, &[3; 32]),
+            Err(StorageError::InvalidId(_))
+        ));
+        for unsafe_id in ["..", "a\\b", "nul\0", ""] {
+            assert!(store
+                .load_room_root(&RoomId::from(unsafe_id))
+                .is_err_and(|error| matches!(error, StorageError::InvalidId(_))));
+        }
+        assert_eq!(std::fs::read(&outside).unwrap(), before);
+        assert!(std::fs::read_dir(store.paths.data_dir.join("room-x"))
+            .unwrap()
+            .next()
+            .is_none());
+
+        // A state file naming such a room fails to load, so leaving it cannot
+        // delete anything through the ID either.
+        let state = serde_json::json!({
+            "current_room": hostile,
+            "rooms": [{
+                "room_id": hostile,
+                "epoch": 1,
+                "role": "owner",
+                "created_at": "2026-11-15T00:00:00Z",
+                "peers": [],
+            }],
+        });
+        std::fs::write(store.paths.state_file(), state.to_string()).unwrap();
+        assert!(matches!(store.leave_current(), Err(StorageError::Serde(_))));
+        assert_eq!(std::fs::read(&outside).unwrap(), before);
     }
 
     #[test]

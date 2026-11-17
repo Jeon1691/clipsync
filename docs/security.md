@@ -71,6 +71,11 @@ uses private files; a Secret Service backend is not enabled. Secret files have
 mode `0600` on Unix. Unix data/inbox directories use `0700`; Windows relies on
 the user's profile-directory access controls rather than POSIX modes.
 Received filenames are sanitized to basenames.
+Wire IDs are checked when decoded (see [interfaces](interfaces.md)), so a
+relay- or peer-supplied room ID cannot add path separators, `..` or control
+characters to `room-<room-id>.secret` or `epoch-<room-id>.secret`; those
+paths are built only after checking the ID again, and the relay answers
+`400` to create/join requests carrying such IDs.
 
 Device tokens are stored separately as `device-token-<hex-room-id>.secret`;
 webhook credentials use `webhook.secret`. These credentials use canonical private files without OS-keychain fallback; missing or empty files are errors. New `state.json` and `config.toml`

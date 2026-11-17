@@ -9,7 +9,9 @@ mod limits;
 mod messages;
 
 pub use chunk::{decode_chunk_frame, encode_chunk_frame, ChunkFrame, CHUNK_MAGIC};
-pub use ids::{DeviceId, MessageId, PairingSessionId, RoomId, TransferId};
+pub use ids::{
+    validate_id, DeviceId, IdError, MessageId, PairingSessionId, RoomId, TransferId, ID_MAX_LEN,
+};
 pub use limits::*;
 pub use messages::*;
 
