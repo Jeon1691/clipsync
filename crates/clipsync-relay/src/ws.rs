@@ -1,23 +1,27 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
+use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Query, State, WebSocketUpgrade};
-use axum::response::IntoResponse;
+use axum::extract::{ConnectInfo, Query, State, WebSocketUpgrade};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use clipsync_protocol::{
-    AckStatus, ClientRole, ControlMessage, DeviceId, DeviceRole, ItemKind, MessageId, PeerInfo,
-    QueuedEnvelope, FRAME_HARD_CAP,
+    AckStatus, ClientRole, ControlMessage, DeviceId, DeviceRole, ErrorBody, ItemKind, MessageId,
+    PeerInfo, QueuedEnvelope, FRAME_HARD_CAP,
 };
 
 use crate::auth::verify_token;
+use crate::connection_limits::ConnectionRefused;
 use crate::RelayState;
 
 #[derive(Clone, Debug)]
@@ -32,14 +36,46 @@ pub struct WsQuery {
     pub token: Option<String>,
 }
 
+/// Upgrade to a WebSocket once the client and the relay have a free
+/// connection slot; the slot is held until the socket closes.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Query(q): Query<WsQuery>,
     State(state): State<Arc<RelayState>>,
-) -> impl IntoResponse {
+) -> Response {
+    let client = state.client_ip(peer.ip(), &headers);
+    let slot = match state.acquire_connection(client) {
+        Ok(slot) => slot,
+        Err(refused) => return connection_refused(refused),
+    };
     ws.max_message_size(FRAME_HARD_CAP)
         .max_frame_size(FRAME_HARD_CAP)
-        .on_upgrade(move |socket| handle_socket(socket, state, q.token))
+        .on_upgrade(move |socket| async move {
+            let _slot = slot;
+            handle_socket(socket, state, q.token).await;
+        })
+}
+
+fn connection_refused(refused: ConnectionRefused) -> Response {
+    let (status, code, message) = match refused {
+        ConnectionRefused::RelayFull => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "relay_full",
+            "the relay cannot accept more connections right now; try again later",
+        ),
+        ConnectionRefused::ClientFull => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_connections",
+            "too many connections from this address; close other connections and try again",
+        ),
+    };
+    let body = ErrorBody {
+        code: code.into(),
+        message: message.into(),
+    };
+    (status, Json(body)).into_response()
 }
 
 struct ConnCtx {
@@ -151,8 +187,24 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
     let mut ctx: Option<ConnCtx> = None;
     let mut last_msg = Instant::now();
     let mut burst = 0u32;
+    let deadlines = state.socket_deadlines;
+    let hello_deadline = tokio::time::Instant::now() + deadlines.hello;
 
-    while let Some(Ok(msg)) = stream.next().await {
+    loop {
+        // An unauthenticated socket gets one fixed deadline for `hello`; an
+        // authenticated one is closed after `idle` without any message.
+        let deadline = match ctx {
+            None => hello_deadline,
+            Some(_) => tokio::time::Instant::now() + deadlines.idle,
+        };
+        let msg = match tokio::time::timeout_at(deadline, stream.next()).await {
+            Ok(Some(Ok(msg))) => msg,
+            Ok(_) => break,
+            Err(_) => {
+                debug!(authenticated = ctx.is_some(), "closing idle websocket");
+                break;
+            }
+        };
         if message_rate_exceeded(&mut last_msg, &mut burst, Instant::now()) {
             send_err(&tx, "rate_limited", "too many messages").await;
             break;
@@ -381,20 +433,24 @@ async fn handle_control(
                 return Ok(());
             }
             let mut any_online = false;
+            let mut any_queued = false;
             let env = ControlMessage::TextEnvelope {
                 routing: routing.clone(),
                 nonce: nonce.clone(),
                 ciphertext: ciphertext.clone(),
             };
             for peer in &peers {
-                if let Some(p) = state.connections.get(peer) {
+                // Clone the sender: a DashMap guard held across `send().await`
+                // would block every writer to its shard while the peer is slow.
+                let online = state.connections.get(peer).map(|p| p.value().clone());
+                if let Some(p) = online {
                     any_online = true;
                     if let Ok(s) = env.encode() {
                         let _ = p.send(WsOut::Text(s)).await;
                         state.frames_forwarded.fetch_add(1, Ordering::Relaxed);
                     }
                 } else {
-                    state.queue_text(
+                    any_queued |= state.queue_text(
                         peer,
                         QueuedEnvelope {
                             routing: routing.clone(),
@@ -405,17 +461,23 @@ async fn handle_control(
                     );
                 }
             }
+            let (status, detail) = if any_online {
+                (AckStatus::Delivered, None)
+            } else if any_queued {
+                (AckStatus::Accepted, None)
+            } else {
+                (
+                    AckStatus::PeerOffline,
+                    Some("the relay's offline queue is full".into()),
+                )
+            };
             send_msg(
                 tx,
                 &ControlMessage::Ack {
                     message_id: routing.message_id,
                     transfer_id: Some(routing.transfer_id),
-                    status: if any_online {
-                        AckStatus::Delivered
-                    } else {
-                        AckStatus::Accepted
-                    },
-                    detail: None,
+                    status,
+                    detail,
                 },
             )
             .await;
@@ -616,7 +678,8 @@ async fn forward_binary(
     let peers = state.peer_ids(&c.room_id, &c.device_id);
     let mut sent = false;
     for peer in peers {
-        if let Some(p) = state.connections.get(&peer) {
+        let online = state.connections.get(&peer).map(|p| p.value().clone());
+        if let Some(p) = online {
             let _ = p.send(WsOut::Binary(bytes.clone())).await;
             state.frames_forwarded.fetch_add(1, Ordering::Relaxed);
             sent = true;
@@ -636,7 +699,8 @@ async fn forward_binary(
 async fn fanout_except(state: &Arc<RelayState>, room_id: &str, except: &str, msg: &ControlMessage) {
     if let Ok(s) = msg.encode() {
         for peer in state.peer_ids(room_id, except) {
-            if let Some(p) = state.connections.get(&peer) {
+            let online = state.connections.get(&peer).map(|p| p.value().clone());
+            if let Some(p) = online {
                 let _ = p.send(WsOut::Text(s.clone())).await;
                 state.frames_forwarded.fetch_add(1, Ordering::Relaxed);
             }

@@ -1,10 +1,9 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, PoisonError};
-use std::time::Instant;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
@@ -19,12 +18,25 @@ use clipsync_protocol::{
 
 use crate::auth::issue_token;
 use crate::client_ip::TrustedProxies;
-use crate::join_limits::{PairingJoinLimits, GLOBAL_FAILED_JOIN_WINDOW};
-use crate::{JoinError, RelayConfig, WsOut};
+use crate::connection_limits::{ConnectionCounts, ConnectionRefused, ConnectionSlot};
+use crate::join_limits::{PairingJoinLimits, PAIRING_CODE_SPACE};
+use crate::rate_limit::Budget;
+use crate::resource_limits::{
+    RelayResourceLimits, SocketDeadlines, MAX_ACTIVE_PAIRING_SESSIONS, MAX_PAIRING_FIELD_BYTES,
+    MAX_QUEUED_TEXT_ENVELOPES,
+};
+use crate::{CreateError, JoinError, RelayConfig, WsOut};
 
-/// IPv6 sites are normally delegated at least a /64, so one client controls
-/// every address in it; count them as one client.
-const IPV6_CLIENT_PREFIX_LEN: u32 = 64;
+/// Random draws `alloc_code` makes before giving up. With at most
+/// `MAX_ACTIVE_PAIRING_SESSIONS` codes in use, all of them collide with
+/// probability at most 1e-96.
+const ALLOC_CODE_ATTEMPTS: usize = 32;
+/// Lifetime of the device tokens issued when a pairing completes: one year.
+/// Tokens are not renewed, so a room is unusable once they have expired.
+const DEVICE_TOKEN_TTL_SECS: i64 = 365 * 24 * 60 * 60;
+/// Tokens carry whole-second expiry times and stay valid through that second,
+/// so a room outlives its tokens by this margin.
+const TOKEN_EXPIRY_GRACE_SECS: i64 = 1;
 
 pub struct RelayState {
     pub config: RelayConfig,
@@ -33,18 +45,32 @@ pub struct RelayState {
     rooms: DashMap<String, Room>,
     pub connections: DashMap<String, mpsc::Sender<WsOut>>,
     queue: DashMap<String, (QueuedEnvelope, DateTime<Utc>)>,
-    /// Failed joins per client key (see `rate_limit_key`): count and window start.
-    ip_fails: DashMap<IpAddr, (u32, Instant)>,
-    /// Relay-wide failed joins: count and window start.
-    global_join_fails: Mutex<(u32, Instant)>,
+    /// Failed pairing joins, per client and relay-wide.
+    join_budget: Budget,
+    /// Created pairing sessions, per client and relay-wide.
+    create_budget: Budget,
+    /// Serializes the capacity check with the insert of a new pairing session,
+    /// so concurrent creations cannot overshoot the session or room caps.
+    pairing_admission: Mutex<()>,
+    pub(crate) connection_counts: Arc<ConnectionCounts>,
     trusted_proxies: TrustedProxies,
     join_limits: PairingJoinLimits,
+    resource_limits: RelayResourceLimits,
+    pub(crate) socket_deadlines: SocketDeadlines,
     pub connections_total: AtomicU64,
     pub frames_forwarded: AtomicU64,
     pub pairing_ok: AtomicU64,
     pub pairing_fail: AtomicU64,
     /// Joins refused because a failed-join budget was spent.
     pub pairing_throttled: AtomicU64,
+    /// Pairing creations refused because a creation budget was spent.
+    pub pairing_create_throttled: AtomicU64,
+    /// Pairing creations refused because the session or room cap was reached.
+    pub pairing_create_full: AtomicU64,
+    /// WebSocket connections refused by a connection cap.
+    pub connections_refused: AtomicU64,
+    /// Offline text envelopes not queued because the queue was full.
+    pub queue_full: AtomicU64,
     pub expired: AtomicU64,
 }
 
@@ -69,6 +95,8 @@ pub struct Room {
     pub devices: HashMap<String, DeviceEntry>,
     pub epoch: u64,
     pub default_ttl: u64,
+    /// When the device tokens issued for this room expire.
+    pub tokens_expire_at: DateTime<Utc>,
 }
 
 #[derive(Clone)]
@@ -77,27 +105,21 @@ pub struct DeviceEntry {
     pub revoked: bool,
 }
 
-/// Join attempt counted before the code lookup and refunded if the join succeeds.
-struct JoinReservation {
-    key: IpAddr,
-    ip_window: Instant,
-    global_window: Instant,
-}
-
-/// Rate-limit key for a client address: IPv4 as is, IPv6 by its /64 prefix.
-fn rate_limit_key(ip: IpAddr) -> IpAddr {
-    match ip.to_canonical() {
-        IpAddr::V6(v6) => {
-            let mask = u128::MAX << (u128::BITS - IPV6_CLIENT_PREFIX_LEN);
-            IpAddr::V6(Ipv6Addr::from(u128::from(v6) & mask))
-        }
-        v4 => v4,
-    }
+/// Whether any client-supplied pairing field is longer than the relay stores.
+fn oversized_pairing_field(fields: &[&str]) -> bool {
+    fields
+        .iter()
+        .any(|field| field.len() > MAX_PAIRING_FIELD_BYTES)
 }
 
 impl RelayState {
     pub fn new(config: RelayConfig) -> Self {
-        Self::build(config, Vec::new(), PairingJoinLimits::default())
+        Self::build(
+            config,
+            Vec::new(),
+            PairingJoinLimits::default(),
+            RelayResourceLimits::default(),
+        )
     }
 
     /// Like [`RelayState::new`], also honoring `X-Forwarded-For` from
@@ -108,14 +130,37 @@ impl RelayState {
         trusted_proxies: Vec<ipnet::IpNet>,
         join_limits: PairingJoinLimits,
     ) -> anyhow::Result<Self> {
+        Self::with_limits(
+            config,
+            trusted_proxies,
+            join_limits,
+            RelayResourceLimits::default(),
+        )
+    }
+
+    /// Like [`RelayState::with_join_policy`], also applying `resource_limits`.
+    /// Fails if either set of limits does not validate.
+    pub fn with_limits(
+        config: RelayConfig,
+        trusted_proxies: Vec<ipnet::IpNet>,
+        join_limits: PairingJoinLimits,
+        resource_limits: RelayResourceLimits,
+    ) -> anyhow::Result<Self> {
         join_limits.validate()?;
-        Ok(Self::build(config, trusted_proxies, join_limits))
+        resource_limits.validate()?;
+        Ok(Self::build(
+            config,
+            trusted_proxies,
+            join_limits,
+            resource_limits,
+        ))
     }
 
     fn build(
         config: RelayConfig,
         trusted_proxies: Vec<ipnet::IpNet>,
         join_limits: PairingJoinLimits,
+        resource_limits: RelayResourceLimits,
     ) -> Self {
         Self {
             config,
@@ -124,32 +169,81 @@ impl RelayState {
             rooms: DashMap::new(),
             connections: DashMap::new(),
             queue: DashMap::new(),
-            ip_fails: DashMap::new(),
-            global_join_fails: Mutex::new((0, Instant::now())),
+            join_budget: Budget::default(),
+            create_budget: Budget::default(),
+            pairing_admission: Mutex::new(()),
+            connection_counts: Arc::default(),
             trusted_proxies: TrustedProxies::new(trusted_proxies),
             join_limits,
+            resource_limits,
+            socket_deadlines: SocketDeadlines::default(),
             connections_total: AtomicU64::new(0),
             frames_forwarded: AtomicU64::new(0),
             pairing_ok: AtomicU64::new(0),
             pairing_fail: AtomicU64::new(0),
             pairing_throttled: AtomicU64::new(0),
+            pairing_create_throttled: AtomicU64::new(0),
+            pairing_create_full: AtomicU64::new(0),
+            connections_refused: AtomicU64::new(0),
+            queue_full: AtomicU64::new(0),
             expired: AtomicU64::new(0),
         }
     }
 
+    /// Open a pairing session for a request from client address `ip`. Every
+    /// accepted creation counts against the client's and the relay-wide
+    /// creation budgets; a spent budget refuses with `Throttled`, and a full
+    /// relay (open sessions or rooms at their cap) refuses with `Full`.
     pub fn create_pairing(
         &self,
         req: CreatePairingRequest,
-    ) -> Result<CreatePairingResponse, String> {
+        ip: IpAddr,
+    ) -> Result<CreatePairingResponse, CreateError> {
         let ttl = req
             .ttl_secs
             .map(clamp_ttl)
             .unwrap_or(clipsync_protocol::DEFAULT_TTL_SECS);
         if ttl > HARD_MAX_TTL_SECS {
-            return Err("ttl exceeds hard max".into());
+            return Err(CreateError::Invalid("ttl exceeds hard max".into()));
         }
+        if oversized_pairing_field(&[
+            req.pairing_session_id.as_str(),
+            req.device_id.as_str(),
+            &req.device_name,
+            &req.os,
+        ]) {
+            return Err(CreateError::Invalid(format!(
+                "pairing fields must be at most {MAX_PAIRING_FIELD_BYTES} bytes"
+            )));
+        }
+        let reservation = self
+            .create_budget
+            .reserve(ip, self.resource_limits.create_budget())
+            .ok_or_else(|| {
+                self.pairing_create_throttled
+                    .fetch_add(1, Ordering::Relaxed);
+                CreateError::Throttled
+            })?;
+        let admission = self
+            .pairing_admission
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !self.has_pairing_capacity() {
+            // Expired sessions linger until the next GC pass; never let them
+            // refuse a creation.
+            self.prune_pairings(Utc::now());
+        }
+        let code = self
+            .has_pairing_capacity()
+            .then(|| self.alloc_code())
+            .flatten();
+        let Some(code) = code else {
+            drop(admission);
+            self.create_budget.release(reservation);
+            self.pairing_create_full.fetch_add(1, Ordering::Relaxed);
+            return Err(CreateError::Full);
+        };
         let room_id = RoomId::new();
-        let code = self.alloc_code()?;
         let expires_at = Utc::now() + chrono::Duration::seconds(PAIRING_TTL_SECS as i64);
         let session = PairingSession {
             session_id: req.pairing_session_id.clone(),
@@ -171,9 +265,10 @@ impl RelayState {
             pairing_senders: [None, None],
             pending_spake: [None, None],
         };
+        self.pairing_by_code.insert(code.clone(), session);
         self.pairing_by_id
             .insert(req.pairing_session_id.0.clone(), code.clone());
-        self.pairing_by_code.insert(code.clone(), session);
+        drop(admission);
         let pairing_token = issue_token(
             &self.config.token_secret,
             "pair",
@@ -192,16 +287,26 @@ impl RelayState {
         })
     }
 
-    fn alloc_code(&self) -> Result<String, String> {
+    /// Room for one more pairing session: below the open-session cap, and
+    /// every open session can still complete into a room without passing the
+    /// room cap. Completed sessions count until GC removes them, which only
+    /// errs toward refusing.
+    fn has_pairing_capacity(&self) -> bool {
+        let sessions = self.pairing_by_code.len();
+        sessions < MAX_ACTIVE_PAIRING_SESSIONS
+            && self.rooms.len() + sessions < self.resource_limits.max_rooms
+    }
+
+    fn alloc_code(&self) -> Option<String> {
         let mut rng = rand::rng();
-        for _ in 0..32 {
-            let n: u32 = rng.random_range(0..1_000_000);
+        for _ in 0..ALLOC_CODE_ATTEMPTS {
+            let n = rng.random_range(0..PAIRING_CODE_SPACE);
             let code = format!("{n:06}");
             if !self.pairing_by_code.contains_key(&code) {
-                return Ok(code);
+                return Some(code);
             }
         }
-        Err("could not allocate pairing code".into())
+        None
     }
 
     /// Client address for per-client limits of a request received from `peer`.
@@ -209,23 +314,32 @@ impl RelayState {
         self.trusted_proxies.client_ip(peer, headers)
     }
 
-    /// Join a pairing session by code. Every failed join, whatever its cause,
-    /// counts against the client and the relay-wide budget; once either is
-    /// exhausted every join is refused with `Attempts`, including one with a
-    /// correct code, so the response never reveals whether a code exists.
+    /// Join a pairing session by code. Every failed join of a well-formed
+    /// request, whatever its cause, counts against the client and the
+    /// relay-wide budget; once either is exhausted every join is refused with
+    /// `Attempts`, including one with a correct code, so the response never
+    /// reveals whether a code exists.
     pub fn join_pairing(
         &self,
         req: JoinPairingRequest,
         ip: IpAddr,
     ) -> Result<JoinPairingResponse, JoinError> {
+        // Malformed before any budget: the request never reaches a session.
+        if oversized_pairing_field(&[req.device_id.as_str(), &req.device_name, &req.os]) {
+            return Err(JoinError::Other(format!(
+                "pairing fields must be at most {MAX_PAIRING_FIELD_BYTES} bytes"
+            )));
+        }
         let reservation = self
-            .reserve_join_attempt(rate_limit_key(ip))
-            .inspect_err(|_| {
+            .join_budget
+            .reserve(ip, self.join_limits.budget())
+            .ok_or_else(|| {
                 self.pairing_throttled.fetch_add(1, Ordering::Relaxed);
+                JoinError::Attempts
             })?;
         let result = self.join_pairing_session(req);
         if result.is_ok() {
-            self.release_join_attempt(reservation);
+            self.join_budget.release(reservation);
         } else {
             self.pairing_fail.fetch_add(1, Ordering::Relaxed);
         }
@@ -283,78 +397,11 @@ impl RelayState {
         })
     }
 
-    /// Count a join attempt before the code is looked up, so concurrent guesses
-    /// cannot overshoot either budget. Refused attempts are not counted.
-    fn reserve_join_attempt(&self, key: IpAddr) -> Result<JoinReservation, JoinError> {
-        let ip_window = {
-            let mut entry = self
-                .ip_fails
-                .entry(key)
-                .or_insert_with(|| (0, Instant::now()));
-            // Read the clock while holding the entry so a reset never
-            // back-dates a window past a concurrent update.
-            let now = Instant::now();
-            if now.duration_since(entry.1) > self.join_limits.client_fail_window() {
-                *entry = (0, now);
-            }
-            if entry.0 >= self.join_limits.client_fail_limit {
-                return Err(JoinError::Attempts);
-            }
-            entry.0 += 1;
-            entry.1
-        };
-        let mut global = self
-            .global_join_fails
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let now = Instant::now();
-        if now.duration_since(global.1) > GLOBAL_FAILED_JOIN_WINDOW {
-            *global = (0, now);
-        }
-        if global.0 >= self.join_limits.relay_fail_limit {
-            drop(global);
-            self.release_ip_attempt(key, ip_window);
-            return Err(JoinError::Attempts);
-        }
-        global.0 += 1;
-        Ok(JoinReservation {
-            key,
-            ip_window,
-            global_window: global.1,
-        })
-    }
-
-    /// Refund a successful join; a refund for an already-reset window is void.
-    fn release_join_attempt(&self, reservation: JoinReservation) {
-        self.release_ip_attempt(reservation.key, reservation.ip_window);
-        let mut global = self
-            .global_join_fails
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if global.1 == reservation.global_window {
-            global.0 = global.0.saturating_sub(1);
-        }
-    }
-
-    fn release_ip_attempt(&self, key: IpAddr, window: Instant) {
-        self.ip_fails.remove_if_mut(&key, |_, entry| {
-            if entry.1 == window {
-                entry.0 = entry.0.saturating_sub(1);
-            }
-            entry.0 == 0
-        });
-    }
-
     /// Test helper: charge failed joins to one client without the relay-wide budget.
     #[cfg(test)]
     pub(crate) fn record_ip_fail(&self, ip: IpAddr) {
-        let now = Instant::now();
-        let mut entry = self.ip_fails.entry(rate_limit_key(ip)).or_insert((0, now));
-        if now.duration_since(entry.1) > self.join_limits.client_fail_window() {
-            *entry = (0, now);
-        }
-        entry.0 = entry.0.saturating_add(1);
-        drop(entry);
+        self.join_budget
+            .charge_client(ip, self.join_limits.client_fail_window());
         self.pairing_fail.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -416,7 +463,7 @@ impl RelayState {
             &creator.device_id,
             DeviceRole::Owner,
             None,
-            86400 * 365,
+            DEVICE_TOKEN_TTL_SECS,
         );
         let member_token = issue_token(
             &self.config.token_secret,
@@ -425,7 +472,7 @@ impl RelayState {
             &joiner.device_id,
             DeviceRole::Member,
             None,
-            86400 * 365,
+            DEVICE_TOKEN_TTL_SECS,
         );
         let mut devices = HashMap::new();
         devices.insert(
@@ -449,6 +496,9 @@ impl RelayState {
                 devices,
                 epoch: 1,
                 default_ttl: session.ttl_secs,
+                // Read after both tokens were issued, so neither outlives it.
+                tokens_expire_at: Utc::now()
+                    + chrono::Duration::seconds(DEVICE_TOKEN_TTL_SECS + TOKEN_EXPIRY_GRACE_SECS),
             },
         );
         self.pairing_ok.fetch_add(1, Ordering::Relaxed);
@@ -494,8 +544,29 @@ impl RelayState {
         self.connections.contains_key(device_id)
     }
 
-    pub fn queue_text(&self, device_id: &str, env: QueuedEnvelope, expires_at: DateTime<Utc>) {
+    /// Queue `env` as `device_id`'s latest offline text, replacing any earlier
+    /// one, until `expires_at` but never past the protocol's hard TTL. Returns
+    /// false, queuing nothing, when the queue already holds
+    /// `MAX_QUEUED_TEXT_ENVELOPES` other recipients. Concurrent senders may
+    /// pass the check together, so the queue can exceed the cap by at most the
+    /// number of concurrent connections.
+    pub fn queue_text(
+        &self,
+        device_id: &str,
+        env: QueuedEnvelope,
+        expires_at: DateTime<Utc>,
+    ) -> bool {
+        let now = Utc::now();
+        let expires_at = expires_at.min(now + chrono::Duration::seconds(HARD_MAX_TTL_SECS as i64));
+        if !self.queue.contains_key(device_id) && self.queue.len() >= MAX_QUEUED_TEXT_ENVELOPES {
+            self.prune_queue(now);
+            if self.queue.len() >= MAX_QUEUED_TEXT_ENVELOPES {
+                self.queue_full.fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
+        }
         self.queue.insert(device_id.to_string(), (env, expires_at));
+        true
     }
 
     pub fn take_queue(&self, device_id: &str) -> Option<QueuedEnvelope> {
@@ -522,13 +593,67 @@ impl RelayState {
         }
     }
 
+    /// Take a connection slot for a WebSocket from client address `ip`, or
+    /// refuse when the relay or that client holds its maximum.
+    pub(crate) fn acquire_connection(
+        &self,
+        ip: IpAddr,
+    ) -> Result<ConnectionSlot, ConnectionRefused> {
+        self.connection_counts
+            .acquire(
+                ip,
+                self.resource_limits.max_connections,
+                self.resource_limits.max_client_connections,
+            )
+            .inspect_err(|_| {
+                self.connections_refused.fetch_add(1, Ordering::Relaxed);
+            })
+    }
+
     pub fn gc(&self) {
         let now = Utc::now();
-        self.pairing_by_code
-            .retain(|_, s| s.expires_at > now && !s.completed);
-        let client_window = self.join_limits.client_fail_window();
-        self.ip_fails
-            .retain(|_, (_, window)| window.elapsed() <= client_window);
+        self.prune_pairings(now);
+        self.join_budget
+            .prune(self.join_limits.client_fail_window());
+        self.create_budget
+            .prune(self.resource_limits.create_budget().client_window);
+        self.prune_rooms(now);
+        self.prune_queue(now);
+    }
+
+    /// Drop expired and completed pairing sessions from both indexes.
+    fn prune_pairings(&self, now: DateTime<Utc>) {
+        let mut removed = Vec::new();
+        self.pairing_by_code.retain(|code, session| {
+            let keep = session.expires_at > now && !session.completed;
+            if !keep {
+                removed.push((session.session_id.0.clone(), code.clone()));
+            }
+            keep
+        });
+        for (sid, code) in removed {
+            // A newer session may have reused this ID; leave its mapping.
+            self.pairing_by_id
+                .remove_if(&sid, |_, mapped| *mapped == code);
+        }
+    }
+
+    /// Drop rooms nobody can use again: every device revoked, or every device
+    /// token expired while no device is still connected. Tokens are only
+    /// issued at pairing, so neither kind of room can be re-entered.
+    fn prune_rooms(&self, now: DateTime<Utc>) {
+        self.rooms.retain(|_, room| {
+            let any_active = room.devices.values().any(|device| !device.revoked);
+            let tokens_valid = room.tokens_expire_at > now;
+            let any_online = room
+                .devices
+                .keys()
+                .any(|device_id| self.connections.contains_key(device_id));
+            any_active && (tokens_valid || any_online)
+        });
+    }
+
+    fn prune_queue(&self, now: DateTime<Utc>) {
         self.queue.retain(|_, (_, exp)| {
             if *exp > now {
                 true
@@ -541,13 +666,20 @@ impl RelayState {
 
     pub fn metrics_text(&self) -> String {
         format!(
-            "clipsync_ws_connections {}\nclipsync_frames_forwarded {}\nclipsync_pairing_ok {}\nclipsync_pairing_fail {}\nclipsync_pairing_throttled {}\nclipsync_expired {}\n",
+            "clipsync_ws_connections {}\nclipsync_frames_forwarded {}\nclipsync_pairing_ok {}\nclipsync_pairing_fail {}\nclipsync_pairing_throttled {}\nclipsync_expired {}\nclipsync_ws_sockets {}\nclipsync_ws_refused {}\nclipsync_pairing_sessions {}\nclipsync_pairing_create_throttled {}\nclipsync_pairing_create_full {}\nclipsync_rooms {}\nclipsync_queue_full {}\n",
             self.connections.len(),
             self.frames_forwarded.load(Ordering::Relaxed),
             self.pairing_ok.load(Ordering::Relaxed),
             self.pairing_fail.load(Ordering::Relaxed),
             self.pairing_throttled.load(Ordering::Relaxed),
             self.expired.load(Ordering::Relaxed),
+            self.connection_counts.total(),
+            self.connections_refused.load(Ordering::Relaxed),
+            self.pairing_by_code.len(),
+            self.pairing_create_throttled.load(Ordering::Relaxed),
+            self.pairing_create_full.load(Ordering::Relaxed),
+            self.rooms.len(),
+            self.queue_full.load(Ordering::Relaxed),
         )
     }
 

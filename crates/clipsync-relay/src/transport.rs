@@ -48,6 +48,8 @@ pub struct RelayTransportConfig {
     pub trusted_proxies: ::std::vec::Vec<ipnet::IpNet>,
     #[command(flatten)]
     pub join_limits: crate::PairingJoinLimits,
+    #[command(flatten)]
+    pub resource_limits: crate::RelayResourceLimits,
 }
 
 impl RelayTransportConfig {

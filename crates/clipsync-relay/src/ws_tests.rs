@@ -59,7 +59,7 @@ async fn regression_f98_stale_room_socket_close_does_not_announce_live_replaceme
         let server = tokio::spawn(async move {
             axum::serve(listener, axum::Router::new()
                 .route("/v1/ws", axum::routing::get(ws_handler))
-                .with_state(server_state)).await.unwrap();
+                .with_state(server_state).into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
         });
         let mut peer = connect(address, &member, &rid, &member_token).await;
         let mut old = connect(address, &owner, &rid, &owner_token).await;
@@ -142,14 +142,17 @@ fn room(state: &RelayState) -> (RoomId, DeviceId, DeviceId, String, String) {
     let member = DeviceId::new();
     let sid = PairingSessionId::new();
     let offer = state
-        .create_pairing(CreatePairingRequest {
-            protocol_version: clipsync_protocol::PROTOCOL_VERSION,
-            pairing_session_id: sid.clone(),
-            device_id: owner.clone(),
-            device_name: "owner".into(),
-            os: "fixture".into(),
-            ttl_secs: Some(60),
-        })
+        .create_pairing(
+            CreatePairingRequest {
+                protocol_version: clipsync_protocol::PROTOCOL_VERSION,
+                pairing_session_id: sid.clone(),
+                device_id: owner.clone(),
+                device_name: "owner".into(),
+                os: "fixture".into(),
+                ttl_secs: Some(60),
+            },
+            std::net::Ipv4Addr::LOCALHOST.into(),
+        )
         .unwrap();
     state
         .join_pairing(
@@ -539,14 +542,17 @@ async fn missing_peers_and_pairing_abort_report_explicit_control_outcomes() {
     );
     let sid = PairingSessionId::new();
     let pending = state
-        .create_pairing(CreatePairingRequest {
-            protocol_version: clipsync_protocol::PROTOCOL_VERSION,
-            pairing_session_id: sid.clone(),
-            device_id: DeviceId::new(),
-            device_name: "fixture".into(),
-            os: "fixture".into(),
-            ttl_secs: None,
-        })
+        .create_pairing(
+            CreatePairingRequest {
+                protocol_version: clipsync_protocol::PROTOCOL_VERSION,
+                pairing_session_id: sid.clone(),
+                device_id: DeviceId::new(),
+                device_name: "fixture".into(),
+                os: "fixture".into(),
+                ttl_secs: None,
+            },
+            std::net::Ipv4Addr::LOCALHOST.into(),
+        )
         .unwrap();
     ctx.as_mut().unwrap().pairing_sid = Some(sid.to_string());
     handle_control(
@@ -625,7 +631,8 @@ async fn websocket_frame_limits_reject_oversized_binary_before_dispatch() {
                     listener,
                     axum::Router::new()
                         .route("/v1/ws", axum::routing::get(ws_handler))
-                        .with_state(serving),
+                        .with_state(serving)
+                        .into_make_service_with_connect_info::<std::net::SocketAddr>(),
                 )
                 .await
                 .unwrap();
@@ -711,7 +718,7 @@ async fn websocket_recovers_after_malformed_control_and_unauthenticated_binary()
             listener,
             axum::Router::new()
                 .route("/v1/ws", axum::routing::get(ws_handler))
-                .with_state(state),
+                .with_state(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
         .await
         .unwrap();
@@ -779,14 +786,17 @@ async fn unauthenticated_forwarding_and_absent_pairing_peers_fail_without_invent
     let sid = PairingSessionId::new();
     let owner = DeviceId::new();
     let offer = state
-        .create_pairing(CreatePairingRequest {
-            pairing_session_id: sid.clone(),
-            device_id: owner.clone(),
-            device_name: "owner".into(),
-            os: "fixture".into(),
-            protocol_version: clipsync_protocol::PROTOCOL_VERSION,
-            ttl_secs: Some(60),
-        })
+        .create_pairing(
+            CreatePairingRequest {
+                pairing_session_id: sid.clone(),
+                device_id: owner.clone(),
+                device_name: "owner".into(),
+                os: "fixture".into(),
+                protocol_version: clipsync_protocol::PROTOCOL_VERSION,
+                ttl_secs: Some(60),
+            },
+            std::net::Ipv4Addr::LOCALHOST.into(),
+        )
         .unwrap();
     for message in [
         ControlMessage::NoiseHandshake {
@@ -970,7 +980,7 @@ async fn regression_f88_revoked_network_peer_is_closed_cannot_send_and_cannot_re
             listener,
             axum::Router::new()
                 .route("/v1/ws", axum::routing::get(ws_handler))
-                .with_state(serving),
+                .with_state(serving).into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
         .await
         .unwrap();
@@ -1294,14 +1304,17 @@ async fn regression_f98_expiry_discards_pending_spake_and_prevents_admission_or_
     let owner = DeviceId::new();
     let member = DeviceId::new();
     let offer = state
-        .create_pairing(CreatePairingRequest {
-            protocol_version: clipsync_protocol::PROTOCOL_VERSION,
-            pairing_session_id: sid.clone(),
-            device_id: owner.clone(),
-            device_name: "owner".into(),
-            os: "fixture".into(),
-            ttl_secs: Some(60),
-        })
+        .create_pairing(
+            CreatePairingRequest {
+                protocol_version: clipsync_protocol::PROTOCOL_VERSION,
+                pairing_session_id: sid.clone(),
+                device_id: owner.clone(),
+                device_name: "owner".into(),
+                os: "fixture".into(),
+                ttl_secs: Some(60),
+            },
+            std::net::Ipv4Addr::LOCALHOST.into(),
+        )
         .unwrap();
     let joined = state
         .join_pairing(
@@ -1373,4 +1386,157 @@ async fn regression_f98_expiry_discards_pending_spake_and_prevents_admission_or_
     assert!(state.room(offer.room_id.as_str()).is_none());
     state.gc();
     assert!(state.pairing(sid.as_str()).is_none());
+}
+
+#[tokio::test]
+async fn text_for_an_offline_peer_is_acked_peer_offline_when_the_queue_is_full() {
+    use crate::resource_limits::MAX_QUEUED_TEXT_ENVELOPES;
+    let state = state();
+    let (rid, owner, member, token, _) = room(&state);
+    let (tx, mut rx) = mpsc::channel(32);
+    let mut ctx = None;
+    handle_control(&state, &tx, &mut ctx, hello(&owner, &rid, &token), None)
+        .await
+        .unwrap();
+    receive(&mut rx).await;
+    let routing = RoutingHeader {
+        version: clipsync_protocol::PROTOCOL_VERSION,
+        message_id: MessageId::new(),
+        transfer_id: TransferId::new(),
+        room_id: rid,
+        sender_device_id: owner,
+        recipient: Recipient::Broadcast,
+        sent_at: chrono::Utc::now(),
+        expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+        item_kind: ItemKind::Text,
+        seq: 1,
+    };
+    let queued = QueuedEnvelope {
+        routing: routing.clone(),
+        nonce: "opaque-nonce".into(),
+        ciphertext: "opaque-ciphertext".into(),
+    };
+    for n in 0..MAX_QUEUED_TEXT_ENVELOPES {
+        assert!(state.queue_text(&format!("other-{n}"), queued.clone(), routing.expires_at));
+    }
+    let envelope = ControlMessage::TextEnvelope {
+        routing,
+        nonce: "opaque-nonce".into(),
+        ciphertext: "opaque-ciphertext".into(),
+    };
+    handle_control(&state, &tx, &mut ctx, envelope, None)
+        .await
+        .unwrap();
+    assert!(matches!(
+        receive(&mut rx).await,
+        ControlMessage::Ack {
+            status: AckStatus::PeerOffline,
+            detail: Some(_),
+            ..
+        }
+    ));
+    assert!(state.take_queue(member.as_str()).is_none());
+}
+
+/// Idle sockets must not hold connection slots: an unauthenticated socket is
+/// closed at its hello deadline even while it keeps sending other messages,
+/// and an authenticated one after a silence of the idle timeout, but not
+/// while it keeps sending heartbeats.
+#[tokio::test]
+async fn idle_sockets_are_closed_and_free_their_connection_slots() {
+    use crate::resource_limits::SocketDeadlines;
+    use tokio_tungstenite::tungstenite::Message as ClientMessage;
+    const HELLO: Duration = Duration::from_millis(300);
+    const IDLE: Duration = Duration::from_millis(300);
+    const HEARTBEAT: Duration = Duration::from_millis(50);
+    /// Heartbeats sent while checking that traffic keeps a socket open:
+    /// together they span several idle timeouts.
+    const HEARTBEATS: u64 = 20;
+    type Client = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+    async fn closed(socket: &mut Client) {
+        loop {
+            match socket.next().await {
+                None | Some(Err(_)) | Some(Ok(ClientMessage::Close(_))) => return,
+                Some(Ok(_)) => {}
+            }
+        }
+    }
+    let ping = || ClientMessage::Text(ControlMessage::Ping { ts: 1 }.encode().unwrap().into());
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut relay = RelayState::new(RelayConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            public_url: "http://127.0.0.1".into(),
+            token_secret: vec![42; 32],
+            webhook_url: None,
+            webhook_secret: None,
+        });
+        relay.socket_deadlines = SocketDeadlines {
+            hello: HELLO,
+            idle: IDLE,
+        };
+        let state = Arc::new(relay);
+        let (rid, owner, _, owner_token, _) = room(&state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let serving = state.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new()
+                    .route("/v1/ws", axum::routing::get(ws_handler))
+                    .with_state(serving)
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let url = format!("ws://{address}/v1/ws");
+
+        // Unauthenticated: pings do not extend the hello deadline.
+        let (mut anonymous, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let opened = std::time::Instant::now();
+        let mut heartbeat = tokio::time::interval(HEARTBEAT);
+        loop {
+            tokio::select! {
+                _ = heartbeat.tick() => {
+                    if anonymous.send(ping()).await.is_err() {
+                        break;
+                    }
+                }
+                message = anonymous.next() => match message {
+                    None | Some(Err(_)) | Some(Ok(ClientMessage::Close(_))) => break,
+                    Some(Ok(_)) => {}
+                },
+            }
+        }
+        assert!(opened.elapsed() >= HELLO);
+
+        // Authenticated: heartbeats keep the socket open past several idle
+        // timeouts; silence then closes it.
+        let (mut device, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        device
+            .send(ClientMessage::Text(
+                hello(&owner, &rid, &owner_token).encode().unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        for _ in 0..HEARTBEATS {
+            tokio::time::sleep(HEARTBEAT).await;
+            device.send(ping()).await.unwrap();
+        }
+        assert!(state.is_online(owner.as_str()), "a live socket was closed");
+        let silent = std::time::Instant::now();
+        closed(&mut device).await;
+        assert!(silent.elapsed() >= IDLE);
+
+        while state.connection_counts.total() > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        server.abort();
+    })
+    .await
+    .unwrap();
 }
