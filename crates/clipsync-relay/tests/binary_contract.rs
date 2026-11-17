@@ -1,30 +1,31 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
+mod support;
+
+use std::net::Ipv4Addr;
 use std::process::Stdio;
-use std::time::Duration;
+
+use support::{Relay, EPHEMERAL_LOOPBACK_BIND};
 
 /// Scrape credential for the binary-level metrics contract.
 const METRICS_TEST_TOKEN: &str = "binary-metrics-scrape-token-0123456789";
 
 struct RelayProcess {
-    child: tokio::process::Child,
+    relay: Relay,
     url: String,
     client: reqwest::Client,
 }
 
 impl RelayProcess {
     async fn start(metrics_token: Option<&str>) -> Self {
-        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = reserved.local_addr().unwrap();
-        drop(reserved);
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_clipsync-relay"));
         command
             .args([
                 "--allow-http",
                 "--bind",
-                &address.to_string(),
+                EPHEMERAL_LOOPBACK_BIND,
                 "--public-url",
-                &format!("http://{address}"),
+                "http://127.0.0.1",
             ])
             .env(
                 "CLIPSYNC_RELAY_TOKEN_SECRET",
@@ -38,7 +39,6 @@ impl RelayProcess {
             .env_remove("CLIPSYNC_RELAY_WEBHOOK_SECRET")
             .env_remove("CLIPSYNC_RELAY_METRICS_TOKEN_FILE")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         if let Some(token) = metrics_token {
@@ -46,26 +46,16 @@ impl RelayProcess {
         } else {
             command.env_remove("CLIPSYNC_RELAY_METRICS_TOKEN");
         }
-        let mut child = command.spawn().unwrap();
+        let relay = Relay::spawn(command).await;
+        // The relay binds the requested interface; the OS chooses only the port.
+        assert_eq!(relay.address.ip(), Ipv4Addr::LOCALHOST);
+        assert_ne!(relay.address.port(), 0);
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        let url = format!("http://{address}");
-        tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                assert!(
-                    child.try_wait().unwrap().is_none(),
-                    "relay exited before health check"
-                );
-                if let Ok(response) = client.get(format!("{url}/healthz")).send().await {
-                    assert!(response.status().is_success());
-                    assert!(response.text().await.unwrap().contains("ok"));
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .unwrap();
-        Self { child, url, client }
+        let url = format!("http://{}", relay.address);
+        let response = client.get(format!("{url}/healthz")).send().await.unwrap();
+        assert!(response.status().is_success());
+        assert!(response.text().await.unwrap().contains("ok"));
+        Self { relay, url, client }
     }
 
     async fn metrics_status(&self, bearer: Option<&str>) -> reqwest::StatusCode {
@@ -76,9 +66,8 @@ impl RelayProcess {
         request.send().await.unwrap().status()
     }
 
-    async fn stop(mut self) {
-        self.child.kill().await.unwrap();
-        self.child.wait().await.unwrap();
+    async fn stop(self) {
+        self.relay.stop().await;
     }
 }
 

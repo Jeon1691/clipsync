@@ -188,7 +188,11 @@ Webhook URL/secret settings are optional and must both be present to emit the
 webhook output described below. Without an explicit public URL, it is derived from the
 environment bind port (default `http://127.0.0.1:7600`); `--bind` alone does not
 recompute it. Current pairing responses advertise the relative `ws_path`, not
-that URL.
+that URL. A bind port of `0` (for example `--bind 127.0.0.1:0`) lets the
+operating system choose a free port; the startup diagnostic
+`clipsync-relay listening ... addr=ADDRESS` is written to standard output once
+the socket is bound and reports the chosen address. Pass `--public-url`
+explicitly in that case, because a derived URL would carry port `0`.
 
 HTTP definitions: [router and handlers](../crates/clipsync-relay/src/lib.rs),
 [pairing behavior](../crates/clipsync-relay/src/state.rs), and
