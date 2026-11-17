@@ -157,14 +157,19 @@ impl LocalStore {
     }
 
     pub fn load_pairing_wait(&self) -> Result<Option<PairingWait>> {
-        // Read without checking first: `room leave` may remove the file at
-        // any moment, and a file gone mid-read means no pairing, not an error.
-        let raw = match std::fs::read_to_string(self.paths.pairing_file()) {
-            Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        Ok(Some(serde_json::from_str(&raw)?))
+        self.load_pairing_wait_pausing(|| std::thread::sleep(DELETE_PENDING_RETRY_PAUSE))
+    }
+
+    /// [`Self::load_pairing_wait`] with the pause between retries supplied,
+    /// so tests can change the file at exactly that point.
+    fn load_pairing_wait_pausing(&self, pause: impl FnMut()) -> Result<Option<PairingWait>> {
+        let path = self.paths.pairing_file();
+        let raw = read_unless_removed(
+            || std::fs::read_to_string(&path),
+            DELETE_PENDING_READ_RETRIES,
+            pause,
+        )?;
+        Ok(raw.map(|raw| serde_json::from_str(&raw)).transpose()?)
     }
 
     /// Read, change and write the pairing file as one step.
@@ -341,6 +346,46 @@ fn decode_key(hex_str: &str) -> Result<[u8; 32]> {
     Ok(key)
 }
 
+/// How many times a read of the pairing file refused with "access denied" is
+/// retried. Windows refuses to open a file that is being deleted (it is
+/// "delete pending" until the last open handle closes) with
+/// `ERROR_ACCESS_DENIED`, so a `room leave` racing a read looks like a
+/// permission error there. Elsewhere "access denied" is a real permission
+/// problem and is reported at once.
+const DELETE_PENDING_READ_RETRIES: u32 = if cfg!(windows) { 20 } else { 0 };
+
+/// Pause between those retries. A pending delete lasts as long as another
+/// process holds the small pairing file open, which is a read of a few
+/// hundred bytes; 20 pauses of 5 ms wait out such a read many times over
+/// while keeping a real permission error from stalling a status poll.
+const DELETE_PENDING_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Read a file that another process may remove at any moment: `Ok(None)`
+/// when it is gone. Read without checking first, since a file gone between
+/// a check and the read means no file, not an error. An "access denied" is
+/// retried up to `retries` times, calling `pause` before each retry, and is
+/// returned if it outlasts them.
+fn read_unless_removed(
+    mut read: impl FnMut() -> std::io::Result<String>,
+    retries: u32,
+    mut pause: impl FnMut(),
+) -> std::io::Result<Option<String>> {
+    let mut retries_left = retries;
+    loop {
+        match read() {
+            Ok(raw) => return Ok(Some(raw)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::PermissionDenied && retries_left > 0 =>
+            {
+                retries_left -= 1;
+                pause();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod failure_tests {
@@ -403,33 +448,137 @@ mod failure_tests {
         }
     }
 
+    /// Remove `path` while `_reader` keeps it open, as `room leave` does
+    /// while another process is reading the file. On Windows the file stays
+    /// "delete pending" until that handle closes: closing a handle opened
+    /// with `FILE_FLAG_DELETE_ON_CLOSE` marks it for deletion, and every
+    /// open in the meantime is refused with "access denied".
+    #[cfg(windows)]
+    fn remove_while_open(path: &std::path::Path, _reader: &std::fs::File) {
+        use std::os::windows::fs::OpenOptionsExt;
+        // `DELETE` access right and `FILE_FLAG_DELETE_ON_CLOSE`, from the
+        // Win32 `CreateFileW` documentation.
+        const DELETE: u32 = 0x0001_0000;
+        const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+        drop(
+            std::fs::OpenOptions::new()
+                .access_mode(DELETE)
+                .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+                .open(path)
+                .unwrap(),
+        );
+        assert_eq!(
+            std::fs::read(path).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "the file should be delete pending"
+        );
+    }
+
+    #[cfg(not(windows))]
+    fn remove_while_open(path: &std::path::Path, _reader: &std::fs::File) {
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn a_pairing_file_removed_while_it_is_read_reads_as_no_pairing() {
-        // `room leave` may remove the file between any two steps of a read.
-        // Enough rounds for the removal to land inside a read on a typical
-        // machine; each round is a few file operations.
-        const ROUNDS: usize = 4000;
         let (_root, store) = fixture();
-        let remover = store.clone();
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stopped = stop.clone();
-        let churn = std::thread::spawn(move || {
-            while !stopped.load(std::sync::atomic::Ordering::Relaxed) {
-                remover.save_pairing_wait(&waiting()).unwrap();
-                let _ = std::fs::remove_file(remover.paths.pairing_file());
-            }
-        });
-        let failures = (0..ROUNDS)
-            .filter_map(|_| store.load_pairing_wait().err())
-            .map(|error| error.to_string())
-            .collect::<Vec<_>>();
-        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        churn.join().unwrap();
-        assert!(
-            failures.is_empty(),
-            "{:?}",
-            &failures[..failures.len().min(3)]
+        store.save_pairing_wait(&waiting()).unwrap();
+        let path = store.paths.pairing_file();
+        let mut reader = Some(std::fs::File::open(&path).unwrap());
+        remove_while_open(&path, reader.as_ref().unwrap());
+        // The other reader finishes during the first pause, which completes
+        // the delete.
+        let loaded = store.load_pairing_wait_pausing(|| drop(reader.take()));
+        assert!(loaded.unwrap().is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_pairing_file_that_stays_delete_pending_is_an_error_after_bounded_retries() {
+        let (_root, store) = fixture();
+        store.save_pairing_wait(&waiting()).unwrap();
+        let path = store.paths.pairing_file();
+        let reader = std::fs::File::open(&path).unwrap();
+        remove_while_open(&path, &reader);
+        let mut pauses = 0;
+        let error = store.load_pairing_wait_pausing(|| pauses += 1).unwrap_err();
+        assert!(matches!(
+            error,
+            StorageError::Io(ref io) if io.kind() == std::io::ErrorKind::PermissionDenied
+        ));
+        assert_eq!(pauses, DELETE_PENDING_READ_RETRIES);
+        drop(reader);
+    }
+
+    /// Replay `results`, one per read, counting the reads.
+    fn scripted_reads(
+        results: Vec<std::io::ErrorKind>,
+        reads: &std::cell::Cell<usize>,
+    ) -> impl FnMut() -> std::io::Result<String> + '_ {
+        let mut results = results.into_iter();
+        move || {
+            reads.set(reads.get() + 1);
+            Err(results.next().expect("no read left in the script").into())
+        }
+    }
+
+    #[test]
+    fn access_denied_is_retried_until_the_file_is_gone() {
+        use std::io::ErrorKind::{NotFound, PermissionDenied};
+        const RETRIES: u32 = 3;
+        let reads = std::cell::Cell::new(0);
+        let mut pauses = 0;
+        let read = read_unless_removed(
+            scripted_reads(vec![PermissionDenied, PermissionDenied, NotFound], &reads),
+            RETRIES,
+            || pauses += 1,
         );
+        assert!(read.unwrap().is_none());
+        assert_eq!((reads.get(), pauses), (3, 2));
+    }
+
+    #[test]
+    fn access_denied_that_outlasts_the_retries_is_returned() {
+        use std::io::ErrorKind::PermissionDenied;
+        const RETRIES: u32 = 3;
+        let reads = std::cell::Cell::new(0);
+        let mut pauses = 0;
+        let read = read_unless_removed(
+            scripted_reads(vec![PermissionDenied; 5], &reads),
+            RETRIES,
+            || pauses += 1,
+        );
+        assert_eq!(read.unwrap_err().kind(), PermissionDenied);
+        assert_eq!((reads.get(), pauses), (4, 3));
+    }
+
+    #[test]
+    fn other_read_errors_are_returned_without_a_retry() {
+        use std::io::ErrorKind::{InvalidData, PermissionDenied};
+        let reads = std::cell::Cell::new(0);
+        let mut pauses = 0;
+        let read = read_unless_removed(
+            scripted_reads(vec![InvalidData, PermissionDenied], &reads),
+            DELETE_PENDING_READ_RETRIES,
+            || pauses += 1,
+        );
+        assert_eq!(read.unwrap_err().kind(), InvalidData);
+        assert_eq!((reads.get(), pauses), (1, 0));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn access_denied_is_returned_at_once_outside_windows() {
+        use std::io::ErrorKind::PermissionDenied;
+        let reads = std::cell::Cell::new(0);
+        let mut pauses = 0;
+        let read = read_unless_removed(
+            scripted_reads(vec![PermissionDenied, PermissionDenied], &reads),
+            DELETE_PENDING_READ_RETRIES,
+            || pauses += 1,
+        );
+        assert_eq!(read.unwrap_err().kind(), PermissionDenied);
+        assert_eq!((reads.get(), pauses), (1, 0));
     }
 
     #[test]
