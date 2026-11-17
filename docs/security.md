@@ -70,7 +70,13 @@ macOS Keychain / Windows Credential Manager when available. Linux currently
 uses private files; a Secret Service backend is not enabled. Secret files have
 mode `0600` on Unix. Unix data/inbox directories use `0700`; Windows relies on
 the user's profile-directory access controls rather than POSIX modes.
-Received filenames are sanitized to basenames.
+Received filenames are sanitized to basenames. On macOS, each file committed
+to the inbox carries a `com.apple.quarantine` attribute naming `ClipSync` as
+the agent before it becomes visible, so opening a received app, script or
+installer goes through Gatekeeper's first-launch check. If the volume rejects
+the attribute, the failure is logged and the validated file is still delivered
+unquarantined. Files that `clipsync pull --output DIR` writes outside the inbox
+are not quarantined yet.
 
 Device tokens are stored separately as `device-token-<hex-room-id>.secret`;
 webhook credentials use `webhook.secret`. These credentials use canonical private files without OS-keychain fallback; missing or empty files are errors. New `state.json` and `config.toml`

@@ -18,6 +18,10 @@ thiserror.workspace = true
 tokio.workspace = true
 ulid.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+tracing.workspace = true
+
 [lints]
 workspace = true
 

@@ -65,6 +65,9 @@ impl StagingArea {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&tmp_dir, std::fs::Permissions::from_mode(0o700));
         }
+        // One receive event per commit: every file shares its quarantine value.
+        #[cfg(target_os = "macos")]
+        let quarantine = crate::quarantine::quarantine_value();
         let mut offset = 0usize;
         let mut written = Vec::new();
         for file in files {
@@ -89,6 +92,15 @@ impl StagingArea {
             {
                 use std::os::unix::fs::PermissionsExt;
                 let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600));
+            }
+            // Mark before the directory is published so a received file is never
+            // visible in the inbox without Gatekeeper's first-open check. A file
+            // system without xattr support (for example some network or FAT
+            // volumes) must not make peer transfers fail outright, so a failure
+            // is logged and the validated file is still delivered.
+            #[cfg(target_os = "macos")]
+            if let Err(error) = crate::quarantine::mark(&dest, &quarantine) {
+                tracing::warn!(%error, "could not quarantine received file");
             }
             written.push(name);
             offset = end;
@@ -387,5 +399,82 @@ mod tests {
             b"payload"
         );
         assert!(!staging.inbox().join(id.as_str()).exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn committed_files_carry_launch_services_quarantine_attribute() {
+        use std::os::unix::ffi::OsStrExt;
+        fn quarantine_of(path: &Path) -> Option<String> {
+            let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            let name = c"com.apple.quarantine";
+            let mut buf = vec![0u8; 256];
+            // SAFETY: both strings are NUL-terminated and `buf` outlives the call
+            // with its real length passed as the size.
+            let len = unsafe {
+                libc::getxattr(
+                    c_path.as_ptr(),
+                    name.as_ptr(),
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                    0,
+                    libc::XATTR_NOFOLLOW,
+                )
+            };
+            if len < 0 {
+                return None;
+            }
+            buf.truncate(len as usize);
+            Some(String::from_utf8(buf).unwrap())
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let staging = StagingArea::new(root.path().join("inbox")).unwrap();
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let payload = b"#!/bin/sh\necho hi\nreadme";
+        let (script, readme) = payload.split_at(18);
+        let files = vec![
+            FileManifest {
+                name: "run.command".into(),
+                size: script.len() as u64,
+                mime: None,
+                hash: blake3_hex(script),
+            },
+            FileManifest {
+                name: "README".into(),
+                size: readme.len() as u64,
+                mime: None,
+                hash: blake3_hex(readme),
+            },
+        ];
+        let paths = staging
+            .commit_files(&TransferId::new(), &files, payload)
+            .await
+            .unwrap();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        assert_eq!(paths.len(), 2);
+        for path in &paths {
+            let value = quarantine_of(path)
+                .unwrap_or_else(|| panic!("{} lacks com.apple.quarantine", path.display()));
+            let fields: Vec<&str> = value.split(';').collect();
+            assert_eq!(fields.len(), 4, "unexpected quarantine value {value:?}");
+            assert_eq!(fields[0], "0081");
+            let stamp = u64::from_str_radix(fields[1], 16).unwrap();
+            assert!((before..=after).contains(&stamp), "timestamp {stamp:#x}");
+            assert_eq!(fields[2], "ClipSync");
+            let uuid: Vec<&str> = fields[3].split('-').collect();
+            assert_eq!(
+                uuid.iter().map(|g| g.len()).collect::<Vec<_>>(),
+                [8, 4, 4, 4, 12]
+            );
+            assert!(fields[3].chars().all(|c| c == '-' || c.is_ascii_hexdigit()));
+        }
     }
 }

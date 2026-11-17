@@ -1182,9 +1182,11 @@ dependencies = [
  "blake3",
  "clipsync-crypto",
  "clipsync-protocol",
+ "libc",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tracing",
  "ulid",
 ]
 
