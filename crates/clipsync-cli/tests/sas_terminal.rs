@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::Read;
 use std::os::fd::FromRawFd;
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -74,15 +74,22 @@ impl Terminal {
 
     /// Run `clipsync room confirm` with this terminal as stdin, stdout and stderr.
     fn run_confirm(&self, home: &Path) -> Child {
+        self.run_confirm_with(home, &[], self.device.try_clone().unwrap().into())
+    }
+
+    /// Run `clipsync room confirm` plus `extra` arguments with this terminal
+    /// as stdin and stderr, and `stdout` as standard output.
+    fn run_confirm_with(&self, home: &Path, extra: &[&str], stdout: Stdio) -> Child {
         Command::new(bin())
             .args(["room", "confirm"])
+            .args(extra)
             .env("HOME", home)
             .env("USERPROFILE", home)
             .env("CLIPSYNC_HOME", home)
             .env("CLIPSYNC_NO_DAEMON", "1")
             .env("RUST_LOG", "error")
             .stdin(self.device.try_clone().unwrap())
-            .stdout(self.device.try_clone().unwrap())
+            .stdout(stdout)
             .stderr(self.device.try_clone().unwrap())
             .spawn()
             .expect("run clipsync")
@@ -247,5 +254,49 @@ fn prompt_ends_without_input_when_the_pairing_ends() {
         if let Some(wait) = store.load_pairing_wait().unwrap() {
             assert_eq!(wait.sas_decision, None, "{reason:?}");
         }
+    }
+}
+
+/// Under reduced protection (the pairing file records no commitment round)
+/// a prompt answer counts only from a person who has just read the REDUCED
+/// line. With `--json`, or with the text going to a file, nobody at this
+/// terminal was shown it, so `room confirm` refuses before prompting, even
+/// though stdin is a terminal, and leaves the request open.
+#[test]
+fn reduced_protection_is_refused_when_the_announcement_missed_the_terminal() {
+    let output = tempfile::tempdir().unwrap();
+    let redirected = output.path().join("stdout.txt");
+    type Stdout = fn(&Terminal, &Path) -> Stdio;
+    let cases: [(&str, &[&str], Stdout); 2] = [
+        ("--json on a terminal", &["--json"], |terminal, _| {
+            terminal.device.try_clone().unwrap().into()
+        }),
+        ("stdout redirected to a file", &[], |_, file| {
+            File::create(file).unwrap().into()
+        }),
+    ];
+    for (case, extra, stdout) in cases {
+        let mut worker = worker_stand_in();
+        let (home, store) = home_waiting_for_confirmation(worker.id(), "Laptop");
+        let terminal = Terminal::open();
+        let mut confirm =
+            terminal.run_confirm_with(home.path(), extra, stdout(&terminal, &redirected));
+        let status = exit_within(&mut confirm, REACTION);
+        let _ = worker.kill();
+        let _ = worker.wait();
+        let shown = terminal.shown();
+        let status =
+            status.unwrap_or_else(|| panic!("{case}: prompted instead of refusing: {shown:?}"));
+        assert!(!status.success(), "{case}: {shown:?}");
+        assert!(
+            shown.contains("--accept-reduced-protection"),
+            "{case}: {shown:?}"
+        );
+        assert!(shown.contains("still open"), "{case}: {shown:?}");
+        assert!(!shown.contains("Type the code"), "{case}: {shown:?}");
+        // Nothing was answered, and the request can still be confirmed.
+        let wait = store.load_pairing_wait().unwrap().expect("request removed");
+        assert_eq!(wait.sas_decision, None, "{case}");
+        assert_eq!(wait.status, "confirm_sas", "{case}");
     }
 }

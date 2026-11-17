@@ -66,13 +66,6 @@ pub struct SasMode {
     pub accept_reduced: bool,
 }
 
-/// Why a code may not be accepted under reduced protection, or `None` when
-/// it may. A match is trustworthy only if both devices show full protection,
-/// so without the commitment round the user has to know before a match
-/// counts: either a person answers at a terminal that has just shown the
-/// REDUCED line, or the command was given `--accept-reduced-protection`.
-/// `pairing.require_commitment` never gets this far: the pairing is refused
-/// before any code exists.
 /// True when the answer will come from a person who has just read the
 /// announcement: the text (not JSON) went to a terminal, and the answer is
 /// read from one. Output redirected to a file, or a program driving the CLI
@@ -81,6 +74,13 @@ fn person_sees_the_prompt(mode: SasMode) -> bool {
     !mode.json && io::stdin().is_terminal() && io::stdout().is_terminal()
 }
 
+/// Why a code may not be accepted under reduced protection, or `None` when
+/// it may. A match is trustworthy only if both devices show full protection,
+/// so without the commitment round the user has to know before a match
+/// counts: either a person answers at a terminal that has just shown the
+/// REDUCED line, or the command was given `--accept-reduced-protection`.
+/// `pairing.require_commitment` never gets this far: the pairing is refused
+/// before any code exists.
 fn unacknowledged_reduced_protection(
     protection: SasProtection,
     mode: SasMode,
@@ -95,6 +95,15 @@ fn unacknowledged_reduced_protection(
 /// Confirm on this terminal: show the SAS and read one answer line from
 /// stdin. A non-terminal stdin lets scripts compare codes programmatically.
 pub fn terminal_confirmer(mode: SasMode) -> SasConfirm {
+    terminal_confirmer_with(mode, ask)
+}
+
+/// [`terminal_confirmer`] with the terminal prompt supplied by the caller.
+fn terminal_confirmer_with<A, F>(mode: SasMode, prompt: A) -> SasConfirm
+where
+    A: FnOnce(SasMode, String) -> F + Send + 'static,
+    F: Future<Output = SasDecision> + Send + 'static,
+{
     Box::new(move |check: SasCheck| {
         Box::pin(async move {
             if mode.skip {
@@ -115,7 +124,7 @@ pub fn terminal_confirmer(mode: SasMode) -> SasConfirm {
                 eprintln!("error: {refusal}; pairing aborted and nothing was stored");
                 return SasDecision::Rejected;
             }
-            ask(mode, check.sas).await
+            prompt(mode, check.sas).await
         })
     })
 }
@@ -1336,6 +1345,67 @@ mod tests {
                 assert!(refusal.contains("--accept-reduced-protection"), "{refusal}");
                 assert!(refusal.contains("REDUCED"), "{refusal}");
             }
+        }
+    }
+
+    /// `room join` and `room create --foreground` with an answer prompt: under
+    /// reduced protection the prompt is reached only when a person at a
+    /// terminal has just been shown the REDUCED line, or with the flag.
+    #[tokio::test]
+    async fn terminal_prompt_under_reduced_protection_needs_a_person_or_the_flag() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        // Whether this test process has a terminal on both stdin and stdout,
+        // decided here rather than by the code under test. `cargo test` in CI
+        // has neither, so the unacknowledged text case is refused there.
+        let person_at_terminal = io::stdin().is_terminal() && io::stdout().is_terminal();
+        let text = SasMode {
+            non_interactive: false,
+            ..TEXT
+        };
+        let json = SasMode {
+            non_interactive: false,
+            ..JSON
+        };
+        let acknowledged = |mode: SasMode| SasMode {
+            accept_reduced: true,
+            ..mode
+        };
+        for (protection, mode, prompted) in [
+            // A program reading JSON has shown the REDUCED line to nobody.
+            (SasProtection::Uncommitted, json, false),
+            (SasProtection::Uncommitted, text, person_at_terminal),
+            (SasProtection::Uncommitted, acknowledged(json), true),
+            (SasProtection::Uncommitted, acknowledged(text), true),
+            // Full protection needs no acknowledgement anywhere.
+            (SasProtection::Committed, json, true),
+            (SasProtection::Committed, text, true),
+        ] {
+            let reached = Arc::new(AtomicBool::new(false));
+            let seen = reached.clone();
+            // A prompt that accepts at once, so a missing gate shows up as a
+            // confirmed pairing.
+            let confirm = terminal_confirmer_with(mode, move |_, _| {
+                seen.store(true, Ordering::SeqCst);
+                async { SasDecision::Confirmed }
+            });
+            let decision = confirm(SasCheck {
+                protection,
+                ..check()
+            })
+            .await;
+            let expected = if prompted {
+                SasDecision::Confirmed
+            } else {
+                SasDecision::Rejected
+            };
+            assert_eq!(decision, expected, "{protection:?} {mode:?}");
+            assert_eq!(
+                reached.load(Ordering::SeqCst),
+                prompted,
+                "{protection:?} {mode:?}"
+            );
         }
     }
 
