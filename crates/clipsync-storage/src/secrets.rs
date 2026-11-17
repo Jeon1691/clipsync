@@ -37,20 +37,29 @@ impl SecretStore {
     }
 
     pub fn load_identity(&self) -> Result<DeviceIdentity> {
+        self.load_identity_with(get_keyring)
+    }
+
+    /// `keychain` is the native-keychain reader; tests inject a stub so the
+    /// keychain-to-file restore path is exercised on every platform.
+    fn load_identity_with(
+        &self,
+        keychain: impl FnOnce(&str) -> std::result::Result<String, String>,
+    ) -> Result<DeviceIdentity> {
         let path = self.paths.identity_file();
         if path.exists() {
             let payload = std::fs::read_to_string(path)?;
             let stored: StoredIdentity = serde_json::from_str(&payload)?;
             return DeviceIdentity::from_stored(&stored).ok_or(StorageError::NotInitialized);
         }
-        if let Ok(payload) = get_keyring(&self.account("identity")) {
+        if let Ok(payload) = keychain(&self.account("identity")) {
             let stored: StoredIdentity = serde_json::from_str(&payload)?;
             let identity =
                 DeviceIdentity::from_stored(&stored).ok_or(StorageError::NotInitialized)?;
-            if let Err(e) = std::fs::write(&path, &payload) {
+            // Restore the canonical file privately from creation; never write
+            // through a pre-existing link or expose a partially written secret.
+            if let Err(e) = write_private(&path, payload.as_bytes()) {
                 warn!(error = %e, "could not cache identity file from keychain");
-            } else {
-                let _ = set_private_file(&path);
             }
             return Ok(identity);
         }
@@ -176,6 +185,72 @@ mod file_failure_tests {
         assert!(secrets.load_named("blocked").is_err());
         assert!(secret.is_dir());
         assert!(write_private(Path::new("/"), b"invalid destination").is_err());
+    }
+}
+
+#[cfg(all(test, unix))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod identity_cache_tests {
+    use super::*;
+    use crate::paths::{PERMISSION_BITS, PRIVATE_FILE_MODE};
+    use std::os::unix::fs::PermissionsExt;
+
+    fn keychain_payload(identity: &DeviceIdentity) -> String {
+        serde_json::to_string(&identity.to_stored()).unwrap()
+    }
+
+    #[test]
+    fn keychain_restore_creates_a_private_regular_file_without_following_a_planted_link() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(root.path().into());
+        paths.ensure().unwrap();
+        let store = SecretStore::new(paths.clone());
+        let identity = DeviceIdentity::from_bytes("fixture".into(), [7; 32]);
+        let payload = keychain_payload(&identity);
+        // A dangling link reads as "no identity file", so the keychain branch runs.
+        let outside = root.path().join("outside-identity.json");
+        std::os::unix::fs::symlink(&outside, paths.identity_file()).unwrap();
+
+        let expected_account = store.account("identity");
+        let loaded = store
+            .load_identity_with(|account| {
+                assert_eq!(account, expected_account);
+                Ok(payload.clone())
+            })
+            .unwrap();
+
+        assert_eq!(loaded.device_id, identity.device_id);
+        assert!(
+            !outside.exists(),
+            "the restored secret must not be written through a link outside the private dir"
+        );
+        let metadata = std::fs::symlink_metadata(paths.identity_file()).unwrap();
+        assert!(metadata.file_type().is_file());
+        assert_eq!(
+            metadata.permissions().mode() & PERMISSION_BITS,
+            PRIVATE_FILE_MODE
+        );
+        assert_eq!(
+            std::fs::read_to_string(paths.identity_file()).unwrap(),
+            payload
+        );
+        // The restored cache now serves file-based readers without the keychain.
+        let cached = store
+            .load_identity_with(|_| Err("keychain must not be consulted".into()))
+            .unwrap();
+        assert_eq!(cached.device_id, identity.device_id);
+    }
+
+    #[test]
+    fn missing_file_and_keychain_entry_reports_not_initialized() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(root.path().into());
+        paths.ensure().unwrap();
+        let store = SecretStore::new(paths);
+        assert!(matches!(
+            store.load_identity_with(|_| Err("no entry".into())),
+            Err(StorageError::NotInitialized)
+        ));
     }
 }
 

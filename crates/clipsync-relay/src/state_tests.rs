@@ -1,7 +1,9 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
 use super::*;
+use crate::join_limits::{GLOBAL_FAILED_JOIN_LIMIT, IP_FAILED_JOIN_LIMIT, IP_FAILED_JOIN_WINDOW};
 use clipsync_protocol::{DeviceId, ItemKind, MessageId, Recipient, RoutingHeader, TransferId};
+use std::time::Duration;
 
 fn fixture() -> (
     RelayState,
@@ -15,6 +17,7 @@ fn fixture() -> (
         token_secret: vec![21; 32],
         webhook_url: None,
         webhook_secret: None,
+        metrics_token: None,
     });
     let sid = PairingSessionId::new();
     let owner = DeviceId::new();
@@ -87,14 +90,15 @@ fn pairing_rejects_expiry_reuse_same_device_and_exhausted_attempts() {
 fn failed_join_rate_limit_resets_after_its_window_and_abort_removes_the_code() {
     let (state, offer, sid, _) = fixture();
     let ip = "127.0.0.2".parse().unwrap();
-    for _ in 0..30 {
+    for _ in 0..IP_FAILED_JOIN_LIMIT {
         state.record_ip_fail(ip);
     }
     assert!(matches!(
         state.join_pairing(join(&offer.pairing_code, DeviceId::new()), ip),
         Err(JoinError::Attempts)
     ));
-    state.ip_fails.get_mut(&ip).unwrap().1 = Instant::now() - Duration::from_secs(3601);
+    state.ip_fails.get_mut(&ip).unwrap().1 =
+        Instant::now() - IP_FAILED_JOIN_WINDOW - Duration::from_secs(1);
     assert!(state
         .join_pairing(join(&offer.pairing_code, DeviceId::new()), ip)
         .is_ok());
@@ -102,12 +106,18 @@ fn failed_join_rate_limit_resets_after_its_window_and_abort_removes_the_code() {
     state.abort_pairing(sid.as_str());
     assert!(state.pairing(&offer.pairing_code).is_none());
     assert!(state.pairing(sid.as_str()).is_none());
-    assert_eq!(state.pairing_fail.load(Ordering::Relaxed), 31);
+    // Recorded failures plus the aborted session; the refused join is throttled.
+    assert_eq!(
+        state.pairing_fail.load(Ordering::Relaxed),
+        u64::from(IP_FAILED_JOIN_LIMIT) + 1
+    );
+    assert_eq!(state.pairing_throttled.load(Ordering::Relaxed), 1);
 }
 
 #[test]
 fn queue_expiry_discards_only_expired_envelopes_and_gc_counts_them() {
     let (state, offer, _, owner) = fixture();
+    let room = offer.room_id.to_string();
     let now = Utc::now();
     let routing = RoutingHeader {
         version: clipsync_protocol::PROTOCOL_VERSION,
@@ -127,23 +137,455 @@ fn queue_expiry_discards_only_expired_envelopes_and_gc_counts_them() {
         ciphertext: "opaque".into(),
     };
     state.queue_text(
+        &room,
         "expired-on-read",
         envelope.clone(),
         now - chrono::Duration::seconds(1),
     );
-    assert!(state.take_queue("expired-on-read").is_none());
+    assert!(state.take_queue(&room, "expired-on-read").is_none());
     state.queue_text(
+        &room,
         "expired-on-gc",
         envelope.clone(),
         now - chrono::Duration::seconds(1),
     );
     state.queue_text(
+        &room,
         "fresh",
         envelope.clone(),
         now + chrono::Duration::seconds(60),
     );
     state.gc();
-    assert!(state.take_queue("expired-on-gc").is_none());
-    assert_eq!(state.take_queue("fresh"), Some(envelope));
+    assert!(state.take_queue(&room, "expired-on-gc").is_none());
+    assert_eq!(state.take_queue(&room, "fresh"), Some(envelope));
     assert_eq!(state.expired.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn gc_drops_expired_failed_join_entries() {
+    let (state, _, _, _) = fixture();
+    let stale: IpAddr = "192.0.2.10".parse().unwrap();
+    let fresh: IpAddr = "192.0.2.11".parse().unwrap();
+    state.record_ip_fail(stale);
+    state.record_ip_fail(fresh);
+    state.ip_fails.get_mut(&stale).unwrap().1 =
+        Instant::now() - IP_FAILED_JOIN_WINDOW - Duration::from_secs(1);
+    state.gc();
+    assert!(state.ip_fails.get(&stale).is_none());
+    assert!(state.ip_fails.get(&fresh).is_some());
+}
+
+/// A code of the same length that is never `offer`'s: the real code advanced
+/// by `offset + 1` modulo the code space (wrapping past the real code is skipped).
+fn wrong_code(offer: &CreatePairingResponse, offset: u32) -> String {
+    let real: u32 = offer.pairing_code.parse().unwrap();
+    let digits = offer.pairing_code.len();
+    let modulus = 10u32.pow(digits as u32);
+    let code = (real + 1 + offset % (modulus - 1)) % modulus;
+    format!("{code:0digits$}")
+}
+
+#[test]
+fn wrong_codes_from_one_client_exhaust_its_budget_and_refuse_its_correct_code() {
+    let (state, offer, _, owner) = fixture();
+    let attacker: IpAddr = "198.51.100.1".parse().unwrap();
+    // Every failure kind counts, not only unknown codes.
+    assert!(matches!(
+        state.join_pairing(join(&offer.pairing_code, owner), attacker),
+        Err(JoinError::Other(_))
+    ));
+    for offset in 1..IP_FAILED_JOIN_LIMIT {
+        assert!(matches!(
+            state.join_pairing(join(&wrong_code(&offer, offset), DeviceId::new()), attacker),
+            Err(JoinError::NotFound)
+        ));
+    }
+    assert!(matches!(
+        state.join_pairing(join(&wrong_code(&offer, 0), DeviceId::new()), attacker),
+        Err(JoinError::Attempts)
+    ));
+    assert!(matches!(
+        state.join_pairing(join(&offer.pairing_code, DeviceId::new()), attacker),
+        Err(JoinError::Attempts)
+    ));
+    assert_eq!(
+        state.ip_fails.get(&attacker).unwrap().0,
+        IP_FAILED_JOIN_LIMIT,
+        "refused attempts must not extend the count"
+    );
+    let other: IpAddr = "198.51.100.2".parse().unwrap();
+    state
+        .join_pairing(join(&offer.pairing_code, DeviceId::new()), other)
+        .unwrap();
+    assert!(state.ip_fails.get(&other).is_none(), "success is refunded");
+    assert_eq!(
+        state.pairing_fail.load(Ordering::Relaxed),
+        u64::from(IP_FAILED_JOIN_LIMIT)
+    );
+}
+
+#[test]
+fn successful_joins_do_not_consume_failure_budgets() {
+    let state = fixture().0;
+    let client: IpAddr = "198.51.100.3".parse().unwrap();
+    for _ in 0..(GLOBAL_FAILED_JOIN_LIMIT + IP_FAILED_JOIN_LIMIT) {
+        let offer = state
+            .create_pairing(CreatePairingRequest {
+                protocol_version: clipsync_protocol::PROTOCOL_VERSION,
+                pairing_session_id: PairingSessionId::new(),
+                device_id: DeviceId::new(),
+                device_name: "owner".into(),
+                os: "test".into(),
+                ttl_secs: None,
+            })
+            .unwrap();
+        state
+            .join_pairing(join(&offer.pairing_code, DeviceId::new()), client)
+            .unwrap();
+    }
+    assert_eq!(state.global_join_fails.lock().unwrap().0, 0);
+}
+
+#[test]
+fn distributed_wrong_codes_exhaust_the_relay_wide_budget_without_revealing_codes() {
+    let (state, offer, _, _) = fixture();
+    for n in 0..GLOBAL_FAILED_JOIN_LIMIT {
+        let ip = IpAddr::from([203, 0, 113, n as u8]);
+        assert!(matches!(
+            state.join_pairing(join(&wrong_code(&offer, n), DeviceId::new()), ip),
+            Err(JoinError::NotFound)
+        ));
+    }
+    let fresh: IpAddr = "192.0.2.200".parse().unwrap();
+    // Unknown and correct codes are refused identically once the budget is spent.
+    assert!(matches!(
+        state.join_pairing(join(&wrong_code(&offer, 0), DeviceId::new()), fresh),
+        Err(JoinError::Attempts)
+    ));
+    assert!(matches!(
+        state.join_pairing(join(&offer.pairing_code, DeviceId::new()), fresh),
+        Err(JoinError::Attempts)
+    ));
+    assert!(
+        state.ip_fails.get(&fresh).is_none(),
+        "refused attempts must not allocate per-client entries"
+    );
+    state.global_join_fails.lock().unwrap().1 =
+        Instant::now() - GLOBAL_FAILED_JOIN_WINDOW - Duration::from_secs(1);
+    state
+        .join_pairing(join(&offer.pairing_code, DeviceId::new()), fresh)
+        .unwrap();
+}
+
+#[test]
+fn ipv6_clients_are_limited_per_64_prefix_and_mapped_ipv4_as_ipv4() {
+    let (state, offer, _, _) = fixture();
+    for n in 0..IP_FAILED_JOIN_LIMIT {
+        let ip = IpAddr::from([0x2001, 0xdb8, 0, 0x7, 0, 0, 0, n as u16 + 1]);
+        assert!(matches!(
+            state.join_pairing(join(&wrong_code(&offer, n), DeviceId::new()), ip),
+            Err(JoinError::NotFound)
+        ));
+    }
+    let same_prefix = IpAddr::from([0x2001, 0xdb8, 0, 0x7, 0xffff, 0, 0, 1]);
+    assert!(matches!(
+        state.join_pairing(join(&offer.pairing_code, DeviceId::new()), same_prefix),
+        Err(JoinError::Attempts)
+    ));
+    assert_eq!(
+        rate_limit_key("::ffff:192.0.2.1".parse().unwrap()),
+        "192.0.2.1".parse::<IpAddr>().unwrap()
+    );
+    let next_prefix = IpAddr::from([0x2001, 0xdb8, 0, 0x8, 0, 0, 0, 1]);
+    state
+        .join_pairing(join(&offer.pairing_code, DeviceId::new()), next_prefix)
+        .unwrap();
+}
+
+fn limited_state(limits: PairingJoinLimits) -> RelayState {
+    RelayState::with_join_policy(
+        RelayConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            public_url: "http://127.0.0.1".into(),
+            token_secret: rand::random::<[u8; 32]>().to_vec(),
+            webhook_url: None,
+            webhook_secret: None,
+            metrics_token: None,
+        },
+        Vec::new(),
+        limits,
+    )
+    .unwrap()
+}
+
+#[test]
+fn configured_join_limits_replace_the_defaults_and_refusals_are_counted() {
+    const CLIENT_LIMIT: u32 = 3;
+    const RELAY_LIMIT: u32 = 5;
+    let state = limited_state(PairingJoinLimits {
+        client_fail_limit: CLIENT_LIMIT,
+        client_fail_window_secs: PAIRING_TTL_SECS,
+        relay_fail_limit: RELAY_LIMIT,
+    });
+    let offer = state
+        .create_pairing(CreatePairingRequest {
+            protocol_version: clipsync_protocol::PROTOCOL_VERSION,
+            pairing_session_id: PairingSessionId::new(),
+            device_id: DeviceId::new(),
+            device_name: "owner".into(),
+            os: "test".into(),
+            ttl_secs: None,
+        })
+        .unwrap();
+    let first: IpAddr = "198.51.100.30".parse().unwrap();
+    let second: IpAddr = "198.51.100.31".parse().unwrap();
+    let mut offset = 0;
+    let mut attempt = |ip| {
+        offset += 1;
+        state.join_pairing(join(&wrong_code(&offer, offset), DeviceId::new()), ip)
+    };
+    for _ in 0..CLIENT_LIMIT {
+        assert!(matches!(attempt(first), Err(JoinError::NotFound)));
+    }
+    assert!(matches!(attempt(first), Err(JoinError::Attempts)));
+    for _ in CLIENT_LIMIT..RELAY_LIMIT {
+        assert!(matches!(attempt(second), Err(JoinError::NotFound)));
+    }
+    assert!(matches!(attempt(second), Err(JoinError::Attempts)));
+    let metrics = state.metrics_text();
+    assert!(
+        metrics
+            .lines()
+            .any(|line| line == "clipsync_pairing_throttled 2"),
+        "{metrics}"
+    );
+    assert!(metrics
+        .lines()
+        .any(|line| line == format!("clipsync_pairing_fail {RELAY_LIMIT}")));
+    // GC follows the configured client window, not the default one.
+    state.ip_fails.get_mut(&rate_limit_key(first)).unwrap().1 =
+        Instant::now() - Duration::from_secs(PAIRING_TTL_SECS + 1);
+    state.gc();
+    assert!(state.ip_fails.get(&rate_limit_key(first)).is_none());
+    assert!(state.ip_fails.get(&rate_limit_key(second)).is_some());
+}
+
+#[test]
+fn join_limits_that_weaken_the_guessing_bound_are_refused() {
+    let config = RelayConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        public_url: "http://127.0.0.1".into(),
+        token_secret: rand::random::<[u8; 32]>().to_vec(),
+        webhook_url: None,
+        webhook_secret: None,
+        metrics_token: None,
+    };
+    let weakened = PairingJoinLimits {
+        relay_fail_limit: crate::join_limits::MAX_GLOBAL_FAILED_JOIN_LIMIT + 1,
+        ..Default::default()
+    };
+    assert!(RelayState::with_join_policy(config, Vec::new(), weakened).is_err());
+}
+
+fn paired_room() -> (RelayState, String, String, String) {
+    let (state, offer, sid, owner) = fixture();
+    let member = DeviceId::new();
+    state
+        .join_pairing(
+            join(&offer.pairing_code, member.clone()),
+            "127.0.0.1".parse().unwrap(),
+        )
+        .unwrap();
+    assert!(state.complete_pairing(sid.as_str()).is_none());
+    let (_, _, room_id, _, _) = state.complete_pairing(sid.as_str()).unwrap();
+    (
+        state,
+        room_id.to_string(),
+        owner.to_string(),
+        member.to_string(),
+    )
+}
+
+fn routed(state: &RelayState, room: &str, member: &str) -> Vec<ConnectionId> {
+    state
+        .member_senders(room, member)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
+#[test]
+fn closing_one_socket_keeps_the_member_s_other_sockets_routed() {
+    let (state, room, _, member) = paired_room();
+    let (old_tx, _old_rx) = mpsc::channel(1);
+    let (new_tx, _new_rx) = mpsc::channel(1);
+    let old = state.register_conn(&room, &member, old_tx).unwrap().id;
+    let new = state
+        .register_conn(&room, &member, new_tx.clone())
+        .unwrap()
+        .id;
+    assert_ne!(old, new);
+    assert_eq!(routed(&state, &room, &member), [old, new]);
+
+    assert!(state.unregister_conn(&room, &member, old));
+    assert!(!state.unregister_conn(&room, &member, old));
+    let senders = state.member_senders(&room, &member);
+    assert_eq!(senders.len(), 1);
+    assert!(senders[0].1.same_channel(&new_tx));
+    assert!(state.is_online(&room, &member));
+
+    assert!(state.unregister_conn(&room, &member, new));
+    assert!(!state.is_online(&room, &member));
+    assert!(state.member_routes.is_empty());
+    assert!(!state.unregister_conn(&room, &member, new));
+}
+
+#[tokio::test]
+async fn concurrent_sockets_of_a_member_are_all_routed_and_none_is_evicted() {
+    let (state, room, _, member) = paired_room();
+    let (daemon_tx, _daemon_rx) = mpsc::channel(1);
+    let (command_tx, _command_rx) = mpsc::channel(1);
+    let daemon = state.register_conn(&room, &member, daemon_tx).unwrap();
+    let command = state.register_conn(&room, &member, command_tx).unwrap();
+
+    assert!(state.owns_route(&room, &member, daemon.id));
+    assert!(state.owns_route(&room, &member, command.id));
+    for registration in [&daemon, &command] {
+        assert!(
+            tokio::time::timeout(EVICTION_DEADLINE, registration.evicted.notified())
+                .await
+                .is_err(),
+            "a concurrent socket of the same member must not be evicted"
+        );
+    }
+}
+
+#[tokio::test]
+async fn registering_past_the_per_member_cap_evicts_only_the_oldest_socket() {
+    let (state, room, _, member) = paired_room();
+    let mut receivers = Vec::new();
+    let mut registrations = Vec::new();
+    for _ in 0..=MAX_MEMBER_SOCKETS {
+        let (tx, rx) = mpsc::channel(1);
+        receivers.push(rx);
+        registrations.push(state.register_conn(&room, &member, tx).unwrap());
+    }
+
+    let oldest = registrations.remove(0);
+    assert!(!state.owns_route(&room, &member, oldest.id));
+    tokio::time::timeout(EVICTION_DEADLINE, oldest.evicted.notified())
+        .await
+        .expect("the oldest socket past the cap was not evicted");
+    assert_eq!(
+        routed(&state, &room, &member),
+        registrations.iter().map(|r| r.id).collect::<Vec<_>>()
+    );
+    for registration in &registrations {
+        assert!(
+            tokio::time::timeout(EVICTION_DEADLINE, registration.evicted.notified())
+                .await
+                .is_err(),
+            "only the oldest socket may be evicted"
+        );
+    }
+    // The evicted socket's own cleanup later finds nothing to remove.
+    assert!(!state.unregister_conn(&room, &member, oldest.id));
+    assert_eq!(routed(&state, &room, &member).len(), MAX_MEMBER_SOCKETS);
+}
+
+#[test]
+fn member_routes_require_a_live_membership_and_are_scoped_per_room() {
+    let (state, room, owner, member) = paired_room();
+    let (tx, _rx) = mpsc::channel(1);
+    assert_eq!(
+        state
+            .register_conn(&RoomId::new().to_string(), &member, tx.clone())
+            .err(),
+        Some("unknown room")
+    );
+    assert_eq!(
+        state
+            .register_conn(&room, &DeviceId::new().to_string(), tx.clone())
+            .err(),
+        Some("unknown device")
+    );
+    assert!(state.member_routes.is_empty());
+
+    state.register_conn(&room, &member, tx.clone()).unwrap();
+    assert!(state.is_online(&room, &member));
+    assert!(!state.is_online(&RoomId::new().to_string(), &member));
+    assert!(!state.is_online(&room, &owner));
+}
+
+#[tokio::test]
+async fn revocation_drops_every_route_evicts_every_socket_and_blocks_reregistration() {
+    let (state, room, owner, member) = paired_room();
+    let (tx, _rx) = mpsc::channel(1);
+    let registrations: Vec<_> = (0..MAX_MEMBER_SOCKETS)
+        .map(|_| state.register_conn(&room, &member, tx.clone()).unwrap())
+        .collect();
+    let owner_registration = state.register_conn(&room, &owner, tx.clone()).unwrap();
+
+    assert!(state.revoke(&room, &member));
+    assert!(!state.is_online(&room, &member));
+    for registration in &registrations {
+        assert!(!state.owns_route(&room, &member, registration.id));
+        tokio::time::timeout(EVICTION_DEADLINE, registration.evicted.notified())
+            .await
+            .expect("a revoked member's socket was not evicted");
+    }
+    assert!(state.owns_route(&room, &owner, owner_registration.id));
+    assert_eq!(
+        state.register_conn(&room, &member, tx).err(),
+        Some("device revoked")
+    );
+    assert!(!state.revoke(&room, &DeviceId::new().to_string()));
+    assert!(!state.revoke(&RoomId::new().to_string(), &member));
+}
+
+#[test]
+fn queued_text_retention_is_capped_whatever_expiry_the_sender_chose() {
+    let (state, room, _, member) = paired_room();
+    let sent_at = Utc::now();
+    // Far beyond the relay's retention cap, as a misbehaving sender may claim.
+    let claimed_expiry = sent_at + chrono::Duration::days(SENDER_CLAIMED_EXPIRY_DAYS);
+    state.queue_text(
+        &room,
+        &member,
+        queued_envelope(&room, &member),
+        claimed_expiry,
+    );
+    let (_, retained_until) = state
+        .queue
+        .get(&member_key(&room, &member))
+        .map(|entry| entry.value().clone())
+        .unwrap();
+    let cap = chrono::Duration::seconds(QUEUE_TTL_SECS as i64);
+    assert!(retained_until <= Utc::now() + cap);
+    assert!(retained_until >= sent_at + cap);
+}
+
+// Evictions are signalled synchronously, so an absent one is decided quickly.
+const EVICTION_DEADLINE: std::time::Duration = std::time::Duration::from_millis(50);
+// Any claim well past the relay's retention cap exercises the clamp.
+const SENDER_CLAIMED_EXPIRY_DAYS: i64 = 30;
+
+fn queued_envelope(room: &str, sender: &str) -> QueuedEnvelope {
+    let now = Utc::now();
+    QueuedEnvelope {
+        routing: RoutingHeader {
+            version: clipsync_protocol::PROTOCOL_VERSION,
+            message_id: MessageId::new(),
+            transfer_id: TransferId::new(),
+            room_id: RoomId::from(room),
+            sender_device_id: DeviceId::from(sender),
+            recipient: Recipient::Broadcast,
+            sent_at: now,
+            expires_at: now,
+            item_kind: ItemKind::Text,
+            seq: 1,
+        },
+        nonce: "opaque".into(),
+        ciphertext: "opaque".into(),
+    }
 }

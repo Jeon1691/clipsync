@@ -12,23 +12,29 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use clipsync_clipboard::{wait_for_change, ClipboardItem, FileRef, ImageMime, SystemClipboard};
-use clipsync_crypto::{
-    derive_content_key, derive_nonce, open, parse_public, seal, DeviceIdentity, NoiseHandshake,
-};
+use clipsync_crypto::{derive_content_key, derive_nonce, open, seal, DeviceIdentity};
 use clipsync_daemon::{
     read_request, write_pid, write_response, IpcRequest, IpcResponse, IpcServer, PullPayload,
     StatusPayload,
 };
 use clipsync_protocol::{
-    AckStatus, ClientRole, ControlMessage, FileManifest, ImageManifest, ItemKind, ManifestPlain,
-    MessageId, Recipient, RoutingHeader, TransferId, PROTOCOL_VERSION,
+    decode_chunk_frame, envelope_aad, AckStatus, ClientRole, ControlMessage, DeviceId,
+    EnvelopeFrame, FileManifest, HandshakeCapabilities, ImageManifest, ItemKind, ManifestPlain,
+    MessageId, PeerInfo, Recipient, RoutingHeader, TransferId, ENVELOPE_VERSION_AUTHENTICATED,
+    ENVELOPE_VERSION_LEGACY, PROTOCOL_VERSION,
 };
 use clipsync_storage::{LocalStore, RoomRecord};
 use clipsync_transfer::{
-    decrypt_chunk, prune_idle_transfers, split_and_encrypt, IncomingTransfer, StagingArea,
+    open_chunk, prune_idle_transfers, split_and_encrypt, IncomingTransfer, StagingArea,
+    TransferError,
 };
 use clipsync_transport::{backoff_delay, http_to_ws, join_ws, Incoming, RelayConnection};
 
+use crate::envelope::{
+    check_header, check_version, commit_sequence, sequence_floor, version_for_room_state,
+    EnvelopePolicy, EnvelopeRejection,
+};
+use crate::handshake::{HandshakeOutcome, HandshakeTracker};
 use crate::loop_guard::LoopGuard;
 use crate::notify::Notifier;
 use crate::{current_os, device_name, CoreError, PullResult};
@@ -99,9 +105,12 @@ pub async fn run_daemon(clipboard: Option<SystemClipboard>) -> Result<(), CoreEr
     Ok(())
 }
 
+/// A manifest accepted by [`Inbound::manifest`], kept until its chunks arrive.
+type PendingManifest = (RoutingHeader, ManifestPlain);
+
 fn drop_idle_transfers(
     incoming: &mut std::collections::HashMap<String, IncomingTransfer>,
-    manifests: &mut std::collections::HashMap<String, clipsync_protocol::ManifestPlain>,
+    manifests: &mut std::collections::HashMap<String, PendingManifest>,
 ) {
     let ttl = std::time::Duration::from_secs(clipsync_protocol::TRANSFER_IDLE_SECS);
     let _ = prune_idle_transfers(incoming, std::time::Instant::now(), ttl);
@@ -265,23 +274,32 @@ async fn run_session(
     let staging = StagingArea::new(store.paths.inbox_dir.clone())?;
     let mut last_sig = clipboard.signature().await.unwrap_or_else(|_| "0".into());
     let mut incoming: HashMap<String, IncomingTransfer> = HashMap::new();
-    let mut manifests: HashMap<String, ManifestPlain> = HashMap::new();
-    let mut seq = 0u64;
-    let mut noise: Option<NoiseHandshake> = None;
-    let mut noise_done = false;
+    let mut manifests: HashMap<String, PendingManifest> = HashMap::new();
+    let policy = EnvelopePolicy::from_config(&cfg.sync);
+    let inbound = Inbound {
+        store,
+        room: &room,
+        local: &identity.device_id,
+        epoch_key: &epoch_key,
+        policy,
+    };
+    let mut handshakes = HandshakeTracker::new(
+        HandshakeCapabilities::accepting(policy.accepted_versions())
+            .encode()
+            .map_err(TransferError::from)?,
+    );
     handle.connected.store(true, Ordering::Relaxed);
     apply_hello_ok(
         &hello,
         &identity,
         &room,
-        &epoch_key,
+        &inbound,
         clipboard,
         &mut guard,
         handle,
         &notifier,
         &mut last_sig,
-        &mut noise,
-        &mut noise_done,
+        &mut handshakes,
         &conn,
     )
     .await;
@@ -315,8 +333,14 @@ async fn run_session(
                             warn!(error = %e, "skip invalid clipboard item");
                             continue;
                         }
-                        seq += 1;
-                        if let Err(e) = send_item(&conn, &identity, &room, &epoch_key, seq, &item).await {
+                        let stamp = match EnvelopeStamp::next(store, &room, &identity.device_id, policy) {
+                            Ok(stamp) => stamp,
+                            Err(e) => {
+                                warn!(error = %e, "cannot reserve envelope sequence");
+                                return Err(e);
+                            }
+                        };
+                        if let Err(e) = send_item(&conn, &identity, &room, &epoch_key, stamp, &item).await {
                             warn!(error = %e, "send failed; reconnecting");
                             return Err(e);
                         }
@@ -330,72 +354,42 @@ async fn run_session(
                     return Err(CoreError::Message("relay disconnected".into()));
                 };
                 match msg {
-                    Incoming::Control(ControlMessage::HelloOk { peer_online, queued_text, peers, .. }) => {
-                        handle.peer_online.store(peer_online, Ordering::Relaxed);
-                        if let Some(q) = queued_text {
-                            if let Ok(item) = open_text(&epoch_key, &q.routing, &q.nonce, &q.ciphertext) {
-                                apply_remote(clipboard, &mut guard, handle, &notifier, &q.routing.message_id.0, item, &mut last_sig).await;
-                            }
-                        }
-                        if peer_online && !noise_done {
-                            if let Some(peer) = peers.iter().find(|p| p.online) {
-                                if let Some(rec) = room.peers.iter().find(|p| p.device_id == peer.device_id) {
-                                    if let Some(pk) = parse_public(&rec.public_key_hex) {
-                                        let initiator = identity.device_id.as_str() < rec.device_id.as_str();
-                                        if initiator {
-                                            match NoiseHandshake::initiator(&identity.static_secret(), &pk) {
-                                                Ok(mut hs) => {
-                                                    if let Ok(m) = hs.write_message() {
-                                                        let _ = conn.send_control(ControlMessage::NoiseHandshake {
-                                                            message: hex::encode(m),
-                                                        }).await;
-                                                    }
-                                                    noise = Some(hs);
-                                                }
-                                                Err(e) => warn!(error = %e, "noise init"),
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    Incoming::Control(hello @ ControlMessage::HelloOk { .. }) => {
+                        apply_hello_ok(
+                            &hello,
+                            &identity,
+                            &room,
+                            &inbound,
+                            clipboard,
+                            &mut guard,
+                            handle,
+                            &notifier,
+                            &mut last_sig,
+                            &mut handshakes,
+                            &conn,
+                        )
+                        .await;
                     }
-                    Incoming::Control(ControlMessage::PeerJoined { .. }) => {
+                    Incoming::Control(ControlMessage::PeerJoined { device }) => {
                         handle.peer_online.store(true, Ordering::Relaxed);
+                        // The peer (re)connected: its handshake state is new.
+                        if let Some(message) = handshakes.initiate(&identity, &room, &device.device_id, true) {
+                            send_handshake(&conn, message).await;
+                        }
                     }
                     Incoming::Control(ControlMessage::PeerLeft { .. }) => {
                         handle.peer_online.store(false, Ordering::Relaxed);
                     }
                     Incoming::Control(ControlMessage::NoiseHandshake { message }) => {
                         let bytes = hex::decode(&message).unwrap_or_default();
-                        if let Some(peer) = room.peers.first() {
-                            if let Some(pk) = parse_public(&peer.public_key_hex) {
-                                if noise.is_none() {
-                                    if let Ok(hs) = NoiseHandshake::responder(&identity.static_secret(), &pk) {
-                                        noise = Some(hs);
-                                    }
-                                }
-                                if let Some(hs) = noise.as_mut() {
-                                    if hs.read_message(&bytes).is_ok() && !hs.is_finished() {
-                                        if let Ok(m) = hs.write_message() {
-                                            let _ = conn.send_control(ControlMessage::NoiseHandshake {
-                                                message: hex::encode(m),
-                                            }).await;
-                                        }
-                                    }
-                                    if hs.is_finished() {
-                                        noise_done = true;
-                                        info!("noise handshake complete");
-                                    }
-                                }
-                            }
-                        }
+                        let outcome = handshakes.receive(&identity, &room, &bytes);
+                        finish_handshake(store, &room, &conn, outcome).await;
                     }
                     Incoming::Control(ControlMessage::TextEnvelope { routing, nonce, ciphertext }) => {
                         if guard.seen_message(routing.message_id.as_str()) {
                             continue;
                         }
-                        match open_text(&epoch_key, &routing, &nonce, &ciphertext) {
+                        match inbound.text(&routing, &nonce, &ciphertext) {
                             Ok(item) => {
                                 apply_remote(clipboard, &mut guard, handle, &notifier, routing.message_id.as_str(), item, &mut last_sig).await;
                                 let _ = conn.send_control(ControlMessage::Ack {
@@ -405,19 +399,19 @@ async fn run_session(
                                     detail: None,
                                 }).await;
                             }
-                            Err(e) => warn!(error = %e, "text decrypt"),
+                            Err(e) => warn!(error = %e, "text envelope rejected"),
                         }
                     }
                     Incoming::Control(ControlMessage::Manifest { routing, nonce, ciphertext, .. }) => {
                         drop_idle_transfers(&mut incoming, &mut manifests);
-                        match open_manifest(&epoch_key, &routing, &nonce, &ciphertext) {
+                        match inbound.manifest(&routing, &nonce, &ciphertext) {
                             Ok(manifest) => {
                                 let id = routing.transfer_id.clone();
                                 let t = staging.begin(&id, manifest.chunk_count);
                                 incoming.insert(id.0.clone(), t);
-                                manifests.insert(id.0, manifest);
+                                manifests.insert(id.0, (routing, manifest));
                             }
-                            Err(e) => warn!(error = %e, "manifest"),
+                            Err(e) => warn!(error = %e, "manifest rejected"),
                         }
                     }
                     Incoming::Control(ControlMessage::Ack { status, .. }) => {
@@ -428,7 +422,7 @@ async fn run_session(
                     }
                     Incoming::Binary(buf) => {
                         drop_idle_transfers(&mut incoming, &mut manifests);
-                        match decrypt_chunk(&epoch_key, &buf) {
+                        match open_pending_chunk(&epoch_key, &manifests, &buf) {
                             Ok((tid, idx, count, pt)) => {
                                 if let Some(t) = incoming.get_mut(tid.as_str()) {
                                     if t.push(idx, count, pt).is_err() {
@@ -436,7 +430,7 @@ async fn run_session(
                                         continue;
                                     }
                                     if t.is_complete() {
-                                        if let Some(man) = manifests.remove(tid.as_str()) {
+                                        if let Some((_, man)) = manifests.remove(tid.as_str()) {
                                             if let Some(xfer) = incoming.remove(tid.as_str()) {
                                                 match xfer.assemble(&man.content_hash) {
                                                     Ok(payload) => {
@@ -471,7 +465,7 @@ async fn send_item(
     identity: &DeviceIdentity,
     room: &RoomRecord,
     epoch_key: &[u8; 32],
-    seq: u64,
+    stamp: EnvelopeStamp,
     item: &ClipboardItem,
 ) -> Result<(), CoreError> {
     let transfer_id = TransferId::new();
@@ -479,7 +473,7 @@ async fn send_item(
     let now = Utc::now();
     let ttl = ChronoDuration::seconds(clipsync_protocol::DEFAULT_TTL_SECS as i64);
     let routing = RoutingHeader {
-        version: PROTOCOL_VERSION,
+        version: stamp.version,
         message_id,
         transfer_id: transfer_id.clone(),
         room_id: room.room_id.clone(),
@@ -488,18 +482,15 @@ async fn send_item(
         sent_at: now,
         expires_at: now + ttl,
         item_kind: item.kind(),
-        seq,
+        seq: stamp.seq,
     };
     match item {
         ClipboardItem::Text { text } => {
-            let content_key = derive_content_key(epoch_key, transfer_id.as_str())?;
-            let nonce = derive_nonce(&content_key, 0)?;
-            let aad = format!("{}:text", routing.message_id);
-            let ct = seal(&content_key, &nonce, aad.as_bytes(), text.as_bytes())?;
+            let (nonce, ciphertext) = seal_text(epoch_key, &routing, text)?;
             conn.send_control(ControlMessage::TextEnvelope {
                 routing,
-                nonce: hex::encode(nonce),
-                ciphertext: hex::encode(ct),
+                nonce,
+                ciphertext,
             })
             .await?;
         }
@@ -566,18 +557,14 @@ async fn send_binary(
     mut manifest: ManifestPlain,
     payload: &[u8],
 ) -> Result<(), CoreError> {
-    let chunks = split_and_encrypt(epoch_key, &routing.transfer_id, payload)?;
+    let chunks = split_and_encrypt(epoch_key, &routing, payload)?;
     manifest.chunk_count = chunks.chunk_count;
     manifest.total_bytes = chunks.total_bytes;
-    let content_key = derive_content_key(epoch_key, routing.transfer_id.as_str())?;
-    let nonce = derive_nonce(&content_key, u32::MAX)?;
-    let aad = format!("{}:manifest", routing.transfer_id);
-    let pt = serde_json::to_vec(&manifest)?;
-    let ct = seal(&content_key, &nonce, aad.as_bytes(), &pt)?;
+    let (nonce, ciphertext) = seal_manifest(epoch_key, &routing, &manifest)?;
     conn.send_control(ControlMessage::Manifest {
         routing: routing.clone(),
-        nonce: hex::encode(nonce),
-        ciphertext: hex::encode(ct),
+        nonce,
+        ciphertext,
         chunk_count: chunks.chunk_count,
         total_bytes: chunks.total_bytes,
     })
@@ -601,8 +588,8 @@ fn open_text(
     let content_key = derive_content_key(epoch_key, routing.transfer_id.as_str())?;
     let nonce = decode_nonce(nonce_hex)?;
     let ct = hex::decode(ct_hex).map_err(|e| CoreError::Message(e.to_string()))?;
-    let aad = format!("{}:text", routing.message_id);
-    let pt = open(&content_key, &nonce, aad.as_bytes(), &ct)?;
+    let aad = envelope_aad(routing, EnvelopeFrame::Text).map_err(TransferError::from)?;
+    let pt = open(&content_key, &nonce, &aad, &ct)?;
     let text = String::from_utf8(pt).map_err(|_| CoreError::Message("text not utf-8".into()))?;
     Ok(ClipboardItem::Text { text })
 }
@@ -620,10 +607,160 @@ fn open_manifest(
     let content_key = derive_content_key(epoch_key, routing.transfer_id.as_str())?;
     let nonce = decode_nonce(nonce_hex)?;
     let ct = hex::decode(ct_hex).map_err(|e| CoreError::Message(e.to_string()))?;
-    let aad = format!("{}:manifest", routing.transfer_id);
-    let pt = open(&content_key, &nonce, aad.as_bytes(), &ct)?;
+    let aad = envelope_aad(routing, EnvelopeFrame::Manifest).map_err(TransferError::from)?;
+    let pt = open(&content_key, &nonce, &aad, &ct)?;
     Ok(serde_json::from_slice(&pt)?)
 }
+
+/// Envelope version and sequence number stamped on one outgoing item.
+#[derive(Clone, Copy, Debug)]
+struct EnvelopeStamp {
+    version: u16,
+    seq: u64,
+}
+
+impl EnvelopeStamp {
+    /// Pick the version `policy` allows for `room`'s peers and reserve a
+    /// persisted, strictly increasing `seq`. Both happen under the replay-state
+    /// lock, so a one-shot process that switches the room to v2 concurrently
+    /// is either seen here or ordered after this stamp.
+    #[expect(
+        clippy::result_large_err,
+        reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+    )]
+    fn next(
+        store: &LocalStore,
+        room: &RoomRecord,
+        local: &DeviceId,
+        policy: EnvelopePolicy,
+    ) -> Result<Self, CoreError> {
+        let (seq, authenticated) =
+            store.reserve_send_as(&room.room_id, sequence_floor(Utc::now()), |state| {
+                version_for_room_state(Some(state), room, local, policy)
+                    == ENVELOPE_VERSION_AUTHENTICATED
+            })?;
+        let version = if authenticated {
+            ENVELOPE_VERSION_AUTHENTICATED
+        } else {
+            ENVELOPE_VERSION_LEGACY
+        };
+        Ok(Self { version, seq })
+    }
+}
+
+/// Receive-side context: every inbound text envelope and manifest passes
+/// through here so addressing, expiry, downgrade and replay checks cannot be
+/// skipped by one entry point.
+struct Inbound<'a> {
+    store: &'a LocalStore,
+    room: &'a RoomRecord,
+    local: &'a DeviceId,
+    epoch_key: &'a [u8; 32],
+    policy: EnvelopePolicy,
+}
+
+impl Inbound<'_> {
+    #[expect(
+        clippy::result_large_err,
+        reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+    )]
+    fn text(
+        &self,
+        routing: &RoutingHeader,
+        nonce_hex: &str,
+        ct_hex: &str,
+    ) -> Result<ClipboardItem, CoreError> {
+        check_header(
+            routing,
+            self.room,
+            self.local,
+            Some(ItemKind::Text),
+            Utc::now(),
+        )?;
+        check_version(self.store, routing, self.policy)?;
+        let item = open_text(self.epoch_key, routing, nonce_hex, ct_hex)?;
+        commit_sequence(self.store, routing)?;
+        Ok(item)
+    }
+
+    #[expect(
+        clippy::result_large_err,
+        reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+    )]
+    fn manifest(
+        &self,
+        routing: &RoutingHeader,
+        nonce_hex: &str,
+        ct_hex: &str,
+    ) -> Result<ManifestPlain, CoreError> {
+        check_header(routing, self.room, self.local, None, Utc::now())?;
+        check_version(self.store, routing, self.policy)?;
+        let manifest = open_manifest(self.epoch_key, routing, nonce_hex, ct_hex)?;
+        if manifest.item_kind != routing.item_kind {
+            return Err(EnvelopeRejection::WrongItemKind.into());
+        }
+        commit_sequence(self.store, routing)?;
+        Ok(manifest)
+    }
+}
+
+/// Decrypt a chunk frame only for a transfer whose manifest was accepted,
+/// binding it to that manifest's routing header.
+fn open_pending_chunk(
+    epoch_key: &[u8; 32],
+    manifests: &HashMap<String, PendingManifest>,
+    buf: &[u8],
+) -> Result<(TransferId, u32, u32, Vec<u8>), TransferError> {
+    let frame = decode_chunk_frame(buf)?;
+    let (routing, _) = manifests
+        .get(frame.transfer_id.as_str())
+        .ok_or(TransferError::Chunk("no accepted manifest for chunk"))?;
+    let plaintext = open_chunk(epoch_key, routing, &frame)?;
+    Ok((
+        frame.transfer_id,
+        frame.chunk_index,
+        frame.chunk_count,
+        plaintext,
+    ))
+}
+
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
+fn seal_text(
+    epoch_key: &[u8; 32],
+    routing: &RoutingHeader,
+    text: &str,
+) -> Result<(String, String), CoreError> {
+    let content_key = derive_content_key(epoch_key, routing.transfer_id.as_str())?;
+    let nonce = derive_nonce(&content_key, TEXT_NONCE_INDEX)?;
+    let aad = envelope_aad(routing, EnvelopeFrame::Text).map_err(TransferError::from)?;
+    let ct = seal(&content_key, &nonce, &aad, text.as_bytes())?;
+    Ok((hex::encode(nonce), hex::encode(ct)))
+}
+
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
+fn seal_manifest(
+    epoch_key: &[u8; 32],
+    routing: &RoutingHeader,
+    manifest: &ManifestPlain,
+) -> Result<(String, String), CoreError> {
+    let content_key = derive_content_key(epoch_key, routing.transfer_id.as_str())?;
+    let nonce = derive_nonce(&content_key, MANIFEST_NONCE_INDEX)?;
+    let aad = envelope_aad(routing, EnvelopeFrame::Manifest).map_err(TransferError::from)?;
+    let ct = seal(&content_key, &nonce, &aad, &serde_json::to_vec(manifest)?)?;
+    Ok((hex::encode(nonce), hex::encode(ct)))
+}
+
+/// Nonce-derivation index for a text envelope (one message per transfer key).
+const TEXT_NONCE_INDEX: u32 = 0;
+/// Nonce-derivation index for a manifest; chunk indices count up from zero, so
+/// the top index never collides with a chunk of a valid transfer.
+const MANIFEST_NONCE_INDEX: u32 = u32::MAX;
 
 #[expect(
     clippy::result_large_err,
@@ -665,7 +802,7 @@ async fn item_from_payload(
             })
         }
         ItemKind::Files => {
-            let paths = staging.commit_files(tid, &manifest.files, &payload).await?;
+            let paths = staging.commit_files(tid, &manifest.files, payload).await?;
             let mut files = Vec::new();
             for (meta, path) in manifest.files.iter().zip(paths.iter()) {
                 files.push(FileRef {
@@ -738,7 +875,13 @@ pub async fn oneshot_push(store: &LocalStore, item: ClipboardItem) -> Result<(),
     })
     .await?;
     wait_hello_ok(&mut conn).await?;
-    send_item(&conn, &identity, &room, &epoch_key, 1, &item).await?;
+    let stamp = EnvelopeStamp::next(
+        store,
+        &room,
+        &identity.device_id,
+        EnvelopePolicy::from_config(&cfg.sync),
+    )?;
+    send_item(&conn, &identity, &room, &epoch_key, stamp, &item).await?;
     tokio::time::sleep(Duration::from_millis(250)).await;
     conn.close().await;
     Ok(())
@@ -784,14 +927,13 @@ async fn apply_hello_ok(
     hello: &ControlMessage,
     identity: &DeviceIdentity,
     room: &RoomRecord,
-    epoch_key: &[u8; 32],
+    inbound: &Inbound<'_>,
     clipboard: &SystemClipboard,
     guard: &mut LoopGuard,
     handle: &SyncHandle,
     notifier: &Notifier,
     last_sig: &mut String,
-    noise: &mut Option<NoiseHandshake>,
-    noise_done: &mut bool,
+    handshakes: &mut HandshakeTracker,
     conn: &RelayConnection,
 ) {
     let ControlMessage::HelloOk {
@@ -805,42 +947,73 @@ async fn apply_hello_ok(
     };
     handle.peer_online.store(*peer_online, Ordering::Relaxed);
     if let Some(q) = queued_text {
-        if let Ok(item) = open_text(epoch_key, &q.routing, &q.nonce, &q.ciphertext) {
-            apply_remote(
-                clipboard,
-                guard,
-                handle,
-                notifier,
-                q.routing.message_id.as_str(),
-                item,
-                last_sig,
-            )
-            .await;
+        match inbound.text(&q.routing, &q.nonce, &q.ciphertext) {
+            Ok(item) => {
+                apply_remote(
+                    clipboard,
+                    guard,
+                    handle,
+                    notifier,
+                    q.routing.message_id.as_str(),
+                    item,
+                    last_sig,
+                )
+                .await;
+            }
+            Err(e) => warn!(error = %e, "queued text envelope rejected"),
         }
     }
-    if *peer_online && !*noise_done {
-        if let Some(peer) = peers.iter().find(|p| p.online) {
-            if let Some(rec) = room.peers.iter().find(|p| p.device_id == peer.device_id) {
-                if let Some(pk) = parse_public(&rec.public_key_hex) {
-                    let initiator = identity.device_id.as_str() < rec.device_id.as_str();
-                    if initiator {
-                        match NoiseHandshake::initiator(&identity.static_secret(), &pk) {
-                            Ok(mut hs) => {
-                                if let Ok(m) = hs.write_message() {
-                                    let _ = conn
-                                        .send_control(ControlMessage::NoiseHandshake {
-                                            message: hex::encode(m),
-                                        })
-                                        .await;
-                                }
-                                *noise = Some(hs);
-                            }
-                            Err(e) => warn!(error = %e, "noise init"),
-                        }
-                    }
-                }
-            }
+    if *peer_online {
+        start_handshakes(identity, room, peers, handshakes, conn).await;
+    }
+}
+
+/// Start a handshake with every online pinned peer this device initiates for
+/// and has not authenticated yet in this session.
+async fn start_handshakes(
+    identity: &DeviceIdentity,
+    room: &RoomRecord,
+    peers: &[PeerInfo],
+    handshakes: &mut HandshakeTracker,
+    conn: &RelayConnection,
+) {
+    for peer in peers.iter().filter(|peer| peer.online) {
+        if let Some(message) = handshakes.initiate(identity, room, &peer.device_id, false) {
+            send_handshake(conn, message).await;
         }
+    }
+}
+
+async fn send_handshake(conn: &RelayConnection, message: Vec<u8>) {
+    let _ = conn
+        .send_control(ControlMessage::NoiseHandshake {
+            message: hex::encode(message),
+        })
+        .await;
+}
+
+/// Send the responder reply, if any, and persist an authenticated v2
+/// capability advertisement: from then on this device sends v2 to the peer.
+async fn finish_handshake(
+    store: &LocalStore,
+    room: &RoomRecord,
+    conn: &RelayConnection,
+    outcome: HandshakeOutcome,
+) {
+    if let Some(reply) = outcome.reply {
+        send_handshake(conn, reply).await;
+    }
+    let Some((peer, capabilities)) = outcome.completed else {
+        return;
+    };
+    info!(peer = %peer, "noise handshake complete");
+    if !capabilities.accepts_authenticated() {
+        return;
+    }
+    match store.mark_peer_advertised_authenticated(&room.room_id, &peer) {
+        Ok(true) => info!(peer = %peer, "peer accepts authenticated envelopes; sending v2"),
+        Ok(false) => {}
+        Err(e) => warn!(error = %e, "cannot persist peer envelope capability"),
     }
 }
 
@@ -880,7 +1053,14 @@ pub async fn oneshot_pull(
     tokio::pin!(timeout);
     let staging = StagingArea::new(store.paths.inbox_dir.clone())?;
     let mut incoming: HashMap<String, IncomingTransfer> = HashMap::new();
-    let mut manifests: HashMap<String, ManifestPlain> = HashMap::new();
+    let mut manifests: HashMap<String, PendingManifest> = HashMap::new();
+    let inbound = Inbound {
+        store,
+        room: &room,
+        local: &identity.device_id,
+        epoch_key: &epoch_key,
+        policy: EnvelopePolicy::from_config(&cfg.sync),
+    };
     loop {
         tokio::select! {
             _ = &mut timeout => return Err(CoreError::Timeout),
@@ -889,7 +1069,7 @@ pub async fn oneshot_pull(
                 match msg {
                     Incoming::Control(ControlMessage::HelloOk { queued_text, .. }) => {
                         if let Some(q) = queued_text {
-                            let item = open_text(&epoch_key, &q.routing, &q.nonce, &q.ciphertext)?;
+                            let item = inbound.text(&q.routing, &q.nonce, &q.ciphertext)?;
                             return finish_pull(item, copy, output).await;
                         }
                         if !wait {
@@ -897,26 +1077,26 @@ pub async fn oneshot_pull(
                         }
                     }
                     Incoming::Control(ControlMessage::TextEnvelope { routing, nonce, ciphertext }) => {
-                        let item = open_text(&epoch_key, &routing, &nonce, &ciphertext)?;
+                        let item = inbound.text(&routing, &nonce, &ciphertext)?;
                         return finish_pull(item, copy, output).await;
                     }
                     Incoming::Control(ControlMessage::Manifest { routing, nonce, ciphertext, .. }) => {
-                        if let Ok(manifest) = open_manifest(&epoch_key, &routing, &nonce, &ciphertext) {
+                        if let Ok(manifest) = inbound.manifest(&routing, &nonce, &ciphertext) {
                             let id = routing.transfer_id.clone();
                             let t = staging.begin(&id, manifest.chunk_count);
                             incoming.insert(id.0.clone(), t);
-                            manifests.insert(id.0, manifest);
+                            manifests.insert(id.0, (routing, manifest));
                         }
                     }
                     Incoming::Binary(buf) => {
-                        if let Ok((tid, idx, count, pt)) = decrypt_chunk(&epoch_key, &buf) {
+                        if let Ok((tid, idx, count, pt)) = open_pending_chunk(&epoch_key, &manifests, &buf) {
                             if let Some(t) = incoming.get_mut(tid.as_str()) {
                                 if t.push(idx, count, pt).is_err() {
                                     t.fail();
                                     continue;
                                 }
                                 if t.is_complete() {
-                                    if let Some(man) = manifests.remove(tid.as_str()) {
+                                    if let Some((_, man)) = manifests.remove(tid.as_str()) {
                                         if let Some(xfer) = incoming.remove(tid.as_str()) {
                                             if let Ok(payload) = xfer.assemble(&man.content_hash) {
                                                 let item = item_from_payload(&man, payload, &staging, &tid).await?;

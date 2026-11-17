@@ -7,6 +7,8 @@ pub const PAIRING_MAX_JOINERS: u32 = 1;
 pub const DEFAULT_TTL_SECS: u64 = 60;
 pub const MIN_TTL_SECS: u64 = 10;
 pub const HARD_MAX_TTL_SECS: u64 = 300;
+// Longest the relay keeps a queued text envelope for an offline member,
+// whatever expiry its sender chose (see docs/security.md).
 pub const QUEUE_TTL_SECS: u64 = 60;
 
 pub const TEXT_MAX_BYTES: usize = 256 * 1024;
@@ -26,7 +28,12 @@ pub const HEARTBEAT_SECS: u64 = 20;
 pub const TRANSFER_IDLE_SECS: u64 = 60;
 pub const REPLAY_CACHE_TTL_SECS: u64 = 120;
 pub const LOOP_CACHE_TTL_SECS: u64 = 15;
-pub const CLOCK_SKEW_SECS: i64 = 5;
+/// Tolerated sender/receiver wall-clock difference when a receiver checks an
+/// envelope's `sent_at`/`expires_at`. NTP-synced hosts agree to well under a
+/// second; 30 s also absorbs loosely synced mobile clocks. Replay protection for
+/// authenticated envelopes rests on per-sender sequence numbers, not on expiry,
+/// so this margin does not widen the replay window.
+pub const CLOCK_SKEW_SECS: i64 = 30;
 
 pub const NOTIFY_COOLDOWN_SECS: u64 = 8;
 
