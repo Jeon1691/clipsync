@@ -12,7 +12,10 @@ use clipsync_clipboard::{
     hash_item, AdapterInfo, Capabilities, ClipboardBackend, ClipboardItem, ImageMime,
     SystemClipboard,
 };
-use clipsync_core::{begin_create_room, join_room, run_daemon, App};
+use clipsync_core::{
+    begin_create_room, join_room, run_daemon, sanitize_untrusted, App, SasCheck, SasDecision,
+    MAX_PEER_NAME_COLUMNS,
+};
 use clipsync_storage::AppPaths;
 use tokio::runtime::Runtime;
 use tracing::warn;
@@ -42,6 +45,87 @@ pub trait ClipboardBridge: Send + Sync {
     fn read_image_png(&self) -> Option<Vec<u8>>;
     fn write_image_png(&self, png: Vec<u8>);
     fn notify(&self, title: String, body: String);
+}
+
+/// Native hook that shows the pairing verification code (SAS).
+///
+/// ClipSync calls `confirm_sas` once per pairing, on a background thread,
+/// after key confirmation and before anything is sent to the peer or stored.
+/// Show `sas` (for example grouped as `482 913`) together with
+/// `peer_device_name`, ask the user whether the other device shows the same
+/// code, block until they answer, and return `true` only if it matches.
+///
+/// `peer_device_name` is chosen by the relay and not authenticated, and is
+/// fixed before SPAKE2 starts. It arrives with control, bidi, blank and
+/// invisible characters escaped and at most `MAX_PEER_NAME_COLUMNS` terminal
+/// columns wide; still show it in its own text element, never in the same
+/// string as `sas`.
+/// Returning `false` aborts the pairing and stores nothing.
+///
+/// If the pairing ends first (deadline, the other device rejected, relay
+/// error), ClipSync calls `sas_cancelled`. Dismiss the dialog then, and let
+/// the pending `confirm_sas` return; its answer is ignored. `sas_cancelled`
+/// must not block.
+#[uniffi::export(callback_interface)]
+pub trait SasVerifier: Send + Sync {
+    fn confirm_sas(&self, sas: String, peer_device_name: String) -> bool;
+    fn sas_cancelled(&self);
+}
+
+/// Tells the host to dismiss its dialog when the pairing future is dropped
+/// before `confirm_sas` returned.
+struct CancelUnanswered {
+    verifier: Arc<dyn SasVerifier>,
+    answered: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for CancelUnanswered {
+    fn drop(&mut self) {
+        if !self.answered.load(std::sync::atomic::Ordering::SeqCst) {
+            self.verifier.sas_cancelled();
+        }
+    }
+}
+
+fn verifier_confirmer(
+    verifier: Box<dyn SasVerifier>,
+) -> impl FnOnce(SasCheck) -> std::pin::Pin<Box<dyn std::future::Future<Output = SasDecision> + Send>>
+       + Send
+       + 'static {
+    let verifier: Arc<dyn SasVerifier> = Arc::from(verifier);
+    move |check: SasCheck| {
+        Box::pin(async move {
+            let answered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let _cancel = CancelUnanswered {
+                verifier: verifier.clone(),
+                answered: answered.clone(),
+            };
+            // The native callback blocks on UI; keep it off the runtime workers.
+            let confirmed = tokio::task::spawn_blocking(move || {
+                let peer = sanitize_untrusted(&check.peer_device_name, MAX_PEER_NAME_COLUMNS);
+                let confirmed = verifier.confirm_sas(check.sas, peer);
+                answered.store(true, std::sync::atomic::Ordering::SeqCst);
+                confirmed
+            })
+            .await
+            .unwrap_or(false);
+            if confirmed {
+                SasDecision::Confirmed
+            } else {
+                SasDecision::Rejected
+            }
+        })
+    }
+}
+
+/// Pre-SAS behaviour kept for `create_room()` and `join_room()`: the pairing
+/// is accepted without comparing codes.
+async fn unverified(check: SasCheck) -> SasDecision {
+    warn!(
+        peer = %sanitize_untrusted(&check.peer_device_name, MAX_PEER_NAME_COLUMNS),
+        "pairing accepted without SAS comparison; use the *_verified API to detect a malicious relay or a guessed code"
+    );
+    SasDecision::Confirmed
 }
 
 #[derive(uniffi::Record)]
@@ -178,36 +262,38 @@ impl ClipSyncClient {
         })
     }
 
+    /// Kept for existing apps. Pairs without comparing verification codes,
+    /// so it cannot detect a malicious relay or a guessed code. New apps
+    /// should call `create_room_verified`.
     pub fn create_room(&self) -> Result<PairingOffer, MobileError> {
-        let app = self.app.clone();
-        self.rt.block_on(async move {
-            let identity = app.identity()?;
-            let cfg = app.store.load_config()?;
-            let pending = begin_create_room(&identity, &cfg, 120).await?;
-            let offer = PairingOffer {
-                pairing_code: pending.offer.pairing_code.clone(),
-                room_id: pending.offer.room_id.to_string(),
-                expires_at: pending.offer.expires_at.to_rfc3339(),
-            };
-            let store = app.store.clone();
-            tokio::spawn(async move {
-                if let Err(e) = pending.wait(&store, &identity).await {
-                    warn!(error = %e, "mobile pairing wait failed");
-                }
-            });
-            Ok(offer)
-        })
+        self.create(unverified)
     }
 
+    /// Kept for existing apps. Pairs without comparing verification codes,
+    /// so it cannot detect a malicious relay or a guessed code. New apps
+    /// should call `join_room_verified`.
     pub fn join_room(&self, code: String) -> Result<String, MobileError> {
-        let app = self.app.clone();
-        self.rt.block_on(async move {
-            let identity = app.identity()?;
-            let cfg = app.store.load_config()?;
-            join_room(&app.store, &identity, &cfg, &code).await?;
-            let room = app.store.current_room()?;
-            Ok(room.room_id.to_string())
-        })
+        self.join(code, unverified)
+    }
+
+    /// Like `create_room`, but the pairing commits only after `verifier`
+    /// confirms that both devices show the same verification code.
+    pub fn create_room_verified(
+        &self,
+        verifier: Box<dyn SasVerifier>,
+    ) -> Result<PairingOffer, MobileError> {
+        self.create(verifier_confirmer(verifier))
+    }
+
+    /// Like `join_room`, but the pairing commits only after `verifier`
+    /// confirms that both devices show the same verification code. A
+    /// rejected code returns an error and stores nothing.
+    pub fn join_room_verified(
+        &self,
+        code: String,
+        verifier: Box<dyn SasVerifier>,
+    ) -> Result<String, MobileError> {
+        self.join(code, verifier_confirmer(verifier))
     }
 
     pub fn start_sync(&self, clipboard: Box<dyn ClipboardBridge>) -> Result<(), MobileError> {
@@ -244,6 +330,52 @@ impl ClipSyncClient {
             })
             .map_err(|e| MobileError::Message(e.to_string()))?;
         Ok(())
+    }
+}
+
+/// Room TTL, in seconds, that the mobile create helpers request. It matches
+/// the relay's fixed pairing lifetime, as the earlier literal did.
+const MOBILE_PAIRING_TTL_SECS: u64 = clipsync_protocol::PAIRING_TTL_SECS;
+
+impl ClipSyncClient {
+    fn create<C, F>(&self, confirm: C) -> Result<PairingOffer, MobileError>
+    where
+        C: FnOnce(SasCheck) -> F + Send + 'static,
+        F: std::future::Future<Output = SasDecision> + Send + 'static,
+    {
+        let app = self.app.clone();
+        self.rt.block_on(async move {
+            let identity = app.identity()?;
+            let cfg = app.store.load_config()?;
+            let pending = begin_create_room(&identity, &cfg, MOBILE_PAIRING_TTL_SECS).await?;
+            let offer = PairingOffer {
+                pairing_code: pending.offer.pairing_code.clone(),
+                room_id: pending.offer.room_id.to_string(),
+                expires_at: pending.offer.expires_at.to_rfc3339(),
+            };
+            let store = app.store.clone();
+            tokio::spawn(async move {
+                if let Err(e) = pending.wait(&store, &identity, confirm).await {
+                    warn!(error = %e, "mobile pairing wait failed");
+                }
+            });
+            Ok(offer)
+        })
+    }
+
+    fn join<C, F>(&self, code: String, confirm: C) -> Result<String, MobileError>
+    where
+        C: FnOnce(SasCheck) -> F + Send,
+        F: std::future::Future<Output = SasDecision> + Send,
+    {
+        let app = self.app.clone();
+        self.rt.block_on(async move {
+            let identity = app.identity()?;
+            let cfg = app.store.load_config()?;
+            join_room(&app.store, &identity, &cfg, &code, confirm).await?;
+            let room = app.store.current_room()?;
+            Ok(room.room_id.to_string())
+        })
     }
 }
 
@@ -458,6 +590,183 @@ mod tests {
         }
     }
 
+    /// Native verifier stand-in: shows its code to the other device's verifier
+    /// and confirms only when `accept` is set and both codes match.
+    struct ChannelVerifier {
+        accept: bool,
+        mine: Mutex<std::sync::mpsc::Sender<String>>,
+        theirs: Mutex<std::sync::mpsc::Receiver<String>>,
+        seen: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl SasVerifier for ChannelVerifier {
+        fn confirm_sas(&self, sas: String, peer_device_name: String) -> bool {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((sas.clone(), peer_device_name));
+            let _ = self.mine.lock().unwrap().send(sas.clone());
+            let other = self
+                .theirs
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10));
+            self.accept && other.as_deref() == Ok(sas.as_str())
+        }
+
+        fn sas_cancelled(&self) {
+            // Recorded so the `seen.len()` checks catch an unexpected cancel.
+            self.seen
+                .lock()
+                .unwrap()
+                .push(("cancelled".into(), String::new()));
+        }
+    }
+
+    /// Verifier whose user never answers until the test releases it.
+    struct StalledVerifier {
+        shown: Mutex<std::sync::mpsc::Sender<()>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        cancelled: Arc<AtomicUsize>,
+    }
+
+    impl SasVerifier for StalledVerifier {
+        fn confirm_sas(&self, _sas: String, _peer_device_name: String) -> bool {
+            self.shown.lock().unwrap().send(()).unwrap();
+            let _ = self.release.lock().unwrap().recv();
+            true
+        }
+
+        fn sas_cancelled(&self) {
+            self.cancelled.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Verifier that records the name it was shown and rejects.
+    struct RecordingVerifier {
+        shown: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl SasVerifier for RecordingVerifier {
+        fn confirm_sas(&self, _sas: String, peer_device_name: String) -> bool {
+            self.shown.lock().unwrap().push(peer_device_name);
+            false
+        }
+
+        fn sas_cancelled(&self) {}
+    }
+
+    #[tokio::test]
+    async fn hostile_peer_names_reach_the_host_inert() {
+        let shown = Arc::new(Mutex::new(Vec::new()));
+        let confirm = verifier_confirmer(Box::new(RecordingVerifier {
+            shown: shown.clone(),
+        }));
+        let decision = confirm(SasCheck {
+            sas: "482913".into(),
+            peer_device_id: "peer".into(),
+            peer_device_name: "Phone\u{202e}319 284\u{2066}\u{1b}[2K\r".into(),
+        })
+        .await;
+        assert_eq!(decision, SasDecision::Rejected);
+        assert_eq!(
+            shown.lock().unwrap().as_slice(),
+            // Escaped, then cut at the width bound.
+            ["Phone\\u{202e}319 284\\u{2066}\\u{1b}[2K…"]
+        );
+    }
+
+    #[tokio::test]
+    async fn ended_pairings_tell_the_host_to_dismiss_an_unanswered_prompt() {
+        let (shown_tx, shown) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let confirm = verifier_confirmer(Box::new(StalledVerifier {
+            shown: Mutex::new(shown_tx),
+            release: Mutex::new(release_rx),
+            cancelled: cancelled.clone(),
+        }));
+        let decision = confirm(SasCheck {
+            sas: "482913".into(),
+            peer_device_id: "peer".into(),
+            peer_device_name: "Phone".into(),
+        });
+        let pairing = tokio::spawn(decision);
+        tokio::task::spawn_blocking(move || shown.recv_timeout(Duration::from_secs(5)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(cancelled.load(Ordering::SeqCst), 0);
+        // The pairing deadline or a peer rejection drops the decision future.
+        pairing.abort();
+        let _ = pairing.await;
+        assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+        release.send(()).unwrap();
+    }
+
+    fn verifier_pair(
+        creator_accepts: bool,
+        joiner_accepts: bool,
+        seen: &Arc<Mutex<Vec<(String, String)>>>,
+    ) -> (Box<dyn SasVerifier>, Box<dyn SasVerifier>) {
+        let (creator_tx, creator_rx) = std::sync::mpsc::channel();
+        let (joiner_tx, joiner_rx) = std::sync::mpsc::channel();
+        (
+            Box::new(ChannelVerifier {
+                accept: creator_accepts,
+                mine: Mutex::new(creator_tx),
+                theirs: Mutex::new(joiner_rx),
+                seen: seen.clone(),
+            }),
+            Box::new(ChannelVerifier {
+                accept: joiner_accepts,
+                mine: Mutex::new(joiner_tx),
+                theirs: Mutex::new(creator_rx),
+                seen: seen.clone(),
+            }),
+        )
+    }
+
+    fn client_at(
+        root: &std::path::Path,
+        device: &str,
+        seed: u8,
+        relay: &str,
+    ) -> Arc<ClipSyncClient> {
+        seed_home(root);
+        let identity = DeviceIdentity::from_bytes(device.into(), [seed; 32]);
+        std::fs::write(
+            AppPaths::from_root(root.into()).identity_file(),
+            serde_json::to_vec(&identity.to_stored()).unwrap(),
+        )
+        .unwrap();
+        let client = ClipSyncClient::new(
+            root.display().to_string(),
+            relay.into(),
+            String::new(),
+            String::new(),
+        )
+        .unwrap();
+        let mut cfg = client.app.store.load_config().unwrap();
+        cfg.sync.enabled = false;
+        cfg.sync.auto_start = false;
+        client.app.store.save_config(&cfg).unwrap();
+        client
+    }
+
+    fn secret_files(client: &ClipSyncClient) -> usize {
+        std::fs::read_dir(&client.app.store.paths.data_dir)
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext == "secret")
+            })
+            .count()
+    }
+
     fn seed_home(root: &std::path::Path) {
         let app = App::open_from(AppPaths::from_root(root.to_path_buf())).unwrap();
         let identity = DeviceIdentity::from_bytes("mobile-test-device".into(), [11; 32]);
@@ -512,6 +821,12 @@ mod tests {
             return;
         };
         let home = std::env::var("CLIPSYNC_TEST_MOBILE_HOME").unwrap();
+        // Background pairings report failures only through `warn!`; print
+        // them on stderr, which the parent test shows when this child fails.
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(std::io::stderr)
+            .try_init();
         let created = ClipSyncClient::new(
             home,
             "http://127.0.0.1:0".into(),
@@ -634,6 +949,84 @@ mod tests {
                 .unwrap(),
             joiner.app.store.load_epoch_key(&joined.into()).unwrap()
         );
+
+        // Verified API: a rejected code stores nothing on the joiner, and the
+        // creator cannot complete a pairing the joiner refused.
+        let relay = format!("http://{address}");
+        let verified_creator_home = tempfile::tempdir().unwrap();
+        let verified_joiner_home = tempfile::tempdir().unwrap();
+        let verified_creator = client_at(
+            verified_creator_home.path(),
+            "mobile-verified-creator",
+            13,
+            &relay,
+        );
+        let verified_joiner = client_at(
+            verified_joiner_home.path(),
+            "mobile-verified-joiner",
+            14,
+            &relay,
+        );
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (creator_verifier, joiner_verifier) = verifier_pair(true, false, &seen);
+        let refused = verified_creator
+            .create_room_verified(creator_verifier)
+            .unwrap();
+        let error = verified_joiner
+            .join_room_verified(refused.pairing_code, joiner_verifier)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("verification code rejected"),
+            "{error}"
+        );
+        assert!(verified_joiner.status().unwrap().room_id.is_none());
+        assert_eq!(secret_files(&verified_joiner), 0);
+        {
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), 2, "both devices were asked to compare");
+            assert_eq!(seen[0].0, seen[1].0, "honest devices show one code");
+            assert!(seen.iter().all(|(_, name)| !name.is_empty()));
+        }
+        seen.lock().unwrap().clear();
+
+        // Both users confirm matching codes: the pairing commits on both.
+        let (creator_verifier, joiner_verifier) = verifier_pair(true, true, &seen);
+        let offer = verified_creator
+            .create_room_verified(creator_verifier)
+            .unwrap();
+        let joined = verified_joiner
+            .join_room_verified(offer.pairing_code, joiner_verifier)
+            .unwrap();
+        assert_eq!(joined, offer.room_id);
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        // The creator stores its room before its configuration. Wait until
+        // both are committed; a failed read is a failure, not "not yet".
+        loop {
+            let room = verified_creator.status().unwrap().room_id;
+            let enabled = verified_creator
+                .app
+                .store
+                .load_config()
+                .unwrap()
+                .sync
+                .enabled;
+            if room.as_deref() == Some(joined.as_str()) && enabled {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < until,
+                "verified creator did not commit completed pairing: room={room:?} sync.enabled={enabled}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_ne!(
+            verified_creator.status().unwrap().room_id.as_deref(),
+            Some(refused.room_id.as_str()),
+            "the refused room must never be committed"
+        );
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].0, seen[1].0);
         std::env::set_var(
             "CLIPSYNC_HOME",
             client.app.store.paths.data_dir.parent().unwrap(),

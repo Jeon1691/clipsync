@@ -7,6 +7,7 @@ mod config;
 mod paths;
 mod replay;
 mod secrets;
+mod sharing;
 mod store;
 
 pub use config::{AppConfig, NotifyConfig, SyncConfig};

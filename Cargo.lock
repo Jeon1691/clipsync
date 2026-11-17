@@ -963,6 +963,7 @@ dependencies = [
  "clipsync-protocol",
  "clipsync-relay",
  "clipsync-storage",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
@@ -1015,6 +1016,7 @@ dependencies = [
  "infer",
  "keyring",
  "parking_lot 0.13.0",
+ "rand 0.9.5",
  "reqwest",
  "serde",
  "serde_json",
@@ -1039,6 +1041,7 @@ dependencies = [
  "hkdf 0.13.0",
  "hmac 0.13.0",
  "rand 0.9.5",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -1100,6 +1103,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "uniffi",
 ]
 

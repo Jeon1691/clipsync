@@ -10,12 +10,15 @@ mod handshake;
 mod loop_guard;
 mod notify;
 mod pairing;
+mod untrusted_text;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "../tests/support/relay_script.rs"]
 mod test_relay;
 
+/// Number of digits in a verification code (SAS).
+pub use clipsync_crypto::SAS_DIGITS;
 pub use engine::{
     oneshot_pull as engine_oneshot_pull, oneshot_push as engine_oneshot_push, run_daemon,
     SyncHandle,
@@ -23,7 +26,12 @@ pub use engine::{
 pub use envelope::EnvelopeRejection;
 pub use error::{CoreError, ExitCode};
 pub use pairing::{
-    begin_create_room, create_room, join_room, leave_room, PendingCreate, RoomOffer,
+    begin_create_room, create_room, display_sas, join_room, leave_room, normalize_sas, parse_sas,
+    PendingCreate, RoomOffer, SasCheck, SasDecision,
+};
+pub use untrusted_text::{
+    is_plain_identifier, sanitize_untrusted, shown_identifier, MAX_PEER_NAME_COLUMNS,
+    MAX_RELAY_MESSAGE_COLUMNS,
 };
 
 use std::io::{IsTerminal, Read};
@@ -82,17 +90,37 @@ impl App {
         Ok(identity)
     }
 
+    /// The stored identity, or a new one set up as [`Self::init`] does.
+    ///
+    /// This never writes back the configuration it read: `status` and every
+    /// command call this while a pairing or `config set` in another process
+    /// may be changing the configuration, and a re-save here would undo that
+    /// change. Storage may still write on its own: `load_config` saves once
+    /// to migrate a legacy webhook secret, and `load_identity` restores a
+    /// missing identity file from the keychain.
     pub fn identity(&self) -> Result<DeviceIdentity, CoreError> {
-        self.init(None)
+        match self.store.secrets.load_identity() {
+            Ok(identity) => {
+                // Still report an unreadable configuration, as `init` does.
+                self.store.load_config()?;
+                Ok(identity)
+            }
+            Err(_) => self.init(None),
+        }
     }
 
-    pub async fn room_create(
+    pub async fn room_create<C, F>(
         &self,
         ttl: Option<std::time::Duration>,
         no_auto_sync: bool,
         json: bool,
         print_code: impl Fn(&RoomOffer),
-    ) -> Result<RoomOffer, CoreError> {
+        confirm: C,
+    ) -> Result<RoomOffer, CoreError>
+    where
+        C: FnOnce(SasCheck) -> F + Send,
+        F: std::future::Future<Output = SasDecision> + Send,
+    {
         let identity = self.identity()?;
         let cfg = self.store.load_config()?;
         let ttl_secs = ttl
@@ -111,12 +139,27 @@ impl App {
             expires_at: offer.expires_at.to_rfc3339(),
             pid: std::process::id(),
             error: None,
+            sas: None,
+            peer_device_name: None,
+            sas_decision: None,
         };
         let _ = self.store.save_pairing_wait(&wait_file);
         print_code(&pending.offer);
-        match pending.wait(&self.store, &identity).await {
+        // A rejected background pairing may be replaced by a newer `room
+        // create` while this one winds down; never overwrite that file.
+        let finish = |result: PairingWait| {
+            let _ = self.store.update_pairing_wait(|current| {
+                let replaced = matches!(
+                    current,
+                    Some(current)
+                        if current.pid != result.pid || current.room_id != result.room_id
+                );
+                ((!replaced).then_some(result), ())
+            });
+        };
+        match pending.wait(&self.store, &identity, confirm).await {
             Ok(()) => {
-                let _ = self.store.save_pairing_wait(&PairingWait {
+                finish(PairingWait {
                     status: "paired".into(),
                     ..wait_file
                 });
@@ -127,7 +170,7 @@ impl App {
                 Ok(offer)
             }
             Err(e) => {
-                let _ = self.store.save_pairing_wait(&PairingWait {
+                finish(PairingWait {
                     status: "failed".into(),
                     error: Some(e.to_string()),
                     ..wait_file
@@ -137,14 +180,19 @@ impl App {
         }
     }
 
-    pub async fn room_join(
+    pub async fn room_join<C, F>(
         &self,
         code: &str,
         no_auto_sync: bool,
-    ) -> Result<clipsync_storage::RoomRecord, CoreError> {
+        confirm: C,
+    ) -> Result<clipsync_storage::RoomRecord, CoreError>
+    where
+        C: FnOnce(SasCheck) -> F + Send,
+        F: std::future::Future<Output = SasDecision> + Send,
+    {
         let identity = self.identity()?;
         let cfg = self.store.load_config()?;
-        let room = join_room(&self.store, &identity, &cfg, code).await?;
+        let room = join_room(&self.store, &identity, &cfg, code, confirm).await?;
         if !no_auto_sync {
             maybe_start_daemon(&self.store)?;
         }
@@ -551,6 +599,32 @@ pub fn device_id_or_new(store: &LocalStore) -> Result<DeviceId, CoreError> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod regression_tests {
     #[test]
+    fn reading_the_identity_leaves_the_configuration_file_untouched() {
+        // `status` and every command read the identity while a pairing or
+        // `config set` in another process may be changing the configuration.
+        // Writing back what was read would undo that change.
+        let root = tempfile::tempdir().unwrap();
+        let app = crate::App::open_from(super::AppPaths::from_root(root.path().into())).unwrap();
+        let identity = app.init(None).unwrap();
+        let config = app.store.paths.config_file();
+        let mut cfg = app.store.load_config().unwrap();
+        cfg.sync.enabled = true;
+        app.store.save_config(&cfg).unwrap();
+        // A comment marks the bytes another writer left; a rewrite drops it.
+        let written = format!(
+            "# written by another process\n{}",
+            std::fs::read_to_string(&config).unwrap()
+        );
+        std::fs::write(&config, &written).unwrap();
+        assert_eq!(
+            app.identity().unwrap().device_id,
+            identity.device_id,
+            "the stored identity is returned"
+        );
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), written);
+    }
+
+    #[test]
     fn http_requests_identify_the_current_package_version() {
         const CHILD: &str = "CLIPSYNC_TEST_USER_AGENT_CHILD";
         if std::env::var_os(CHILD).is_none() {
@@ -728,7 +802,9 @@ mod regression_tests {
                 relay_url: relay.url.clone(),
                 ..Default::default()
             };
-            let join = crate::pairing::join_room(&store, &identity, &cfg, "123456")
+            let join = crate::pairing::join_room(&store, &identity, &cfg, "123456", |_| async {
+                crate::SasDecision::Rejected
+            })
                 .await
                 .unwrap_err();
             assert!(

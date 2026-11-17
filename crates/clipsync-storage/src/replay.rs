@@ -123,7 +123,7 @@ impl Drop for ReplayStateLock {
 /// Android, and the workspace MSRV is lower. std uses the same `flock` call on
 /// the other Unix targets, so the semantics are unchanged.
 #[cfg(unix)]
-fn lock_exclusive(file: &File) -> std::io::Result<()> {
+pub(crate) fn lock_exclusive(file: &File) -> std::io::Result<()> {
     use rustix::fs::{flock, FlockOperation};
     loop {
         match flock(file, FlockOperation::LockExclusive) {
@@ -135,7 +135,7 @@ fn lock_exclusive(file: &File) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-fn unlock(file: &File) -> std::io::Result<()> {
+pub(crate) fn unlock(file: &File) -> std::io::Result<()> {
     rustix::fs::flock(file, rustix::fs::FlockOperation::Unlock).map_err(std::io::Error::from)
 }
 
@@ -146,7 +146,7 @@ fn unlock(file: &File) -> std::io::Result<()> {
     clippy::disallowed_methods,
     reason = "Not Unix, so not Android; std's lock is LockFileEx on Windows."
 )]
-fn lock_exclusive(file: &File) -> std::io::Result<()> {
+pub(crate) fn lock_exclusive(file: &File) -> std::io::Result<()> {
     file.lock()
 }
 
@@ -155,17 +155,16 @@ fn lock_exclusive(file: &File) -> std::io::Result<()> {
     clippy::disallowed_methods,
     reason = "Not Unix, so not Android; std's unlock is UnlockFile on Windows."
 )]
-fn unlock(file: &File) -> std::io::Result<()> {
+pub(crate) fn unlock(file: &File) -> std::io::Result<()> {
     file.unlock()
 }
 
 impl LocalStore {
     pub fn load_replay_state(&self) -> Result<ReplayState> {
-        let path = self.paths.replay_state_file();
-        if !path.exists() {
-            return Ok(ReplayState::default());
+        match crate::sharing::read_if_present(&self.paths.replay_state_file())? {
+            Some(raw) => Ok(serde_json::from_str(&raw)?),
+            None => Ok(ReplayState::default()),
         }
-        Ok(serde_json::from_slice(&std::fs::read(path)?)?)
     }
 
     fn save_replay_state(&self, state: &ReplayState) -> Result<()> {

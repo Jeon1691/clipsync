@@ -112,6 +112,29 @@ On device B (another machine, or another `CLIPSYNC_HOME`):
 clipsync room join 482913
 ```
 
+Both devices then show a 6-digit verification code. On device A:
+
+```bash
+clipsync room confirm
+```
+
+Check that the two codes are the same, then confirm on both devices by typing
+the code shown on the other device. At a prompt in a terminal, after the code
+is displayed, `yes` is also accepted. If they differ, answer anything else, or
+run `clipsync room reject` on A: pairing stops on both devices and nothing is
+stored. A mismatch means something other than your device joined, for example
+a relay in the middle or someone who guessed the code. With `--foreground`,
+device A asks in the same terminal instead of `room confirm`.
+
+For scripts, `clipsync room confirm <CODE>` takes the 6 digits shown on the
+other device and checks them against this device's code; `yes` is refused
+there, because that command has shown nothing to compare. Likewise, when
+`room join` reads its answer from a pipe instead of a terminal, only the
+digits confirm. `--insecure-skip-sas` on `room create` / `room join` skips the
+comparison and removes that protection; use it only for test setups on a relay
+you trust. Devices on a version without verification codes still pair, but
+cannot show a code to compare.
+
 `clipsync init` is optional. Identity is created on Homebrew install and on
 first use.
 
@@ -166,8 +189,10 @@ clipsync status
 
 ```
 clipsync init [--relay-url URL]      # optional; also runs on install and first use
-clipsync room create [--ttl 10m] [--no-auto-sync] [--foreground]
-clipsync room join <CODE> [--no-auto-sync]
+clipsync room create [--ttl 10m] [--no-auto-sync] [--foreground] [--insecure-skip-sas]
+clipsync room join <CODE> [--no-auto-sync] [--insecure-skip-sas]
+clipsync room confirm [CODE]         # answer the verification code of a background create
+clipsync room reject
 clipsync room leave --yes
 clipsync room list
 clipsync push [--type auto|text|image|files] [--file <path>...]
@@ -218,6 +243,7 @@ clipsync room create
 
 - SPAKE2 balanced PAKE; the 6-digit code is only a one-time password
 - Mutual key confirmation bound to protocol version, session, device IDs, and SPAKE2 transcript
+- 6-digit verification code compared on both devices before anything is stored; it catches a guessed code or a relay in the middle, except a relay that searches offline for matching codes (see docs/security.md)
 - AES-256-GCM payloads, HKDF-SHA-256, X25519 device identity
 - Noise `KK` handshake on reconnect
 - Text latest-one in-memory queue, 60s TTL; images/files are online-only 256 KiB chunks

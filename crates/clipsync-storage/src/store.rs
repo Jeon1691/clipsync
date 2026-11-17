@@ -49,6 +49,26 @@ pub struct PairingWait {
     pub pid: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// SAS the background worker asks the user to compare (status `confirm_sas`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sas: Option<String>,
+    /// Relay-reported name of the joining device, shown next to the SAS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_device_name: Option<String>,
+    /// The user's answer, written by `clipsync room confirm` or `room reject`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sas_decision: Option<String>,
+}
+
+/// Exclusive lock on the pairing lock file, held until dropped.
+struct PairingFileLock(std::fs::File);
+
+impl Drop for PairingFileLock {
+    fn drop(&mut self) {
+        // Closing the handle releases the lock too, but Windows may do that
+        // lazily; unlock explicitly so the next writer is not delayed.
+        let _ = crate::replay::unlock(&self.0);
+    }
 }
 
 #[derive(Clone)]
@@ -76,11 +96,9 @@ impl LocalStore {
     }
 
     pub fn load_config(&self) -> Result<AppConfig> {
-        let path = self.paths.config_file();
-        if !path.exists() {
+        let Some(raw) = crate::sharing::read_if_present(&self.paths.config_file())? else {
             return Ok(AppConfig::default());
-        }
-        let raw = std::fs::read_to_string(path)?;
+        };
         let mut cfg: AppConfig = toml::from_str(&raw)?;
         if let Some(webhook) = cfg.webhook.as_mut() {
             if webhook.secret.is_empty() {
@@ -110,11 +128,9 @@ impl LocalStore {
     }
 
     pub fn load_state(&self) -> Result<StateFile> {
-        let path = self.paths.state_file();
-        if !path.exists() {
+        let Some(raw) = crate::sharing::read_if_present(&self.paths.state_file())? else {
             return Ok(StateFile::default());
-        }
-        let raw = std::fs::read_to_string(path)?;
+        };
         let mut state: StateFile = serde_json::from_str(&raw)?;
         let legacy = state.rooms.iter().any(|room| !room.device_token.is_empty());
         for room in &mut state.rooms {
@@ -140,7 +156,77 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Replace the pairing file. Writes hold the pairing lock, so they never
+    /// interleave with [`Self::update_pairing_wait`].
     pub fn save_pairing_wait(&self, wait: &PairingWait) -> Result<()> {
+        let _lock = self.lock_pairing_file()?;
+        self.write_pairing_wait(wait)
+    }
+
+    pub fn load_pairing_wait(&self) -> Result<Option<PairingWait>> {
+        self.load_pairing_wait_pausing(crate::sharing::pause_before_retry)
+    }
+
+    /// [`Self::load_pairing_wait`] with the pause between retries supplied,
+    /// so tests can change the file at exactly that point.
+    fn load_pairing_wait_pausing(&self, pause: impl FnMut()) -> Result<Option<PairingWait>> {
+        let path = self.paths.pairing_file();
+        let raw = crate::sharing::read_unless_removed(
+            || std::fs::read_to_string(&path),
+            crate::sharing::ACCESS_DENIED_RETRIES,
+            pause,
+        )?;
+        Ok(raw.map(|raw| serde_json::from_str(&raw)).transpose()?)
+    }
+
+    /// Read, change and write the pairing file as one step.
+    ///
+    /// The background worker and `room confirm`/`room reject` run in separate
+    /// processes and both change this file. `update` sees the current
+    /// contents and returns what to write (`None` writes nothing) plus a
+    /// value for the caller. An exclusive lock is held throughout, so no
+    /// other writer's change can land between the read and the write and be
+    /// lost.
+    pub fn update_pairing_wait<T>(
+        &self,
+        update: impl FnOnce(Option<PairingWait>) -> (Option<PairingWait>, T),
+    ) -> Result<T> {
+        let _lock = self.lock_pairing_file()?;
+        let (next, out) = update(self.load_pairing_wait()?);
+        if let Some(next) = next {
+            self.write_pairing_wait(&next)?;
+        }
+        Ok(out)
+    }
+
+    pub fn clear_pairing_wait(&self) {
+        // Without the lock the file may still be removed; a writer that is
+        // mid-update would then just recreate it, as before this lock existed.
+        let _lock = self.lock_pairing_file();
+        let _ = std::fs::remove_file(self.paths.pairing_file());
+    }
+
+    /// Hold an exclusive OS lock on a sidecar file until the guard drops.
+    /// The lock file is never removed: deleting it would let two processes
+    /// lock different files under the same name.
+    fn lock_pairing_file(&self) -> Result<PairingFileLock> {
+        let path = self.paths.pairing_lock_file();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+        set_private_file(&path)?;
+        // `flock` on Unix (Android included), `LockFileEx` on Windows.
+        crate::replay::lock_exclusive(&file)?;
+        Ok(PairingFileLock(file))
+    }
+
+    fn write_pairing_wait(&self, wait: &PairingWait) -> Result<()> {
         let path = self.paths.pairing_file();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -148,19 +234,6 @@ impl LocalStore {
         // The pairing code is a live one-time password: write it like other secrets.
         crate::secrets::write_private(&path, &serde_json::to_vec_pretty(wait)?)?;
         Ok(())
-    }
-
-    pub fn load_pairing_wait(&self) -> Result<Option<PairingWait>> {
-        let path = self.paths.pairing_file();
-        if !path.exists() {
-            return Ok(None);
-        }
-        let raw = std::fs::read_to_string(path)?;
-        Ok(Some(serde_json::from_str(&raw)?))
-    }
-
-    pub fn clear_pairing_wait(&self) {
-        let _ = std::fs::remove_file(self.paths.pairing_file());
     }
 
     pub fn current_room(&self) -> Result<RoomRecord> {
@@ -205,7 +278,8 @@ impl LocalStore {
 
     // These credentials use canonical private files, without stale keychain fallback.
     fn load_credential(&self, name: &str) -> Result<String> {
-        let value = std::fs::read_to_string(self.paths.data_dir.join(format!("{name}.secret")))?;
+        let value =
+            crate::sharing::read_existing(&self.paths.data_dir.join(format!("{name}.secret")))?;
         if value.is_empty() {
             return Err(StorageError::Secret("empty credential file".into()));
         }
@@ -319,6 +393,9 @@ mod failure_tests {
             expires_at: "2026-11-15T00:00:00Z".into(),
             pid: 1,
             error: None,
+            sas: None,
+            peer_device_name: None,
+            sas_decision: None,
         }
     }
 
@@ -359,6 +436,68 @@ mod failure_tests {
         }
     }
 
+    /// Remove `path` while `_reader` keeps it open, as `room leave` does
+    /// while another process is reading the file. On Windows the file stays
+    /// "delete pending" until that handle closes: closing a handle opened
+    /// with `FILE_FLAG_DELETE_ON_CLOSE` marks it for deletion, and every
+    /// open in the meantime is refused with "access denied".
+    #[cfg(windows)]
+    fn remove_while_open(path: &std::path::Path, _reader: &std::fs::File) {
+        use std::os::windows::fs::OpenOptionsExt;
+        // `DELETE` access right and `FILE_FLAG_DELETE_ON_CLOSE`, from the
+        // Win32 `CreateFileW` documentation.
+        const DELETE: u32 = 0x0001_0000;
+        const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+        drop(
+            std::fs::OpenOptions::new()
+                .access_mode(DELETE)
+                .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+                .open(path)
+                .unwrap(),
+        );
+        assert_eq!(
+            std::fs::read(path).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "the file should be delete pending"
+        );
+    }
+
+    #[cfg(not(windows))]
+    fn remove_while_open(path: &std::path::Path, _reader: &std::fs::File) {
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_pairing_file_removed_while_it_is_read_reads_as_no_pairing() {
+        let (_root, store) = fixture();
+        store.save_pairing_wait(&waiting()).unwrap();
+        let path = store.paths.pairing_file();
+        let mut reader = Some(std::fs::File::open(&path).unwrap());
+        remove_while_open(&path, reader.as_ref().unwrap());
+        // The other reader finishes during the first pause, which completes
+        // the delete.
+        let loaded = store.load_pairing_wait_pausing(|| drop(reader.take()));
+        assert!(loaded.unwrap().is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_pairing_file_that_stays_delete_pending_is_an_error_after_bounded_retries() {
+        let (_root, store) = fixture();
+        store.save_pairing_wait(&waiting()).unwrap();
+        let path = store.paths.pairing_file();
+        let reader = std::fs::File::open(&path).unwrap();
+        remove_while_open(&path, &reader);
+        let mut pauses = 0;
+        let error = store.load_pairing_wait_pausing(|| pauses += 1).unwrap_err();
+        assert!(matches!(
+            error,
+            StorageError::Io(ref io) if io.kind() == std::io::ErrorKind::PermissionDenied
+        ));
+        assert_eq!(pauses, crate::sharing::ACCESS_DENIED_RETRIES);
+        drop(reader);
+    }
+
     #[test]
     fn failed_metadata_replacements_leave_existing_files_or_directories_available() {
         let (_root, store) = fixture();
@@ -371,11 +510,16 @@ mod failure_tests {
         std::fs::create_dir(store.paths.pairing_file()).unwrap();
         assert!(store.save_pairing_wait(&waiting()).is_err());
         assert!(store.paths.pairing_file().is_dir());
-        // The failed replacement must not leave a temporary copy of the code behind.
-        assert_eq!(
-            std::fs::read_dir(&store.paths.runtime_dir).unwrap().count(),
-            1
-        );
+        // The failed replacement must not leave a temporary copy of the code
+        // behind: only the pairing file and its lock file remain.
+        let left: Vec<_> = std::fs::read_dir(&store.paths.runtime_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                *path != store.paths.pairing_file() && *path != store.paths.pairing_lock_file()
+            })
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
     }
 
     #[cfg(unix)]
@@ -406,6 +550,60 @@ mod failure_tests {
             store.load_pairing_wait().unwrap().unwrap().pairing_code,
             waiting().pairing_code
         );
+    }
+
+    #[test]
+    fn pairing_file_updates_are_serialized_so_an_answer_is_never_lost() {
+        use std::sync::mpsc;
+        // Long enough for the second update to reach its read if nothing
+        // serialized it; a correct lock passes no matter how long this is.
+        const SECOND_UPDATE_HEAD_START: std::time::Duration = std::time::Duration::from_millis(200);
+        let (_root, store) = fixture();
+        store.save_pairing_wait(&waiting()).unwrap();
+        let (inside_tx, inside_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        // The background worker publishes the verification code...
+        let publish = std::thread::spawn({
+            let store = store.clone();
+            move || {
+                store.update_pairing_wait(|current| {
+                    inside_tx.send(()).unwrap();
+                    go_rx.recv().unwrap();
+                    let mut wait = current.unwrap();
+                    wait.status = "confirm_sas".into();
+                    wait.sas_decision = None;
+                    (Some(wait), ())
+                })
+            }
+        });
+        inside_rx.recv().unwrap();
+        // ...while `room reject` records the user's answer.
+        let reject = std::thread::spawn({
+            let store = store.clone();
+            move || {
+                store.update_pairing_wait(|current| {
+                    let mut wait = current.unwrap();
+                    wait.sas_decision = Some("rejected".into());
+                    (Some(wait), ())
+                })
+            }
+        });
+        std::thread::sleep(SECOND_UPDATE_HEAD_START);
+        go_tx.send(()).unwrap();
+        publish.join().unwrap().unwrap();
+        reject.join().unwrap().unwrap();
+        let settled = store.load_pairing_wait().unwrap().unwrap();
+        assert_eq!(settled.status, "confirm_sas");
+        assert_eq!(settled.sas_decision.as_deref(), Some("rejected"));
+        // Declining to write leaves the file as it was.
+        let seen = store
+            .update_pairing_wait(|current| (None, current.map(|wait| wait.status)))
+            .unwrap();
+        assert_eq!(seen.as_deref(), Some("confirm_sas"));
+        store.clear_pairing_wait();
+        assert!(store
+            .update_pairing_wait(|current| (None, current.is_none()))
+            .unwrap());
     }
 
     #[test]

@@ -63,6 +63,11 @@ pub struct RelayConnection {
     outgoing: mpsc::Sender<Outgoing>,
 }
 
+/// How long a closing connection keeps reading for the peer's close reply.
+/// A responsive peer answers within a round trip; the bound keeps a peer that
+/// stopped reading from holding the task.
+const CLOSE_HANDSHAKE_WAIT: Duration = Duration::from_secs(2);
+
 #[expect(
     clippy::large_enum_variant,
     reason = "The 256-entry queue bounds inline control messages; avoid per-message allocation and preserve the public Incoming layout."
@@ -143,6 +148,18 @@ impl RelayConnection {
                             }
                             Some(Outgoing::Close) | None => {
                                 let _ = sink.send(Message::Close(None)).await;
+                                // Read until the peer answers the close. A socket
+                                // closed with unread input is reset, and a reset can
+                                // discard frames sent just before, such as the
+                                // `error` that aborts a pairing on the relay.
+                                let _ = tokio::time::timeout(CLOSE_HANDSHAKE_WAIT, async {
+                                    while let Some(Ok(message)) = stream.next().await {
+                                        if matches!(message, Message::Close(_)) {
+                                            break;
+                                        }
+                                    }
+                                })
+                                .await;
                                 break;
                             }
                         }

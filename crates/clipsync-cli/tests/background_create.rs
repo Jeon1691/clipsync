@@ -130,6 +130,91 @@ fn json_out(out: &std::process::Output) -> serde_json::Value {
     })
 }
 
+/// Start a CLI process whose stdin and stdout the test drives, so it can
+/// compare verification codes between two devices the way a user would.
+fn spawn_cli(home: &Path, relay: &str, args: &[&str]) -> tokio::process::Child {
+    use std::process::Stdio;
+    tokio::process::Command::new(bin())
+        .args(args)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("RUST_LOG", "error")
+        .env("CLIPSYNC_HOME", home)
+        .env("CLIPSYNC_RELAY_URL", relay)
+        .env("CLIPSYNC_NO_DAEMON", "1")
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost")
+        .env_remove("CLIPSYNC_LISTEN")
+        .env_remove("CLIPSYNC_CA_FILE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("run clipsync")
+}
+
+/// Read stdout lines until one starts with `prefix`; return the remainder.
+async fn line_with_prefix(
+    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    prefix: &str,
+) -> String {
+    use tokio::io::AsyncBufReadExt;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let mut line = String::new();
+            assert_ne!(
+                reader.read_line(&mut line).await.unwrap(),
+                0,
+                "stdout closed before {prefix:?}"
+            );
+            if let Some(rest) = line.trim_end().strip_prefix(prefix) {
+                return rest.to_string();
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no {prefix:?} line"))
+}
+
+fn digits(text: &str) -> String {
+    text.chars().filter(char::is_ascii_digit).collect()
+}
+
+fn waiting_store(home: &Path) -> clipsync_storage::LocalStore {
+    clipsync_storage::LocalStore::open_from(clipsync_storage::AppPaths::from_root(home.into()))
+        .unwrap()
+}
+
+/// Poll the background worker's pairing file until it asks for the SAS.
+async fn background_sas(home: &Path) -> clipsync_storage::PairingWait {
+    let store = waiting_store(home);
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Ok(Some(wait)) = store.load_pairing_wait() {
+                if wait.status == "confirm_sas" && wait.sas.is_some() {
+                    return wait;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("background worker never asked to confirm the verification code")
+}
+
+fn secrets_in(home: &Path) -> Vec<String> {
+    let store = waiting_store(home);
+    std::fs::read_dir(&store.paths.data_dir)
+        .map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".secret"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn kill_pid(pid: u32) {
     #[cfg(unix)]
     {
@@ -157,12 +242,13 @@ async fn foreground_offer_is_flushed_before_a_peer_joins() {
         .env("CLIPSYNC_NO_DAEMON", "1")
         .env_remove("CLIPSYNC_LISTEN")
         .env_remove("CLIPSYNC_CA_FILE")
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .unwrap();
+    let mut creator_input = child.stdin.take().unwrap();
     let mut output = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
     tokio::time::timeout(Duration::from_secs(30), output.read_line(&mut line))
@@ -194,7 +280,7 @@ async fn foreground_offer_is_flushed_before_a_peer_joins() {
     }
     let peer = TempDir::new().unwrap();
     seed_identity_file(peer.path());
-    let joined = clipsync(
+    let mut joiner = spawn_cli(
         peer.path(),
         &relay,
         &[
@@ -205,12 +291,48 @@ async fn foreground_offer_is_flushed_before_a_peer_joins() {
             "--no-auto-sync",
         ],
     );
-    assert!(
-        joined.status.success(),
-        "{}",
-        String::from_utf8_lossy(&joined.stderr)
-    );
-    let joined = json_out(&joined);
+    let mut joiner_input = joiner.stdin.take().unwrap();
+    let mut joiner_output = BufReader::new(joiner.stdout.take().unwrap());
+    let joiner_sas: serde_json::Value =
+        serde_json::from_str(&line_with_prefix(&mut joiner_output, "").await).unwrap();
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(20), output.read_line(&mut line))
+        .await
+        .unwrap()
+        .unwrap();
+    let creator_sas: serde_json::Value = serde_json::from_str(&line).unwrap();
+    for event in [&creator_sas, &joiner_sas] {
+        assert_eq!(event["event"], "sas_confirmation");
+        assert_eq!(event["sas"].as_str().unwrap().len(), 6);
+        assert!(!event["peer_device_name"].as_str().unwrap().is_empty());
+    }
+    assert_eq!(creator_sas["sas"], joiner_sas["sas"]);
+    // Each user types the code the other device shows.
+    use tokio::io::AsyncWriteExt;
+    for (input, other) in [
+        (&mut creator_input, &joiner_sas),
+        (&mut joiner_input, &creator_sas),
+    ] {
+        input
+            .write_all(format!("{}\n", other["sas"].as_str().unwrap()).as_bytes())
+            .await
+            .unwrap();
+        input.flush().await.unwrap();
+    }
+    let mut joined = String::new();
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        joiner_output.read_to_string(&mut joined),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(10), joiner.wait())
+        .await
+        .unwrap()
+        .unwrap()
+        .success());
+    let joined: serde_json::Value = serde_json::from_str(joined.trim()).unwrap();
     let mut completed = String::new();
     tokio::time::timeout(
         Duration::from_secs(10),
@@ -316,16 +438,54 @@ async fn room_create_background_returns_then_pairs() {
         "second background create should fail while first is waiting"
     );
 
-    let join = clipsync(b.path(), &relay, &["room", "join", code, "--no-auto-sync"]);
+    let mut joiner = spawn_cli(b.path(), &relay, &["room", "join", code, "--no-auto-sync"]);
+    let mut joiner_input = joiner.stdin.take().unwrap();
+    let mut joiner_output = tokio::io::BufReader::new(joiner.stdout.take().unwrap());
+    let joiner_sas = digits(&line_with_prefix(&mut joiner_output, "verification code: ").await);
+    let creator_wait = background_sas(a.path()).await;
+    assert_eq!(creator_wait.sas.as_deref(), Some(joiner_sas.as_str()));
+    assert!(!creator_wait
+        .peer_device_name
+        .as_deref()
+        .unwrap_or_default()
+        .is_empty());
+    let status = json_out(&clipsync(a.path(), &relay, &["--json", "status"]));
+    assert_eq!(status["pairing"]["status"], "confirm_sas");
+    assert_eq!(status["pairing"]["sas"], joiner_sas.as_str());
+    // The joiner's user types the creator's code; the creator's user passes
+    // the joiner's code to `room confirm`.
+    use tokio::io::AsyncWriteExt;
+    joiner_input
+        .write_all(format!("{}\n", creator_wait.sas.as_deref().unwrap()).as_bytes())
+        .await
+        .unwrap();
+    joiner_input.flush().await.unwrap();
+    let confirm = clipsync(a.path(), &relay, &["room", "confirm", &joiner_sas]);
+    if !confirm.status.success() {
+        kill_pid(pid);
+        panic!(
+            "confirm failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&confirm.stdout),
+            String::from_utf8_lossy(&confirm.stderr)
+        );
+    }
+    assert!(String::from_utf8_lossy(&confirm.stdout).contains("paired"));
+    let join = tokio::time::timeout(Duration::from_secs(20), joiner.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut join_stdout = String::new();
+    tokio::io::AsyncReadExt::read_to_string(&mut joiner_output, &mut join_stdout)
+        .await
+        .unwrap();
     if !join.status.success() {
         kill_pid(pid);
         panic!(
-            "join failed: stdout={} stderr={}",
-            String::from_utf8_lossy(&join.stdout),
+            "join failed: stdout={join_stdout} stderr={}",
             String::from_utf8_lossy(&join.stderr)
         );
     }
-    assert!(String::from_utf8_lossy(&join.stdout).contains("joined room"));
+    assert!(join_stdout.contains("joined room"));
 
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut room = None;
@@ -354,7 +514,170 @@ async fn room_create_background_returns_then_pairs() {
         panic!("creator never recorded the room after background pairing");
     }
     assert_eq!(room.as_deref(), Some(waiting.room_id.as_str()));
-    assert!(String::from_utf8_lossy(&join.stdout).contains(&waiting.room_id));
+    assert!(join_stdout.contains(&waiting.room_id));
+    relay_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mismatched_or_rejected_verification_codes_store_nothing_on_either_device() {
+    let (relay, relay_task) = start_relay().await;
+    for reject_command in [false, true] {
+        let a = TempDir::new().unwrap();
+        let b = TempDir::new().unwrap();
+        seed_identity_file(a.path());
+        seed_identity_file(b.path());
+        let create = clipsync(
+            a.path(),
+            &relay,
+            &["--json", "room", "create", "--no-auto-sync"],
+        );
+        assert!(
+            create.status.success(),
+            "{}",
+            String::from_utf8_lossy(&create.stderr)
+        );
+        let offer = json_out(&create);
+        let code = offer["pairing_code"].as_str().unwrap();
+        let pid = offer["pid"].as_u64().unwrap() as u32;
+        let mut joiner = spawn_cli(b.path(), &relay, &["room", "join", code, "--no-auto-sync"]);
+        let joiner_input = joiner.stdin.take().unwrap();
+        let mut joiner_output = tokio::io::BufReader::new(joiner.stdout.take().unwrap());
+        let joiner_sas = digits(&line_with_prefix(&mut joiner_output, "verification code: ").await);
+        let creator_wait = background_sas(a.path()).await;
+        assert_eq!(creator_wait.sas.as_deref(), Some(joiner_sas.as_str()));
+        // `room confirm` shows no code before reading its argument, so "yes"
+        // compares nothing: it is refused and leaves the request unanswered.
+        for not_a_code in ["yes", "y"] {
+            let refused = clipsync(a.path(), &relay, &["room", "confirm", not_a_code]);
+            assert!(!refused.status.success(), "{not_a_code:?} confirmed");
+            let stderr = String::from_utf8_lossy(&refused.stderr);
+            assert!(stderr.contains("digits"), "{stderr}");
+            let unanswered = waiting_store(a.path())
+                .load_pairing_wait()
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                (unanswered.status.as_str(), unanswered.sas_decision),
+                ("confirm_sas", None)
+            );
+        }
+        let answer = if reject_command {
+            clipsync(a.path(), &relay, &["room", "reject"])
+        } else {
+            // A code that differs from the creator's in every digit.
+            let wrong: String = joiner_sas
+                .chars()
+                .map(|digit| if digit == '0' { '1' } else { '0' })
+                .collect();
+            clipsync(a.path(), &relay, &["room", "confirm", &wrong])
+        };
+        let answer_stderr = String::from_utf8_lossy(&answer.stderr).into_owned();
+        if reject_command {
+            assert!(answer.status.success(), "{answer_stderr}");
+            assert!(String::from_utf8_lossy(&answer.stdout).contains("nothing was stored"));
+        } else {
+            assert!(!answer.status.success());
+            assert!(answer_stderr.contains("does not match"), "{answer_stderr}");
+        }
+        // The joiner's user also sees no matching code and gives up.
+        drop(joiner_input);
+        let join = tokio::time::timeout(Duration::from_secs(20), joiner.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!join.status.success());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let wait = waiting_store(a.path())
+                .load_pairing_wait()
+                .unwrap()
+                .unwrap();
+            if wait.status == "failed" {
+                assert!(
+                    wait.error
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("rejected"),
+                    "{:?}",
+                    wait.error
+                );
+                break;
+            }
+            if Instant::now() > deadline {
+                kill_pid(pid);
+                panic!("background worker did not abort: {}", wait.status);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        for home in [a.path(), b.path()] {
+            let rooms = json_out(&clipsync(home, &relay, &["--json", "room", "list"]));
+            assert_eq!(rooms, serde_json::json!([]));
+            assert!(secrets_in(home).is_empty());
+        }
+    }
+    relay_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn piped_yes_does_not_confirm_a_join() {
+    // A script that pipes "yes" answers before anyone compared the codes.
+    // Without a terminal only the other device's digits confirm.
+    let (relay, relay_task) = start_relay().await;
+    let a = TempDir::new().unwrap();
+    let b = TempDir::new().unwrap();
+    seed_identity_file(a.path());
+    seed_identity_file(b.path());
+    let create = clipsync(
+        a.path(),
+        &relay,
+        &["--json", "room", "create", "--no-auto-sync"],
+    );
+    assert!(
+        create.status.success(),
+        "{}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let offer = json_out(&create);
+    let code = offer["pairing_code"].as_str().unwrap();
+    let pid = offer["pid"].as_u64().unwrap() as u32;
+    let mut joiner = spawn_cli(b.path(), &relay, &["room", "join", code, "--no-auto-sync"]);
+    let mut joiner_input = joiner.stdin.take().unwrap();
+    let mut joiner_output = tokio::io::BufReader::new(joiner.stdout.take().unwrap());
+    line_with_prefix(&mut joiner_output, "verification code: ").await;
+    use tokio::io::AsyncWriteExt;
+    joiner_input.write_all(b"yes\n").await.unwrap();
+    joiner_input.flush().await.unwrap();
+    let join = tokio::time::timeout(Duration::from_secs(20), joiner.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    if join.status.success() {
+        kill_pid(pid);
+        panic!("a piped \"yes\" confirmed the join");
+    }
+    let stderr = String::from_utf8_lossy(&join.stderr);
+    assert!(stderr.contains("interactive"), "{stderr}");
+    // The creator's worker stops on the joiner's abort notice.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let wait = waiting_store(a.path())
+            .load_pairing_wait()
+            .unwrap()
+            .unwrap();
+        if wait.status == "failed" {
+            break;
+        }
+        if Instant::now() > deadline {
+            kill_pid(pid);
+            panic!("background worker did not abort: {}", wait.status);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    for home in [a.path(), b.path()] {
+        let rooms = json_out(&clipsync(home, &relay, &["--json", "room", "list"]));
+        assert_eq!(rooms, serde_json::json!([]));
+        assert!(secrets_in(home).is_empty());
+    }
     relay_task.abort();
 }
 
@@ -364,10 +687,17 @@ async fn room_create_auto_inits_without_explicit_init() {
     let a = TempDir::new().unwrap();
     let b = TempDir::new().unwrap();
     let started = Instant::now();
+    // Scripted setups may opt out of the comparison explicitly on both sides.
     let create = clipsync(
         a.path(),
         &relay,
-        &["--json", "room", "create", "--no-auto-sync"],
+        &[
+            "--json",
+            "room",
+            "create",
+            "--no-auto-sync",
+            "--insecure-skip-sas",
+        ],
     );
     assert!(
         started.elapsed() < Duration::from_secs(10),
@@ -385,7 +715,14 @@ async fn room_create_auto_inits_without_explicit_init() {
     let join = clipsync(
         b.path(),
         &relay,
-        &["--json", "room", "join", code, "--no-auto-sync"],
+        &[
+            "--json",
+            "room",
+            "join",
+            code,
+            "--no-auto-sync",
+            "--insecure-skip-sas",
+        ],
     );
     if !join.status.success() {
         kill_pid(pid);
@@ -394,6 +731,403 @@ async fn room_create_auto_inits_without_explicit_init() {
             String::from_utf8_lossy(&join.stderr)
         );
     }
+    assert!(String::from_utf8_lossy(&join.stderr).contains("--insecure-skip-sas"));
+    assert_eq!(json_out(&join)["role"], "member");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejecting_before_a_join_lets_a_new_room_create_replace_the_pairing() {
+    let (relay, relay_task) = start_relay().await;
+    let a = TempDir::new().unwrap();
+    seed_identity_file(a.path());
+    let first = clipsync(
+        a.path(),
+        &relay,
+        &["--json", "room", "create", "--no-auto-sync"],
+    );
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first = json_out(&first);
+    let first_pid = first["pid"].as_u64().unwrap() as u32;
+    let blocked = clipsync(a.path(), &relay, &["room", "create", "--no-auto-sync"]);
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("room join"));
+    // "yes" before anyone joined would approve a code nobody has seen yet.
+    let premature = clipsync(a.path(), &relay, &["room", "confirm", "yes"]);
+    assert!(!premature.status.success());
+    assert!(String::from_utf8_lossy(&premature.stderr).contains("digits"));
+    let unanswered = waiting_store(a.path())
+        .load_pairing_wait()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (unanswered.status.as_str(), unanswered.sas_decision),
+        ("waiting", None)
+    );
+
+    let rejected = clipsync(a.path(), &relay, &["--json", "room", "reject"]);
+    assert!(
+        rejected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert_eq!(json_out(&rejected)["joined"], false);
+
+    let second = clipsync(
+        a.path(),
+        &relay,
+        &["--json", "room", "create", "--no-auto-sync"],
+    );
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second = json_out(&second);
+    let second_pid = second["pid"].as_u64().unwrap() as u32;
+    assert_ne!(second_pid, first_pid);
+    assert_ne!(second["pairing_code"], first["pairing_code"]);
+    let wait = waiting_store(a.path())
+        .load_pairing_wait()
+        .unwrap()
+        .unwrap();
+    assert_eq!((wait.status.as_str(), wait.pid), ("waiting", second_pid));
+    assert!(
+        wait.sas_decision.is_none(),
+        "the new pairing starts unanswered"
+    );
+    kill_pid(first_pid);
+    kill_pid(second_pid);
+    relay_task.abort();
+}
+
+/// A CLI process whose stdin, stdout and stderr are a pseudo-terminal, so it
+/// behaves as it would for a person typing at a real terminal.
+#[cfg(unix)]
+mod terminal {
+    use std::fs::File;
+    use std::io::{Read, Write};
+    use std::os::fd::FromRawFd;
+    use std::path::Path;
+    use std::process::{Child, Command, ExitStatus, Stdio};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    /// How long a test waits for terminal output or for the process to exit.
+    const TERMINAL_DEADLINE: Duration = Duration::from_secs(20);
+    /// Re-check interval while waiting for terminal output.
+    const TERMINAL_POLL: Duration = Duration::from_millis(20);
+    /// Read chunk for the pseudo-terminal's controller side.
+    const READ_CHUNK: usize = 4096;
+
+    pub struct TerminalCli {
+        child: Child,
+        controller: File,
+        output: Arc<Mutex<String>>,
+        closed: Arc<Mutex<bool>>,
+    }
+
+    impl TerminalCli {
+        pub fn spawn(home: &Path, relay: &str, args: &[&str]) -> Self {
+            let (mut controller_fd, mut device_fd) = (-1, -1);
+            // SAFETY: openpty writes two fresh descriptors into the pointers
+            // and reads no name, termios or window size (all null).
+            let opened = unsafe {
+                libc::openpty(
+                    &mut controller_fd,
+                    &mut device_fd,
+                    // Null `*mut` coerces where a platform declares `*const`.
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_eq!(opened, 0, "openpty: {}", std::io::Error::last_os_error());
+            for fd in [controller_fd, device_fd] {
+                // Keep both ends out of processes other tests spawn meanwhile,
+                // so the controller sees end of output when this child exits.
+                // SAFETY: `fd` is a descriptor openpty just returned.
+                assert_ne!(
+                    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                    -1
+                );
+            }
+            // SAFETY: each descriptor is owned by exactly one `File` from here on.
+            let (controller, device) = unsafe {
+                (
+                    File::from_raw_fd(controller_fd),
+                    File::from_raw_fd(device_fd),
+                )
+            };
+            let child = {
+                let mut command = Command::new(super::bin());
+                command
+                    .args(args)
+                    .env("HOME", home)
+                    .env("USERPROFILE", home)
+                    .env("RUST_LOG", "error")
+                    .env("CLIPSYNC_HOME", home)
+                    .env("CLIPSYNC_RELAY_URL", relay)
+                    .env("CLIPSYNC_NO_DAEMON", "1")
+                    .env("NO_PROXY", "127.0.0.1,localhost")
+                    .env("no_proxy", "127.0.0.1,localhost")
+                    .env_remove("CLIPSYNC_LISTEN")
+                    .env_remove("CLIPSYNC_CA_FILE")
+                    .stdin(Stdio::from(device.try_clone().unwrap()))
+                    .stdout(Stdio::from(device.try_clone().unwrap()))
+                    .stderr(Stdio::from(device));
+                command.spawn().expect("run clipsync at a terminal")
+                // Dropping `command` closes this process's copies of the device.
+            };
+            let output = Arc::new(Mutex::new(String::new()));
+            let closed = Arc::new(Mutex::new(false));
+            let mut reader = controller.try_clone().unwrap();
+            let (sink, done) = (output.clone(), closed.clone());
+            std::thread::spawn(move || {
+                let mut chunk = [0u8; READ_CHUNK];
+                // Linux reports EIO once every device descriptor is closed.
+                while let Ok(read @ 1..) = reader.read(&mut chunk) {
+                    let text = String::from_utf8_lossy(&chunk[..read]).replace('\r', "");
+                    sink.lock().unwrap().push_str(&text);
+                }
+                *done.lock().unwrap() = true;
+            });
+            Self {
+                child,
+                controller,
+                output,
+                closed,
+            }
+        }
+
+        pub fn output(&self) -> String {
+            self.output.lock().unwrap().clone()
+        }
+
+        /// Wait until the terminal has shown `text`; return everything so far.
+        pub async fn wait_for(&mut self, text: &str) -> String {
+            let deadline = Instant::now() + TERMINAL_DEADLINE;
+            loop {
+                let shown = self.output();
+                if shown.contains(text) {
+                    return shown;
+                }
+                if Instant::now() > deadline {
+                    let _ = self.child.kill();
+                    panic!("terminal never showed {text:?}; it showed {shown:?}");
+                }
+                tokio::time::sleep(TERMINAL_POLL).await;
+            }
+        }
+
+        /// Type `line` and Enter, as a person would at the keyboard.
+        pub fn type_line(&mut self, line: &str) {
+            self.controller
+                .write_all(format!("{line}\n").as_bytes())
+                .unwrap();
+            self.controller.flush().unwrap();
+        }
+
+        /// Wait for the process to exit and the terminal to drain.
+        pub async fn finish(mut self) -> (ExitStatus, String) {
+            let deadline = Instant::now() + TERMINAL_DEADLINE;
+            let status = loop {
+                if let Some(status) = self.child.try_wait().unwrap() {
+                    break status;
+                }
+                if Instant::now() > deadline {
+                    let _ = self.child.kill();
+                    panic!("terminal process never exited: {:?}", self.output());
+                }
+                tokio::time::sleep(TERMINAL_POLL).await;
+            };
+            while !*self.closed.lock().unwrap() && Instant::now() < deadline {
+                tokio::time::sleep(TERMINAL_POLL).await;
+            }
+            (status, self.output())
+        }
+    }
+
+    impl Drop for TerminalCli {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+#[cfg(unix)]
+const TERMINAL_PROMPT: &str = "Type the code shown on the other device";
+
+/// Start a background `room create` on `a`, then `room confirm` at a terminal.
+/// Returns the worker pid, the pairing code and the confirm terminal once it
+/// says it is waiting for a joiner.
+#[cfg(unix)]
+async fn confirm_at_terminal(a: &Path, relay: &str) -> (u32, String, terminal::TerminalCli) {
+    seed_identity_file(a);
+    let create = clipsync(a, relay, &["--json", "room", "create", "--no-auto-sync"]);
+    assert!(
+        create.status.success(),
+        "{}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let offer = json_out(&create);
+    let code = offer["pairing_code"].as_str().unwrap().to_string();
+    let pid = offer["pid"].as_u64().unwrap() as u32;
+    let mut confirm = terminal::TerminalCli::spawn(a, relay, &["room", "confirm"]);
+    confirm
+        .wait_for("waiting for the other device to join")
+        .await;
+    (pid, code, confirm)
+}
+
+/// The joiner (piped, as in a script) types the code it was shown.
+#[cfg(unix)]
+async fn join_and_answer_with_shown_code(
+    b: &Path,
+    relay: &str,
+    code: &str,
+) -> tokio::process::Child {
+    seed_identity_file(b);
+    let mut joiner = spawn_cli(b, relay, &["room", "join", code, "--no-auto-sync"]);
+    let mut joiner_input = joiner.stdin.take().unwrap();
+    let mut joiner_output = tokio::io::BufReader::new(joiner.stdout.take().unwrap());
+    let joiner_sas = digits(&line_with_prefix(&mut joiner_output, "verification code: ").await);
+    use tokio::io::AsyncWriteExt;
+    joiner_input
+        .write_all(format!("{joiner_sas}\n").as_bytes())
+        .await
+        .unwrap();
+    joiner_input.flush().await.unwrap();
+    // Keep draining stdout so the joiner never blocks on a full pipe.
+    tokio::spawn(async move {
+        let _keep_stdin_open = joiner_input;
+        let mut rest = Vec::new();
+        let _ = tokio::io::AsyncReadExt::read_to_end(&mut joiner_output, &mut rest).await;
+    });
+    joiner
+}
+
+#[cfg(unix)]
+fn assert_nothing_stored(homes: &[&Path], relay: &str) {
+    for home in homes {
+        let rooms = json_out(&clipsync(home, relay, &["--json", "room", "list"]));
+        assert_eq!(rooms, serde_json::json!([]));
+        assert!(secrets_in(home).is_empty());
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn yes_typed_before_the_code_is_shown_does_not_confirm_room_confirm() {
+    // A user types "yes" while `room confirm` still waits for a joiner. The
+    // code shown afterwards must be compared: that early line is discarded.
+    let (relay, relay_task) = start_relay().await;
+    let a = TempDir::new().unwrap();
+    let b = TempDir::new().unwrap();
+    let (pid, code, mut confirm) = confirm_at_terminal(a.path(), &relay).await;
+    confirm.type_line("yes");
+    // The terminal echoed the line, so it is queued as input already.
+    confirm.wait_for("yes\n").await;
+    let joiner = join_and_answer_with_shown_code(b.path(), &relay, &code).await;
+    confirm.wait_for(TERMINAL_PROMPT).await;
+    confirm.type_line("no");
+    let (status, shown) = confirm.finish().await;
+    let join = tokio::time::timeout(Duration::from_secs(20), joiner.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    if status.success() {
+        kill_pid(pid);
+        panic!("type-ahead \"yes\" confirmed a code the user never saw: {shown}");
+    }
+    assert!(shown.contains("does not match"), "{shown}");
+    assert!(!join.status.success());
+    assert_nothing_stored(&[a.path(), b.path()], &relay);
+    relay_task.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn yes_typed_after_the_code_is_shown_confirms_room_confirm() {
+    // Control for the type-ahead test: the terminal path accepts "yes" when
+    // it is typed after the prompt.
+    let (relay, relay_task) = start_relay().await;
+    let a = TempDir::new().unwrap();
+    let b = TempDir::new().unwrap();
+    let (pid, code, mut confirm) = confirm_at_terminal(a.path(), &relay).await;
+    let joiner = join_and_answer_with_shown_code(b.path(), &relay, &code).await;
+    confirm.wait_for(TERMINAL_PROMPT).await;
+    confirm.type_line("yes");
+    let (status, shown) = confirm.finish().await;
+    let join = tokio::time::timeout(Duration::from_secs(20), joiner.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    if !status.success() {
+        kill_pid(pid);
+        panic!("\"yes\" after the prompt did not confirm: {shown}");
+    }
+    assert!(shown.contains("paired"), "{shown}");
+    assert!(
+        join.status.success(),
+        "{}",
+        String::from_utf8_lossy(&join.stderr)
+    );
+    relay_task.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn yes_typed_before_the_code_is_shown_does_not_confirm_room_join() {
+    // Same type-ahead, on the joining device's terminal prompt.
+    let (relay, relay_task) = start_relay().await;
+    let a = TempDir::new().unwrap();
+    let b = TempDir::new().unwrap();
+    seed_identity_file(a.path());
+    seed_identity_file(b.path());
+    let create = clipsync(
+        a.path(),
+        &relay,
+        &["--json", "room", "create", "--no-auto-sync"],
+    );
+    assert!(
+        create.status.success(),
+        "{}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let offer = json_out(&create);
+    let code = offer["pairing_code"].as_str().unwrap().to_string();
+    let pid = offer["pid"].as_u64().unwrap() as u32;
+    let mut joiner =
+        terminal::TerminalCli::spawn(b.path(), &relay, &["room", "join", &code, "--no-auto-sync"]);
+    joiner.type_line("yes");
+    joiner.wait_for("yes\n").await;
+    let creator_wait = background_sas(a.path()).await;
+    joiner.wait_for(TERMINAL_PROMPT).await;
+    joiner.type_line("no");
+    // The creator's user compares correctly; only the joiner's answer decides.
+    let (home, relay_url, sas) = (
+        a.path().to_path_buf(),
+        relay.clone(),
+        creator_wait.sas.clone().unwrap(),
+    );
+    let creator = tokio::task::spawn_blocking(move || {
+        clipsync(&home, &relay_url, &["room", "confirm", &sas])
+    });
+    let (status, shown) = joiner.finish().await;
+    let creator = creator.await.unwrap();
+    if status.success() {
+        kill_pid(pid);
+        panic!("type-ahead \"yes\" confirmed a code the user never saw: {shown}");
+    }
+    assert!(shown.contains("verification code rejected"), "{shown}");
+    assert!(!creator.status.success());
+    assert_nothing_stored(&[a.path(), b.path()], &relay);
+    relay_task.abort();
 }
 
 /// Upper bound for the detached worker to write its post-offer status line.

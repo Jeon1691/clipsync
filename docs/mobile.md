@@ -47,3 +47,7 @@ See [dependency migration](dependency-migration.md) for validation details.
 `CLIPSYNC_CORE` can point at a non-sibling checkout of this repository.
 
 Pair with the desktop CLI as usual (`clipsync room create` / `room join`).
+Use `create_room_verified` / `join_room_verified` with a `SasVerifier` that shows
+the verification code and asks the user to compare it with the other device;
+see [interfaces](interfaces.md) and [security](security.md#verification-code-sas).
+The older `create_room()` / `join_room()` still work but skip the comparison.

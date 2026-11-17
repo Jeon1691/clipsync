@@ -1,21 +1,26 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 mod cli;
 mod duration;
 mod output;
 mod pairing_bg;
+mod sas_prompt;
 
 use std::io::{self, Write};
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use clipsync_core::{run_daemon, App, CoreError};
+use clipsync_core::{
+    run_daemon, sanitize_untrusted, shown_identifier, App, CoreError, MAX_PEER_NAME_COLUMNS,
+};
 use clipsync_daemon::{install_and_start, restart_service, stop_and_uninstall};
 use clipsync_storage::LocalStore;
 
 use crate::cli::{Cli, Commands, ConfigCmd, DaemonCmd, RoomCmd, SyncCmd};
 use crate::output::{emit, emit_err};
+use crate::sas_prompt::{answer_background, background_confirmer, terminal_confirmer, SasMode};
 
 /// Status the detached pairing worker writes to the log once the offer is live.
 /// It deliberately omits the pairing code, room and expiry: the log is long-lived.
@@ -83,6 +88,7 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
             foreground,
             background: _,
             background_worker,
+            insecure_skip_sas,
         }) => {
             let app = App::open()?;
             let _ = app.identity()?;
@@ -97,34 +103,51 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
                     &app,
                     ttl_raw.as_deref(),
                     no_auto_sync,
+                    insecure_skip_sas,
                     json,
                 )
                 .await;
             }
-            let offer = app
-                .room_create(dur, no_auto_sync, json, |offer| {
-                    if background_worker {
-                        // This stdout is the shared log file. The foreground parent
-                        // shows the code from pairing.json; never persist it here.
-                        println!("{BACKGROUND_WAITING_STATUS}");
-                    } else if json {
-                        println!(
-                            "{}",
-                            serde_json::json!({
-                                "event": "pairing_code",
-                                "pairing_code": offer.pairing_code,
-                                "room_id": offer.room_id,
-                                "expires_at": offer.expires_at,
-                            })
-                        );
-                    } else {
-                        println!("pairing code: {}", offer.pairing_code);
-                        println!("room: {}", offer.room_id);
-                        println!("expires: {}", offer.expires_at);
-                        println!("waiting for the other device to join…");
-                    }
-                    let _ = io::stdout().flush();
+            let confirm = if background_worker {
+                background_confirmer(app.store.clone(), insecure_skip_sas)
+            } else {
+                terminal_confirmer(SasMode {
+                    json,
+                    non_interactive: cli.non_interactive,
+                    skip: insecure_skip_sas,
                 })
+            };
+            let offer = app
+                .room_create(
+                    dur,
+                    no_auto_sync,
+                    json,
+                    |offer| {
+                        if background_worker {
+                            // This stdout is the shared log file. The foreground
+                            // parent shows the code from pairing.json; never
+                            // persist it here.
+                            println!("{BACKGROUND_WAITING_STATUS}");
+                        } else if json {
+                            println!(
+                                "{}",
+                                serde_json::json!({
+                                    "event": "pairing_code",
+                                    "pairing_code": offer.pairing_code,
+                                    "room_id": offer.room_id,
+                                    "expires_at": offer.expires_at,
+                                })
+                            );
+                        } else {
+                            println!("pairing code: {}", shown_identifier(&offer.pairing_code));
+                            println!("room: {}", shown_identifier(offer.room_id.as_str()));
+                            println!("expires: {}", offer.expires_at);
+                            println!("waiting for the other device to join…");
+                        }
+                        let _ = io::stdout().flush();
+                    },
+                    confirm,
+                )
                 .await?;
             if background_worker {
                 println!("{BACKGROUND_PAIRED_STATUS}");
@@ -143,17 +166,44 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
             }
             Ok(())
         }
-        Commands::Room(RoomCmd::Join { code, no_auto_sync }) => {
+        Commands::Room(RoomCmd::Join {
+            code,
+            no_auto_sync,
+            insecure_skip_sas,
+        }) => {
             let app = App::open()?;
-            let room = app.room_join(&code, no_auto_sync).await?;
+            let confirm = terminal_confirmer(SasMode {
+                json: cli.json,
+                non_interactive: cli.non_interactive,
+                skip: insecure_skip_sas,
+            });
+            let room = app.room_join(&code, no_auto_sync, confirm).await?;
             emit(
                 cli.json,
                 serde_json::json!({"room_id": room.room_id, "role": room.role}),
             );
             if !cli.json {
-                println!("joined room {}", room.room_id);
+                println!("joined room {}", shown_identifier(room.room_id.as_str()));
             }
             Ok(())
+        }
+        Commands::Room(RoomCmd::Confirm { code }) => {
+            let app = App::open()?;
+            let mode = SasMode {
+                json: cli.json,
+                non_interactive: cli.non_interactive,
+                skip: false,
+            };
+            answer_background(&app, code.as_deref(), false, mode).await
+        }
+        Commands::Room(RoomCmd::Reject) => {
+            let app = App::open()?;
+            let mode = SasMode {
+                json: cli.json,
+                non_interactive: cli.non_interactive,
+                skip: false,
+            };
+            answer_background(&app, None, true, mode).await
         }
         Commands::Room(RoomCmd::Leave { yes }) => {
             if !yes && !cli.yes && !cli.non_interactive {
@@ -169,7 +219,12 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
             emit(cli.json, serde_json::to_value(&rooms)?);
             if !cli.json {
                 for r in rooms {
-                    println!("{}  epoch {}  {:?}", r.room_id, r.epoch, r.role);
+                    println!(
+                        "{}  epoch {}  {:?}",
+                        shown_identifier(r.room_id.as_str()),
+                        r.epoch,
+                        r.role
+                    );
                 }
             }
             Ok(())
@@ -251,9 +306,13 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
             emit(cli.json, serde_json::to_value(&devices)?);
             if !cli.json {
                 for d in devices {
+                    // Every field is chosen by the peer; keep them inert.
                     println!(
                         "{}  {}  {}  {}",
-                        d.device_id, d.device_name, d.os, d.fingerprint
+                        shown_identifier(d.device_id.as_str()),
+                        sanitize_untrusted(&d.device_name, MAX_PEER_NAME_COLUMNS),
+                        sanitize_untrusted(&d.os, MAX_PEER_NAME_COLUMNS),
+                        shown_identifier(&d.fingerprint)
                     );
                 }
             }

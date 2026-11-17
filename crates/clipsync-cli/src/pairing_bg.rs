@@ -3,7 +3,7 @@
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use clipsync_core::{App, CoreError};
+use clipsync_core::{shown_identifier, App, CoreError};
 use clipsync_storage::PairingWait;
 
 use crate::output::emit;
@@ -16,13 +16,22 @@ pub async fn spawn_background_create(
     app: &App,
     ttl: Option<&str>,
     no_auto_sync: bool,
+    insecure_skip_sas: bool,
     json: bool,
 ) -> Result<(), CoreError> {
     if let Ok(Some(existing)) = app.store.load_pairing_wait() {
-        if existing.status == "waiting" && pid_alive(existing.pid) {
+        let active = existing.status == "waiting"
+            || existing.status == crate::sas_prompt::STATUS_CONFIRM_SAS;
+        if active && !crate::sas_prompt::replaceable(&existing) {
+            let next = if existing.status == "waiting" {
+                format!("join with: clipsync room join {}", existing.pairing_code)
+            } else {
+                "a device joined; compare codes with: clipsync room confirm (or clipsync room reject)"
+                    .into()
+            };
             return Err(CoreError::Message(format!(
-                "pairing already waiting in background (pid {}); join with: clipsync room join {}",
-                existing.pid, existing.pairing_code
+                "pairing already waiting in background (pid {}); {next}",
+                existing.pid
             )));
         }
     }
@@ -42,6 +51,9 @@ pub async fn spawn_background_create(
     }
     if no_auto_sync {
         cmd.arg("--no-auto-sync");
+    }
+    if insecure_skip_sas {
+        cmd.arg("--insecure-skip-sas");
     }
     if let Ok(home) = std::env::var("CLIPSYNC_HOME") {
         cmd.env("CLIPSYNC_HOME", home);
@@ -110,14 +122,15 @@ fn print_offer(wait: &PairingWait, pid: u32, json: bool) {
         }),
     );
     if !json {
-        println!("pairing code: {}", wait.pairing_code);
-        println!("room: {}", wait.room_id);
+        // Both came from the relay; the worker checked them, but the file
+        // they are read back from is not.
+        let code = shown_identifier(&wait.pairing_code);
+        println!("pairing code: {code}");
+        println!("room: {}", shown_identifier(wait.room_id.as_str()));
         println!("expires: {}", wait.expires_at);
         println!("waiting in background (pid {pid})");
-        println!(
-            "join from another device: clipsync room join {}",
-            wait.pairing_code
-        );
+        println!("join from another device: clipsync room join {code}");
+        println!("then compare verification codes here: clipsync room confirm");
     }
 }
 
@@ -131,7 +144,7 @@ fn extract_error_line(text: &str) -> Option<String> {
 }
 
 #[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
+pub(crate) fn pid_alive(pid: u32) -> bool {
     extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
     }
@@ -139,7 +152,7 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 #[cfg(windows)]
-fn pid_alive(pid: u32) -> bool {
+pub(crate) fn pid_alive(pid: u32) -> bool {
     extern "system" {
         fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
         fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
@@ -157,7 +170,7 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn pid_alive(_pid: u32) -> bool {
+pub(crate) fn pid_alive(_pid: u32) -> bool {
     false
 }
 
@@ -170,5 +183,69 @@ pub fn ignore_sighup() {
     const SIG_IGN: usize = 1;
     unsafe {
         let _ = signal(SIGHUP, SIG_IGN);
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    fn request(status: &str, pid: u32) -> PairingWait {
+        PairingWait {
+            status: status.into(),
+            pairing_code: "123 456".into(),
+            room_id: "room".into(),
+            expires_at: "2026-11-17T00:00:00Z".into(),
+            pid,
+            error: None,
+            sas: None,
+            peer_device_name: None,
+            sas_decision: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_live_background_pairing_blocks_a_new_create_with_its_next_step() {
+        let root = tempfile::tempdir().unwrap();
+        let app = App::open_from(clipsync_storage::AppPaths::from_root(
+            root.path().to_path_buf(),
+        ))
+        .unwrap();
+        let live = std::process::id();
+        for (status, next) in [
+            ("waiting", "join with: clipsync room join 123 456"),
+            (
+                crate::sas_prompt::STATUS_CONFIRM_SAS,
+                "compare codes with: clipsync room confirm",
+            ),
+        ] {
+            app.store.save_pairing_wait(&request(status, live)).unwrap();
+            let error = spawn_background_create(&app, None, false, false, false)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("already waiting in background"), "{error}");
+            assert!(error.contains(next), "{next:?}: {error}");
+            // The live request is left for its worker.
+            assert_eq!(
+                app.store.load_pairing_wait().unwrap().unwrap().status,
+                status
+            );
+        }
+    }
+
+    #[test]
+    fn worker_log_errors_prefer_the_last_relay_or_error_line() {
+        let log = "starting\nerror: relay create http://relay: refused\n\nbye\n";
+        assert_eq!(
+            extract_error_line(log).as_deref(),
+            Some("relay create http://relay: refused")
+        );
+        assert_eq!(
+            extract_error_line("websocket closed\n").as_deref(),
+            Some("websocket closed")
+        );
+        assert_eq!(extract_error_line("all good\n"), None);
     }
 }

@@ -115,6 +115,11 @@ impl AppPaths {
     pub fn pairing_file(&self) -> PathBuf {
         self.runtime_dir.join("pairing.json")
     }
+
+    /// Lock that serializes writers of [`Self::pairing_file`].
+    pub fn pairing_lock_file(&self) -> PathBuf {
+        self.runtime_dir.join("pairing.lock")
+    }
 }
 
 /// Owner-only directory mode (`rwx------`) for ClipSync-owned directories.
