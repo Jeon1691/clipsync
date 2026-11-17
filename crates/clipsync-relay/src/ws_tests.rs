@@ -153,6 +153,7 @@ fn state() -> Arc<RelayState> {
         token_secret: vec![42; 32],
         webhook_url: None,
         webhook_secret: None,
+        metrics_token: None,
     }))
 }
 
@@ -1535,6 +1536,7 @@ async fn idle_sockets_are_closed_and_free_their_connection_slots() {
             token_secret: vec![42; 32],
             webhook_url: None,
             webhook_secret: None,
+            metrics_token: None,
         });
         relay.socket_deadlines = SocketDeadlines {
             hello: HELLO,
@@ -1616,6 +1618,7 @@ fn state_with_hello_deadline(hello: Duration) -> Arc<RelayState> {
         token_secret: vec![42; 32],
         webhook_url: None,
         webhook_secret: None,
+        metrics_token: None,
     });
     relay.socket_deadlines = SocketDeadlines {
         hello,
@@ -2113,6 +2116,7 @@ mod liveness {
             token_secret: vec![42; 32],
             webhook_url: None,
             webhook_secret: None,
+            metrics_token: None,
         });
         state.socket_deadlines.read_idle = timeout;
         Arc::new(state)

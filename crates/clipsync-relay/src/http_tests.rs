@@ -6,6 +6,9 @@ use clipsync_protocol::{DeviceId, PairingSessionId, PROTOCOL_VERSION};
 use std::net::IpAddr;
 use tokio::net::TcpListener;
 
+/// Scrape credential used wherever a test enables `/metrics`.
+const METRICS_TEST_TOKEN: &str = "relay-metrics-scrape-token-0123456789";
+
 #[tokio::test]
 async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses() {
     let state = Arc::new(RelayState::new(RelayConfig {
@@ -14,6 +17,7 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
         token_secret: vec![31; 32],
         webhook_url: None,
         webhook_secret: None,
+        metrics_token: None,
     }));
     let owner = DeviceId::new();
     let sid = PairingSessionId::new();
@@ -136,6 +140,7 @@ async fn server_reports_bind_failure_and_serves_health_and_metrics_on_a_local_li
         token_secret: vec![32; 32],
         webhook_url: None,
         webhook_secret: None,
+        metrics_token: Some(MetricsToken::new(METRICS_TEST_TOKEN).unwrap()),
     };
     let transport = || RelayTransportConfig {
         allow_http: true,
@@ -171,6 +176,7 @@ async fn server_reports_bind_failure_and_serves_health_and_metrics_on_a_local_li
     );
     let metrics = client
         .get(format!("http://{address}/metrics"))
+        .bearer_auth(METRICS_TEST_TOKEN)
         .send()
         .await
         .unwrap()
@@ -184,6 +190,144 @@ async fn server_reports_bind_failure_and_serves_health_and_metrics_on_a_local_li
     assert!(task.await.unwrap_err().is_cancelled());
 }
 
+fn metrics_test_config(bind: SocketAddr) -> RelayConfig {
+    RelayConfig {
+        bind,
+        public_url: format!("http://{bind}"),
+        token_secret: vec![33; 32],
+        webhook_url: None,
+        webhook_secret: None,
+        metrics_token: None,
+    }
+}
+
+async fn spawn_router(app: Router) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    (format!("http://{address}"), task)
+}
+
+fn loopback_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn metrics_route_is_absent_unless_explicitly_configured() {
+    let (url, task) =
+        spawn_router(router(metrics_test_config("127.0.0.1:0".parse().unwrap()))).await;
+    let client = loopback_client();
+    let health = client.get(format!("{url}/healthz")).send().await.unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
+    let metrics = client.get(format!("{url}/metrics")).send().await.unwrap();
+    assert_eq!(metrics.status(), StatusCode::NOT_FOUND);
+    task.abort();
+}
+
+#[tokio::test]
+async fn enabled_metrics_reject_missing_malformed_and_wrong_bearer_tokens() {
+    let mut config = metrics_test_config("127.0.0.1:0".parse().unwrap());
+    config.metrics_token = Some(MetricsToken::new(METRICS_TEST_TOKEN).unwrap());
+    let (url, task) = spawn_router(router(config)).await;
+    let client = loopback_client();
+    let wrong = format!("{METRICS_TEST_TOKEN}x");
+    let attempts = [
+        None,
+        Some(format!("Bearer {wrong}")),
+        Some(format!("Bearer {}", &METRICS_TEST_TOKEN[1..])),
+        Some(format!("Basic {METRICS_TEST_TOKEN}")),
+        Some(format!("Bearer  {METRICS_TEST_TOKEN}")),
+        Some(format!("Bearer{METRICS_TEST_TOKEN}")),
+        Some(METRICS_TEST_TOKEN.to_string()),
+        Some("Bearer ".to_string()),
+    ];
+    for authorization in attempts {
+        let mut request = client.get(format!("{url}/metrics"));
+        if let Some(value) = &authorization {
+            request = request.header(axum::http::header::AUTHORIZATION, value);
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{authorization:?} was accepted"
+        );
+        assert_eq!(
+            response.headers()[axum::http::header::WWW_AUTHENTICATE],
+            "Bearer realm=\"clipsync-relay-metrics\""
+        );
+        let body = response.text().await.unwrap();
+        assert!(
+            !body.contains("clipsync_"),
+            "rejected scrape leaked metrics"
+        );
+    }
+    task.abort();
+}
+
+#[tokio::test]
+async fn enabled_metrics_serve_the_metrics_text_to_the_configured_bearer() {
+    let mut config = metrics_test_config("127.0.0.1:0".parse().unwrap());
+    config.metrics_token = Some(MetricsToken::new(METRICS_TEST_TOKEN).unwrap());
+    let expected = RelayState::new(config.clone()).metrics_text();
+    let (url, task) = spawn_router(router(config)).await;
+    let client = loopback_client();
+    for scheme in ["Bearer", "bearer", "BEARER"] {
+        let response = client
+            .get(format!("{url}/metrics"))
+            .header(
+                axum::http::header::AUTHORIZATION,
+                format!("{scheme} {METRICS_TEST_TOKEN}"),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.text().await.unwrap(), expected);
+    }
+    let health = client.get(format!("{url}/healthz")).send().await.unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
+    task.abort();
+}
+
+#[test]
+fn metrics_tokens_require_header_safe_minimum_length_and_redact_debug_output() {
+    let short = &METRICS_TEST_TOKEN[..MIN_METRICS_TOKEN_BYTES - 1];
+    assert!(MetricsToken::new(short)
+        .unwrap_err()
+        .to_string()
+        .contains("at least 32 bytes"));
+    let exact = &METRICS_TEST_TOKEN[..MIN_METRICS_TOKEN_BYTES];
+    assert!(MetricsToken::new(exact).unwrap().matches(exact.as_bytes()));
+    for invalid in [
+        format!("{METRICS_TEST_TOKEN} suffix"),
+        format!("{METRICS_TEST_TOKEN}\n"),
+        format!("{METRICS_TEST_TOKEN}\u{e9}"),
+    ] {
+        assert!(MetricsToken::new(&invalid)
+            .unwrap_err()
+            .to_string()
+            .contains("visible ASCII"));
+    }
+    let token = MetricsToken::new(METRICS_TEST_TOKEN).unwrap();
+    assert!(token.matches(METRICS_TEST_TOKEN.as_bytes()));
+    assert!(!token.matches(&METRICS_TEST_TOKEN.as_bytes()[1..]));
+    let debug = format!("{token:?}");
+    assert!(!debug.contains(METRICS_TEST_TOKEN));
+    assert_eq!(debug, "MetricsToken(<redacted>)");
+}
+
 fn join_test_state() -> Arc<RelayState> {
     Arc::new(RelayState::new(RelayConfig {
         bind: "127.0.0.1:0".parse().unwrap(),
@@ -191,6 +335,7 @@ fn join_test_state() -> Arc<RelayState> {
         token_secret: vec![33; 32],
         webhook_url: None,
         webhook_secret: None,
+        metrics_token: None,
     }))
 }
 
@@ -338,6 +483,7 @@ async fn forwarded_for_is_honored_only_from_configured_trusted_proxies() {
                 token_secret: vec![34; 32],
                 webhook_url: None,
                 webhook_secret: None,
+                metrics_token: None,
             },
             vec!["127.0.0.0/8".parse().unwrap()],
             PairingJoinLimits::default(),
@@ -459,6 +605,7 @@ async fn proxmox_cloudflare_tunnel_chain_gives_each_visitor_its_own_join_budget(
                 token_secret: rand::random::<[u8; 32]>().to_vec(),
                 webhook_url: None,
                 webhook_secret: None,
+                metrics_token: None,
             },
             trusted,
             PairingJoinLimits::default(),
@@ -500,6 +647,7 @@ async fn invalid_join_limits_stop_the_relay_from_starting() {
         token_secret: rand::random::<[u8; 32]>().to_vec(),
         webhook_url: None,
         webhook_secret: None,
+        metrics_token: None,
     };
     let transport = RelayTransportConfig {
         allow_http: true,
@@ -526,6 +674,7 @@ async fn invalid_resource_limits_stop_the_relay_from_starting() {
         token_secret: rand::random::<[u8; 32]>().to_vec(),
         webhook_url: None,
         webhook_secret: None,
+        metrics_token: None,
     };
     let transport = RelayTransportConfig {
         allow_http: true,
@@ -586,6 +735,7 @@ async fn pairing_create_answers_429_per_client_and_503_when_the_relay_is_full() 
             token_secret: rand::random::<[u8; 32]>().to_vec(),
             webhook_url: None,
             webhook_secret: None,
+            metrics_token: None,
         },
         vec![proxy.ip().into()],
         RelayResourceLimits {
@@ -645,6 +795,7 @@ async fn serve_limited_state(
                 token_secret: rand::random::<[u8; 32]>().to_vec(),
                 webhook_url: None,
                 webhook_secret: None,
+                metrics_token: Some(MetricsToken::new(METRICS_TEST_TOKEN).unwrap()),
             },
             vec![address.ip().into()],
             PairingJoinLimits::default(),
@@ -795,7 +946,10 @@ async fn websocket_connections_past_the_client_and_relay_caps_are_refused() {
             connect_as(address, "192.0.2.2").await.err(),
             Some(StatusCode::SERVICE_UNAVAILABLE)
         );
-        let metrics = reqwest::get(format!("http://{address}/metrics"))
+        let metrics = reqwest::Client::new()
+            .get(format!("http://{address}/metrics"))
+            .bearer_auth(METRICS_TEST_TOKEN)
+            .send()
             .await
             .unwrap()
             .text()

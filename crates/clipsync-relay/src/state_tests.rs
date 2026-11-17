@@ -28,6 +28,7 @@ fn fixture() -> (
         token_secret: vec![21; 32],
         webhook_url: None,
         webhook_secret: None,
+        metrics_token: None,
     });
     let sid = PairingSessionId::new();
     let owner = DeviceId::new();
@@ -322,6 +323,7 @@ fn limited_state(limits: PairingJoinLimits) -> RelayState {
             token_secret: rand::random::<[u8; 32]>().to_vec(),
             webhook_url: None,
             webhook_secret: None,
+            metrics_token: None,
         },
         Vec::new(),
         limits,
@@ -404,6 +406,7 @@ fn join_limits_that_weaken_the_guessing_bound_are_refused() {
         token_secret: rand::random::<[u8; 32]>().to_vec(),
         webhook_url: None,
         webhook_secret: None,
+        metrics_token: None,
     };
     let weakened = PairingJoinLimits {
         relay_fail_limit: crate::join_limits::MAX_GLOBAL_FAILED_JOIN_LIMIT + 1,
@@ -431,6 +434,7 @@ fn resource_limited_state(limits: RelayResourceLimits) -> RelayState {
             token_secret: rand::random::<[u8; 32]>().to_vec(),
             webhook_url: None,
             webhook_secret: None,
+            metrics_token: None,
         },
         Vec::new(),
         PairingJoinLimits::default(),
@@ -455,6 +459,7 @@ fn pairing_creation_is_rate_limited_per_client_and_relay_wide() {
         token_secret: rand::random::<[u8; 32]>().to_vec(),
         webhook_url: None,
         webhook_secret: None,
+        metrics_token: None,
     });
     let attacker: IpAddr = "198.51.100.60".parse().unwrap();
     for _ in 0..PAIRING_CREATE_CLIENT_LIMIT {
@@ -1059,6 +1064,7 @@ fn small_room_state(max_rooms: usize) -> Arc<RelayState> {
             token_secret: rand::random::<[u8; 32]>().to_vec(),
             webhook_url: None,
             webhook_secret: None,
+            metrics_token: None,
         },
         Vec::new(),
         PairingJoinLimits::default(),

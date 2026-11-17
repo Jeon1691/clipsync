@@ -8,7 +8,10 @@ use clipsync_protocol::{
     ClientRole, ControlMessage, CreatePairingRequest, CreatePairingResponse, DeviceId, DeviceRole,
     JoinPairingRequest, JoinPairingResponse, PairingSessionId, RoomId, PROTOCOL_VERSION,
 };
-use clipsync_relay::{router, RelayConfig};
+use clipsync_relay::{router, MetricsToken, RelayConfig};
+
+/// Scrape credential for this fixture's relay; readiness polls read `/metrics`.
+const METRICS_TEST_TOKEN: &str = "pairing-order-metrics-token-0123456789";
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -48,6 +51,7 @@ impl Relay {
             token_secret: vec![72; 32],
             webhook_url: None,
             webhook_secret: None,
+            metrics_token: Some(MetricsToken::new(METRICS_TEST_TOKEN).unwrap()),
         });
         let task = tokio::spawn(async move {
             axum::serve(
@@ -141,6 +145,7 @@ impl Relay {
                 let metrics = self
                     .client
                     .get(format!("{}/metrics", self.url))
+                    .bearer_auth(METRICS_TEST_TOKEN)
                     .send()
                     .await
                     .unwrap()

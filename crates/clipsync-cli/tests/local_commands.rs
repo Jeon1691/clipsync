@@ -352,7 +352,22 @@ fn daemon_commands_write_only_isolated_service_files_and_preserve_json_contracts
         &["room", "create", "--foreground", "--ttl", "not-a-duration"],
     );
     assert_eq!(invalid_ttl.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&invalid_ttl.stderr).contains("error:"));
+    // The in-house `--ttl` parser keeps humantime's rejection text.
+    assert!(String::from_utf8_lossy(&invalid_ttl.stderr).contains("error: expected number at 0"));
+    // One second of nanoseconds carried into u64::MAX seconds used to panic.
+    let overflowing_ttl = cli(
+        root.path(),
+        false,
+        &[
+            "room",
+            "create",
+            "--foreground",
+            "--ttl",
+            "18446744073709551615s 1000000000ns",
+        ],
+    );
+    assert_eq!(overflowing_ttl.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&overflowing_ttl.stderr).contains("error: number is too large"));
 }
 
 #[test]

@@ -42,6 +42,7 @@ async fn start_relay_observed() -> (
         token_secret: b"test-secret-test-secret-test-sec".to_vec(),
         webhook_url: None,
         webhook_secret: None,
+        metrics_token: None,
     };
     let ttl = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let observed = ttl.clone();

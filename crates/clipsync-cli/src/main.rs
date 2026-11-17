@@ -1,6 +1,7 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
 mod cli;
+mod duration;
 mod output;
 mod pairing_bg;
 
@@ -87,7 +88,7 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
             let _ = app.identity()?;
             let ttl_raw = ttl.clone();
             let dur = ttl
-                .map(|s| humantime::parse_duration(&s))
+                .map(|s| duration::parse_duration(&s))
                 .transpose()
                 .map_err(|e| CoreError::Message(e.to_string()))?;
             let json = cli.json;
