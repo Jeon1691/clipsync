@@ -1042,7 +1042,20 @@ mod tests {
             .unwrap();
         assert_eq!(joined, offer.room_id);
         let until = std::time::Instant::now() + Duration::from_secs(5);
-        while verified_creator.status().unwrap().room_id.as_deref() != Some(joined.as_str()) {
+        // The creator stores its room before its configuration, and Windows
+        // refuses to open a file that is being replaced. Wait until both are
+        // committed and readable, treating a read error as not yet.
+        let committed = |client: &ClipSyncClient| {
+            client
+                .status()
+                .is_ok_and(|status| status.room_id.as_deref() == Some(joined.as_str()))
+                && client
+                    .app
+                    .store
+                    .load_config()
+                    .is_ok_and(|cfg| cfg.sync.enabled)
+        };
+        while !committed(&verified_creator) {
             assert!(
                 std::time::Instant::now() < until,
                 "verified creator did not commit completed pairing"
