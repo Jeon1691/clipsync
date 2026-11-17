@@ -161,11 +161,10 @@ fn unlock(file: &File) -> std::io::Result<()> {
 
 impl LocalStore {
     pub fn load_replay_state(&self) -> Result<ReplayState> {
-        let path = self.paths.replay_state_file();
-        if !path.exists() {
-            return Ok(ReplayState::default());
+        match crate::sharing::read_if_present(&self.paths.replay_state_file())? {
+            Some(raw) => Ok(serde_json::from_str(&raw)?),
+            None => Ok(ReplayState::default()),
         }
-        Ok(serde_json::from_slice(&std::fs::read(path)?)?)
     }
 
     fn save_replay_state(&self, state: &ReplayState) -> Result<()> {

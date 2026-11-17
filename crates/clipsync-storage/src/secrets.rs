@@ -38,8 +38,7 @@ impl SecretStore {
 
     pub fn load_identity(&self) -> Result<DeviceIdentity> {
         let path = self.paths.identity_file();
-        if path.exists() {
-            let payload = std::fs::read_to_string(path)?;
+        if let Some(payload) = crate::sharing::read_if_present(&path)? {
             let stored: StoredIdentity = serde_json::from_str(&payload)?;
             return DeviceIdentity::from_stored(&stored).ok_or(StorageError::NotInitialized);
         }
@@ -68,8 +67,8 @@ impl SecretStore {
 
     pub fn load_named(&self, name: &str) -> Result<String> {
         let path = self.paths.data_dir.join(format!("{name}.secret"));
-        if path.exists() {
-            return Ok(std::fs::read_to_string(path)?);
+        if let Some(value) = crate::sharing::read_if_present(&path)? {
+            return Ok(value);
         }
         get_keyring(&self.account(name)).map_err(|_| StorageError::NotPaired)
     }
@@ -85,6 +84,17 @@ impl SecretStore {
 /// Create with private permissions before writing, then atomically replace.
 /// A failed write leaves the previous credential available for retry/recovery.
 pub(crate) fn write_private(path: &Path, value: &[u8]) -> std::io::Result<()> {
+    write_private_pausing(path, value, crate::sharing::pause_before_retry)
+}
+
+/// [`write_private`] with the pause between replace attempts supplied, so
+/// tests can release the file at exactly that point.
+///
+/// The replace is `MoveFileExW` on Windows, which refuses to replace a file
+/// another handle has open, such as a status read in another process; it is
+/// retried (see [`crate::sharing`]). The temporary file is handed back on
+/// each failure and removed if the replace never succeeds.
+fn write_private_pausing(path: &Path, value: &[u8], pause: impl FnMut()) -> std::io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| std::io::Error::other("missing parent"))?;
@@ -92,7 +102,20 @@ pub(crate) fn write_private(path: &Path, value: &[u8]) -> std::io::Result<()> {
     set_private_file(tmp.path())?;
     tmp.write_all(value)?;
     tmp.as_file().sync_all()?;
-    tmp.persist(path).map_err(|error| error.error)?;
+    let mut pending = Some(tmp);
+    crate::sharing::retry_access_denied(
+        || {
+            let tmp = pending
+                .take()
+                .expect("a failed replace hands the file back");
+            tmp.persist(path).map(drop).map_err(|error| {
+                pending = Some(error.file);
+                error.error
+            })
+        },
+        crate::sharing::ACCESS_DENIED_RETRIES,
+        pause,
+    )?;
     // Make credential renames durable before removing a legacy metadata copy.
     #[cfg(unix)]
     std::fs::File::open(parent)?.sync_all()?;
@@ -136,6 +159,51 @@ fn delete_keyring(_user: &str) -> std::result::Result<(), String> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod file_failure_tests {
     use super::*;
+
+    /// Files in `dir` other than `keep`: temporary files a write left behind.
+    fn strays(dir: &Path, keep: &Path) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path != keep)
+            .collect()
+    }
+
+    #[test]
+    fn a_private_file_open_in_another_reader_is_replaced_once_the_reader_closes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        std::fs::write(&path, b"old").unwrap();
+        // A status read in another process holds the file open.
+        let mut reader = Some(std::fs::File::open(&path).unwrap());
+        let mut pauses = 0;
+        write_private_pausing(&path, b"new", || {
+            pauses += 1;
+            drop(reader.take());
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        // Windows refuses the first replace while the reader is open; other
+        // platforms replace at once.
+        assert_eq!(pauses, u32::from(cfg!(windows)));
+        assert!(strays(root.path(), &path).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_private_file_that_stays_open_keeps_its_contents_after_bounded_retries() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        std::fs::write(&path, b"old").unwrap();
+        let reader = std::fs::File::open(&path).unwrap();
+        let mut pauses = 0;
+        let error = write_private_pausing(&path, b"new", || pauses += 1).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(pauses, crate::sharing::ACCESS_DENIED_RETRIES);
+        drop(reader);
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        assert!(strays(root.path(), &path).is_empty());
+    }
 
     #[test]
     fn malformed_file_identity_is_reported_without_native_keyring_fallback() {
