@@ -60,6 +60,8 @@ impl App {
     }
 
     pub fn init(&self, relay_url: Option<String>) -> Result<DeviceIdentity, CoreError> {
+        // Refuse an insecure relay before creating any local state.
+        let relay_url = relay_url.as_deref().map(checked_relay_url).transpose()?;
         // Absence is handled by load_config; errors must not reset user data.
         let mut cfg = self.store.load_config()?;
         let identity = match self.store.secrets.load_identity() {
@@ -272,6 +274,13 @@ impl App {
     }
 
     pub fn config_set(&self, key: &str, value: &str) -> Result<(), CoreError> {
+        let checked;
+        let value = if key == "relay_url" {
+            checked = checked_relay_url(value)?;
+            checked.as_str()
+        } else {
+            value
+        };
         let mut cfg = self.store.load_config()?;
         if !cfg.set(key, value) {
             return Err(CoreError::Message(format!("unknown config key {key}")));
@@ -429,18 +438,68 @@ async fn load_push_input(
     ))
 }
 
-pub(crate) fn http_client() -> reqwest::Client {
+/// Validate a relay URL for configuration and return the form to save.
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
+fn checked_relay_url(url: &str) -> Result<String, CoreError> {
+    clipsync_transport::check_relay_url(url)?;
+    Ok(clipsync_transport::normalize_relay_url(url)?)
+}
+
+/// HTTP client for a relay URL that `security` says passed the relay policy.
+pub(crate) fn http_client(security: clipsync_transport::RelaySecurity) -> reqwest::Client {
+    use clipsync_transport::RelaySecurity;
     let builder = reqwest::Client::builder()
         .user_agent(concat!("clipsync-cli/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(20));
+        .timeout(std::time::Duration::from_secs(20))
+        // The relay API never redirects. Following one would resend the
+        // pairing code to a host and scheme the policy never checked.
+        .redirect(reqwest::redirect::Policy::none());
+    let builder = match security {
+        RelaySecurity::Tls => builder,
+        // Plaintext is only acceptable on the direct path the policy
+        // classified; a proxy from HTTP_PROXY/ALL_PROXY or the system
+        // settings would carry it off this machine.
+        RelaySecurity::Loopback | RelaySecurity::InsecureOptIn => builder.no_proxy(),
+    };
     let builder = clipsync_transport::configure_reqwest(builder).expect("tls config");
     builder.build().expect("http client")
 }
 
+/// An actionable error for a relay response that tried to redirect.
+pub(crate) fn relay_redirect_error(response: &reqwest::Response) -> Option<String> {
+    let status = response.status();
+    if !status.is_redirection() {
+        return None;
+    }
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+        .unwrap_or_default();
+    Some(format!(
+        "relay answered {status} redirect to `{location}`; ClipSync does not follow relay redirects. \
+         Set relay_url to the relay's final https:// URL"
+    ))
+}
+
 async fn check_relay(url: &str) -> serde_json::Value {
+    let security = match clipsync_transport::check_relay_url(url) {
+        Ok(security) => security,
+        Err(e) => return serde_json::json!({"ok": false, "error": e.to_string()}),
+    };
     let health = format!("{}/healthz", url.trim_end_matches('/'));
-    match http_client().get(&health).send().await {
-        Ok(r) => serde_json::json!({"ok": r.status().is_success(), "status": r.status().as_u16()}),
+    match http_client(security).get(&health).send().await {
+        Ok(r) => match relay_redirect_error(&r) {
+            Some(error) => {
+                serde_json::json!({"ok": false, "status": r.status().as_u16(), "error": error})
+            }
+            None => {
+                serde_json::json!({"ok": r.status().is_success(), "status": r.status().as_u16()})
+            }
+        },
         Err(e) => serde_json::json!({"ok": false, "error": crate::error::format_error(&e)}),
     }
 }
@@ -547,18 +606,222 @@ mod regression_tests {
                     .await
                     .unwrap();
             });
-            assert!(super::http_client()
-                .get(format!("http://{address}/healthz"))
-                .send()
-                .await
-                .unwrap()
-                .status()
-                .is_success());
+            assert!(
+                super::http_client(clipsync_transport::RelaySecurity::Loopback)
+                    .get(format!("http://{address}/healthz"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+                    .is_success()
+            );
             tokio::time::timeout(std::time::Duration::from_secs(30), server)
                 .await
                 .unwrap()
                 .unwrap();
         });
+    }
+
+    /// Proxy variables reqwest reads from the environment.
+    const PROXY_ENV: [&str; 6] = [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ];
+
+    #[test]
+    fn plaintext_relay_requests_bypass_ambient_proxies() {
+        // The child sets proxy variables for itself, so no other test in this
+        // binary ever sees them.
+        const CHILD: &str = "CLIPSYNC_TEST_PROXY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "regression_tests::plaintext_relay_requests_bypass_ambient_proxies",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env_remove("NO_PROXY")
+                .env_remove("no_proxy")
+                .env_remove(clipsync_transport::ALLOW_INSECURE_RELAY_ENV);
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "proxy fixture failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "proxy fixture did not run"
+            );
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            use axum::{http::StatusCode, routing::post, Router};
+            use std::sync::{
+                atomic::{AtomicUsize, Ordering},
+                Arc, Mutex,
+            };
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            // Request heads in this fixture are a few hundred bytes; the bound
+            // only stops a runaway read.
+            const MAX_REQUEST_HEAD: usize = 32768;
+            let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+            let proxied = Arc::new(Mutex::new(Vec::<String>::new()));
+            let seen = proxied.clone();
+            let _proxy = tokio::spawn(async move {
+                loop {
+                    let (mut stream, _) = proxy.accept().await.unwrap();
+                    let mut head = Vec::new();
+                    while !head.windows(4).any(|part| part == b"\r\n\r\n")
+                        && head.len() < MAX_REQUEST_HEAD
+                    {
+                        let mut buffer = [0; 1024];
+                        match stream.read(&mut buffer).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(count) => head.extend_from_slice(&buffer[..count]),
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&head);
+                    seen.lock()
+                        .unwrap()
+                        .push(head.lines().next().unwrap_or_default().to_owned());
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                }
+            });
+            for name in PROXY_ENV {
+                std::env::set_var(name, &proxy_url);
+            }
+            let joins = Arc::new(AtomicUsize::new(0));
+            let relay = {
+                let joins = joins.clone();
+                crate::test_relay::Server::http(Router::new().route(
+                    "/v1/pairing/join",
+                    post(move || async move {
+                        joins.fetch_add(1, Ordering::SeqCst);
+                        (StatusCode::CONFLICT, "code_invalid")
+                    }),
+                ))
+                .await
+            };
+            let directory = tempfile::TempDir::new().unwrap();
+            let store = clipsync_storage::LocalStore::open_from(super::AppPaths::from_root(
+                directory.path().into(),
+            ))
+            .unwrap();
+            let identity = clipsync_crypto::DeviceIdentity::from_bytes("proxied".into(), [47; 32]);
+            let cfg = clipsync_storage::AppConfig {
+                relay_url: relay.url.clone(),
+                ..Default::default()
+            };
+            let join = crate::pairing::join_room(&store, &identity, &cfg, "123456")
+                .await
+                .unwrap_err();
+            assert!(
+                join.to_string().contains("unknown or expired pairing code"),
+                "{join}"
+            );
+            assert_eq!(joins.load(Ordering::SeqCst), 1, "relay never saw the join");
+            let doctor = super::check_relay(&relay.url).await;
+            assert_eq!(doctor["status"], 404, "{doctor}");
+            assert!(
+                proxied.lock().unwrap().is_empty(),
+                "plaintext relay request went through the proxy: {:?}",
+                proxied.lock().unwrap()
+            );
+            // TLS relays keep honoring the proxy, which some networks require.
+            let report = super::check_relay("https://relay.example.test").await;
+            assert_eq!(report["ok"], false, "{report}");
+            assert_eq!(
+                *proxied.lock().unwrap(),
+                ["CONNECT relay.example.test:443 HTTP/1.1"],
+                "TLS relay request bypassed the proxy"
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn doctor_reports_a_refused_relay_url_without_contacting_it() {
+        // The documentation address never routes, so only a policy refusal
+        // can return before the HTTP client's own timeout.
+        const POLICY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+        // Clear an ambient opt-in so the result does not depend on the shell
+        // that runs the suite.
+        std::env::remove_var(clipsync_transport::ALLOW_INSECURE_RELAY_ENV);
+        let report = tokio::time::timeout(POLICY_DEADLINE, super::check_relay("http://192.0.2.1"))
+            .await
+            .expect("doctor contacted a refused relay");
+        assert_eq!(report["ok"], false);
+        let error = report["error"].as_str().unwrap();
+        assert!(error.contains("refusing plaintext http://"), "{error}");
+        assert!(error.contains("CLIPSYNC_ALLOW_INSECURE_RELAY"), "{error}");
+    }
+
+    #[test]
+    fn relay_urls_are_saved_in_normalized_form() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let app =
+            super::App::open_from(super::AppPaths::from_root(directory.path().into())).unwrap();
+        for (written, saved) in [
+            (" http://127.0.0.1:7600", "http://127.0.0.1:7600"),
+            ("http://127.0.0.1:7600/\n", "http://127.0.0.1:7600"),
+            (
+                "HTTPS://Relay.Example.Test:443/",
+                "https://relay.example.test",
+            ),
+            (
+                "https://relay.example.test/base/",
+                "https://relay.example.test/base/",
+            ),
+        ] {
+            app.config_set("relay_url", written).unwrap();
+            assert_eq!(
+                app.store.load_config().unwrap().relay_url,
+                saved,
+                "{written:?}"
+            );
+            app.init(Some(written.into())).unwrap();
+            assert_eq!(
+                app.store.load_config().unwrap().relay_url,
+                saved,
+                "{written:?}"
+            );
+        }
+        // Forms the WebSocket client would dial differently from the checked
+        // host are refused at configuration time, not first at connect time.
+        for written in ["http://0x7f.1:7600", "http://[0:0:0:0:0:0:0:1]:7600"] {
+            let err = app.config_set("relay_url", written).unwrap_err();
+            assert!(err.to_string().contains("canonical"), "{written}: {err}");
+            assert!(app.init(Some(written.into())).is_err(), "{written}");
+        }
+        assert_eq!(
+            app.store.load_config().unwrap().relay_url,
+            "https://relay.example.test/base/"
+        );
+    }
+
+    #[test]
+    fn init_refuses_an_insecure_relay_before_creating_an_identity() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let app =
+            super::App::open_from(super::AppPaths::from_root(directory.path().into())).unwrap();
+        let Err(err) = app.init(Some("http://relay.example.test".into())) else {
+            panic!("plaintext relay accepted");
+        };
+        assert!(matches!(err, super::CoreError::RelayUrl(_)), "{err}");
+        assert!(!app.store.paths.identity_file().exists());
+        assert!(!app.store.paths.config_file().exists());
     }
 }
 

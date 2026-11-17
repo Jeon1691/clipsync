@@ -21,6 +21,10 @@ listener without transport settings now fail before binding a port.
 
 The root Compose example explicitly opts into local-development HTTP and only
 publishes port 7600 on host loopback. It is ready for `http://127.0.0.1:7600`.
+Clients accept plaintext relay URLs only for loopback hosts; a client on another
+machine must use the relay's HTTPS/WSS URL. `CLIPSYNC_ALLOW_INSECURE_RELAY=1` on
+the client overrides this for a fully trusted network, with a warning, but
+exposes pairing codes and device tokens to anyone on the path.
 Binding a raw relay publicly now requires a deliberate transport choice.
 
 ## Direct HTTPS/WSS
