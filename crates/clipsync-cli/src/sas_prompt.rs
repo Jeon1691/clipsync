@@ -9,7 +9,13 @@
 //! file and waits for `clipsync room confirm` or `clipsync room reject`.
 
 use std::future::Future;
+#[cfg(unix)]
+use std::io::Read;
 use std::io::{self, BufRead, IsTerminal, Write};
+#[cfg(unix)]
+use std::os::fd::{AsFd, AsRawFd};
+#[cfg(windows)]
+use std::os::windows::io::{AsHandle, AsRawHandle};
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
@@ -35,6 +41,11 @@ const PAIRING_FILE_POLL: Duration = Duration::from_millis(100);
 /// worker to finish. The worker gives up after the relay pairing TTL, so twice
 /// that covers a joiner arriving late plus the commit.
 const CONFIRM_COMMAND_DEADLINE: Duration = Duration::from_secs(PAIRING_TTL_SECS * 2);
+/// Longest answer line read from a terminal. A valid answer is the six
+/// digits, possibly grouped with spaces, or "yes"; anything this long is
+/// not one, and the bound stops reading a line that never ends.
+#[cfg(unix)]
+const MAX_ANSWER_BYTES: usize = 256;
 
 pub type SasConfirm =
     Box<dyn FnOnce(SasCheck) -> Pin<Box<dyn Future<Output = SasDecision> + Send>> + Send>;
@@ -71,9 +82,12 @@ pub fn terminal_confirmer(mode: SasMode) -> SasConfirm {
 /// Prompt for and read one answer line, then decide. "yes" counts only
 /// when a person answers at a terminal that has just shown the code.
 async fn ask(mode: SasMode, sas: &str) -> SasDecision {
-    let interactive = io::stdin().is_terminal();
+    // The caller has just shown the code. A line typed before that (say,
+    // "yes" while waiting for a joiner) answers a code nobody has seen, so
+    // drop it; if that is not possible, only the digits count.
+    let interactive = discard_type_ahead();
     prompt_line(mode, interactive);
-    let answer = tokio::task::spawn_blocking(read_answer_line)
+    let answer = tokio::task::spawn_blocking(move || read_answer_line(interactive))
         .await
         .ok()
         .flatten();
@@ -83,6 +97,36 @@ async fn ask(mode: SasMode, sas: &str) -> SasDecision {
         );
     }
     decide(sas, answer.as_deref(), interactive)
+}
+
+/// True when stdin is a terminal and everything typed into it so far was
+/// discarded, so the next line was typed after the code appeared.
+fn discard_type_ahead() -> bool {
+    let stdin = io::stdin();
+    stdin.is_terminal() && discard_pending_input(&stdin)
+}
+
+/// Drop input the terminal has received but nobody has read yet.
+#[cfg(unix)]
+fn discard_pending_input(input: &impl AsFd) -> bool {
+    // SAFETY: tcflush only uses the descriptor number, borrowed for the call.
+    unsafe { libc::tcflush(input.as_fd().as_raw_fd(), libc::TCIFLUSH) == 0 }
+}
+
+/// Drop input the console has received but nobody has read yet. Fails for
+/// a handle that is not a console, such as an MSYS terminal's pipe.
+#[cfg(windows)]
+fn discard_pending_input(input: &impl AsHandle) -> bool {
+    extern "system" {
+        fn FlushConsoleInputBuffer(console_input: *mut std::ffi::c_void) -> i32;
+    }
+    // SAFETY: the call only uses the handle, borrowed for its duration.
+    unsafe { FlushConsoleInputBuffer(input.as_handle().as_raw_handle()) != 0 }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn discard_pending_input<T>(_input: &T) -> bool {
+    false
 }
 
 /// Background worker: publish the SAS in the pairing file and wait for
@@ -468,16 +512,47 @@ fn display_name(peer_device_name: &str) -> &str {
     }
 }
 
-fn read_answer_line() -> Option<String> {
-    let stdin = io::stdin();
-    let mut line = String::new();
-    if stdin.is_terminal() {
-        let _ = io::stdout().flush();
+/// Read one answer line. `at_terminal` means the terminal's pending input
+/// was just discarded (see [`discard_type_ahead`]).
+fn read_answer_line(at_terminal: bool) -> Option<String> {
+    let _ = io::stdout().flush();
+    #[cfg(unix)]
+    if at_terminal {
+        return read_terminal_line();
     }
-    match stdin.lock().read_line(&mut line) {
+    // Windows: console line input hands std one line per read, and nothing
+    // else reads stdin, so std's buffer holds nothing from before the prompt.
+    #[cfg(not(unix))]
+    let _ = at_terminal;
+    let mut line = String::new();
+    match io::stdin().lock().read_line(&mut line) {
         Ok(0) | Err(_) => None,
         Ok(_) => Some(line),
     }
+}
+
+/// Read one line straight from the terminal, a byte at a time. This skips
+/// std's shared stdin buffer, which could still hold bytes read before the
+/// prompt, and reads nothing past the answer.
+#[cfg(unix)]
+fn read_terminal_line() -> Option<String> {
+    let mut terminal = std::fs::File::from(io::stdin().as_fd().try_clone_to_owned().ok()?);
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    while line.len() < MAX_ANSWER_BYTES {
+        match terminal.read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) => {
+                line.push(byte[0]);
+                if byte[0] == b'\n' {
+                    break;
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+    (!line.is_empty()).then(|| String::from_utf8_lossy(&line).into_owned())
 }
 
 /// Accept the code shown on the other device, or "y"/"yes" when
@@ -1048,5 +1123,56 @@ mod tests {
                 assert!(error.contains("completed before the rejection"), "{error}");
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discarding_pending_input_drops_lines_typed_before_the_prompt() {
+        use std::fs::File;
+        use std::io::Read;
+        use std::os::fd::FromRawFd;
+
+        let (mut controller_fd, mut device_fd) = (-1, -1);
+        // SAFETY: openpty writes two fresh descriptors into the pointers and
+        // reads no name, termios or window size (all null; null `*mut`
+        // coerces where a platform declares `*const`).
+        let opened = unsafe {
+            libc::openpty(
+                &mut controller_fd,
+                &mut device_fd,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(opened, 0, "openpty: {}", io::Error::last_os_error());
+        // SAFETY: each descriptor is owned by exactly one `File` from here on.
+        let (mut keyboard, mut terminal) = unsafe {
+            (
+                File::from_raw_fd(controller_fd),
+                File::from_raw_fd(device_fd),
+            )
+        };
+        keyboard.write_all(b"yes\n").unwrap();
+        // The echo shows the terminal has queued the line as input.
+        let mut echo = [0u8; 16];
+        let echoed = keyboard.read(&mut echo).unwrap();
+        assert!(echo[..echoed].starts_with(b"yes"));
+
+        assert!(discard_pending_input(&terminal));
+        keyboard.write_all(b"no\n").unwrap();
+        let mut answer = [0u8; 16];
+        let read = terminal.read(&mut answer).unwrap();
+        assert_eq!(&answer[..read], b"no\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn discarding_pending_input_fails_for_a_handle_that_is_not_a_console() {
+        // An MSYS terminal reports stdin as a terminal but hands over a pipe,
+        // which has no console input buffer to flush. "yes" must then not
+        // count, because a line typed ahead may still be waiting.
+        let not_a_console = tempfile::tempfile().unwrap();
+        assert!(!discard_pending_input(&not_a_console));
     }
 }

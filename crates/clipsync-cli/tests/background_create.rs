@@ -802,3 +802,329 @@ async fn rejecting_before_a_join_lets_a_new_room_create_replace_the_pairing() {
     kill_pid(second_pid);
     relay_task.abort();
 }
+
+/// A CLI process whose stdin, stdout and stderr are a pseudo-terminal, so it
+/// behaves as it would for a person typing at a real terminal.
+#[cfg(unix)]
+mod terminal {
+    use std::fs::File;
+    use std::io::{Read, Write};
+    use std::os::fd::FromRawFd;
+    use std::path::Path;
+    use std::process::{Child, Command, ExitStatus, Stdio};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    /// How long a test waits for terminal output or for the process to exit.
+    const TERMINAL_DEADLINE: Duration = Duration::from_secs(20);
+    /// Re-check interval while waiting for terminal output.
+    const TERMINAL_POLL: Duration = Duration::from_millis(20);
+    /// Read chunk for the pseudo-terminal's controller side.
+    const READ_CHUNK: usize = 4096;
+
+    pub struct TerminalCli {
+        child: Child,
+        controller: File,
+        output: Arc<Mutex<String>>,
+        closed: Arc<Mutex<bool>>,
+    }
+
+    impl TerminalCli {
+        pub fn spawn(home: &Path, relay: &str, args: &[&str]) -> Self {
+            let (mut controller_fd, mut device_fd) = (-1, -1);
+            // SAFETY: openpty writes two fresh descriptors into the pointers
+            // and reads no name, termios or window size (all null).
+            let opened = unsafe {
+                libc::openpty(
+                    &mut controller_fd,
+                    &mut device_fd,
+                    // Null `*mut` coerces where a platform declares `*const`.
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_eq!(opened, 0, "openpty: {}", std::io::Error::last_os_error());
+            for fd in [controller_fd, device_fd] {
+                // Keep both ends out of processes other tests spawn meanwhile,
+                // so the controller sees end of output when this child exits.
+                // SAFETY: `fd` is a descriptor openpty just returned.
+                assert_ne!(
+                    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                    -1
+                );
+            }
+            // SAFETY: each descriptor is owned by exactly one `File` from here on.
+            let (controller, device) = unsafe {
+                (
+                    File::from_raw_fd(controller_fd),
+                    File::from_raw_fd(device_fd),
+                )
+            };
+            let child = {
+                let mut command = Command::new(super::bin());
+                command
+                    .args(args)
+                    .env("HOME", home)
+                    .env("USERPROFILE", home)
+                    .env("RUST_LOG", "error")
+                    .env("CLIPSYNC_HOME", home)
+                    .env("CLIPSYNC_RELAY_URL", relay)
+                    .env("CLIPSYNC_NO_DAEMON", "1")
+                    .env("NO_PROXY", "127.0.0.1,localhost")
+                    .env("no_proxy", "127.0.0.1,localhost")
+                    .env_remove("CLIPSYNC_LISTEN")
+                    .env_remove("CLIPSYNC_CA_FILE")
+                    .stdin(Stdio::from(device.try_clone().unwrap()))
+                    .stdout(Stdio::from(device.try_clone().unwrap()))
+                    .stderr(Stdio::from(device));
+                command.spawn().expect("run clipsync at a terminal")
+                // Dropping `command` closes this process's copies of the device.
+            };
+            let output = Arc::new(Mutex::new(String::new()));
+            let closed = Arc::new(Mutex::new(false));
+            let mut reader = controller.try_clone().unwrap();
+            let (sink, done) = (output.clone(), closed.clone());
+            std::thread::spawn(move || {
+                let mut chunk = [0u8; READ_CHUNK];
+                // Linux reports EIO once every device descriptor is closed.
+                while let Ok(read @ 1..) = reader.read(&mut chunk) {
+                    let text = String::from_utf8_lossy(&chunk[..read]).replace('\r', "");
+                    sink.lock().unwrap().push_str(&text);
+                }
+                *done.lock().unwrap() = true;
+            });
+            Self {
+                child,
+                controller,
+                output,
+                closed,
+            }
+        }
+
+        pub fn output(&self) -> String {
+            self.output.lock().unwrap().clone()
+        }
+
+        /// Wait until the terminal has shown `text`; return everything so far.
+        pub async fn wait_for(&mut self, text: &str) -> String {
+            let deadline = Instant::now() + TERMINAL_DEADLINE;
+            loop {
+                let shown = self.output();
+                if shown.contains(text) {
+                    return shown;
+                }
+                if Instant::now() > deadline {
+                    let _ = self.child.kill();
+                    panic!("terminal never showed {text:?}; it showed {shown:?}");
+                }
+                tokio::time::sleep(TERMINAL_POLL).await;
+            }
+        }
+
+        /// Type `line` and Enter, as a person would at the keyboard.
+        pub fn type_line(&mut self, line: &str) {
+            self.controller
+                .write_all(format!("{line}\n").as_bytes())
+                .unwrap();
+            self.controller.flush().unwrap();
+        }
+
+        /// Wait for the process to exit and the terminal to drain.
+        pub async fn finish(mut self) -> (ExitStatus, String) {
+            let deadline = Instant::now() + TERMINAL_DEADLINE;
+            let status = loop {
+                if let Some(status) = self.child.try_wait().unwrap() {
+                    break status;
+                }
+                if Instant::now() > deadline {
+                    let _ = self.child.kill();
+                    panic!("terminal process never exited: {:?}", self.output());
+                }
+                tokio::time::sleep(TERMINAL_POLL).await;
+            };
+            while !*self.closed.lock().unwrap() && Instant::now() < deadline {
+                tokio::time::sleep(TERMINAL_POLL).await;
+            }
+            (status, self.output())
+        }
+    }
+
+    impl Drop for TerminalCli {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+#[cfg(unix)]
+const TERMINAL_PROMPT: &str = "Type the code shown on the other device";
+
+/// Start a background `room create` on `a`, then `room confirm` at a terminal.
+/// Returns the worker pid, the pairing code and the confirm terminal once it
+/// says it is waiting for a joiner.
+#[cfg(unix)]
+async fn confirm_at_terminal(a: &Path, relay: &str) -> (u32, String, terminal::TerminalCli) {
+    seed_identity_file(a);
+    let create = clipsync(a, relay, &["--json", "room", "create", "--no-auto-sync"]);
+    assert!(
+        create.status.success(),
+        "{}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let offer = json_out(&create);
+    let code = offer["pairing_code"].as_str().unwrap().to_string();
+    let pid = offer["pid"].as_u64().unwrap() as u32;
+    let mut confirm = terminal::TerminalCli::spawn(a, relay, &["room", "confirm"]);
+    confirm
+        .wait_for("waiting for the other device to join")
+        .await;
+    (pid, code, confirm)
+}
+
+/// The joiner (piped, as in a script) types the code it was shown.
+#[cfg(unix)]
+async fn join_and_answer_with_shown_code(
+    b: &Path,
+    relay: &str,
+    code: &str,
+) -> tokio::process::Child {
+    seed_identity_file(b);
+    let mut joiner = spawn_cli(b, relay, &["room", "join", code, "--no-auto-sync"]);
+    let mut joiner_input = joiner.stdin.take().unwrap();
+    let mut joiner_output = tokio::io::BufReader::new(joiner.stdout.take().unwrap());
+    let joiner_sas = digits(&line_with_prefix(&mut joiner_output, "verification code: ").await);
+    use tokio::io::AsyncWriteExt;
+    joiner_input
+        .write_all(format!("{joiner_sas}\n").as_bytes())
+        .await
+        .unwrap();
+    joiner_input.flush().await.unwrap();
+    // Keep draining stdout so the joiner never blocks on a full pipe.
+    tokio::spawn(async move {
+        let _keep_stdin_open = joiner_input;
+        let mut rest = Vec::new();
+        let _ = tokio::io::AsyncReadExt::read_to_end(&mut joiner_output, &mut rest).await;
+    });
+    joiner
+}
+
+#[cfg(unix)]
+fn assert_nothing_stored(homes: &[&Path], relay: &str) {
+    for home in homes {
+        let rooms = json_out(&clipsync(home, relay, &["--json", "room", "list"]));
+        assert_eq!(rooms, serde_json::json!([]));
+        assert!(secrets_in(home).is_empty());
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn yes_typed_before_the_code_is_shown_does_not_confirm_room_confirm() {
+    // A user types "yes" while `room confirm` still waits for a joiner. The
+    // code shown afterwards must be compared: that early line is discarded.
+    let (relay, relay_task) = start_relay().await;
+    let a = TempDir::new().unwrap();
+    let b = TempDir::new().unwrap();
+    let (pid, code, mut confirm) = confirm_at_terminal(a.path(), &relay).await;
+    confirm.type_line("yes");
+    // The terminal echoed the line, so it is queued as input already.
+    confirm.wait_for("yes\n").await;
+    let joiner = join_and_answer_with_shown_code(b.path(), &relay, &code).await;
+    confirm.wait_for(TERMINAL_PROMPT).await;
+    confirm.type_line("no");
+    let (status, shown) = confirm.finish().await;
+    let join = tokio::time::timeout(Duration::from_secs(20), joiner.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    if status.success() {
+        kill_pid(pid);
+        panic!("type-ahead \"yes\" confirmed a code the user never saw: {shown}");
+    }
+    assert!(shown.contains("does not match"), "{shown}");
+    assert!(!join.status.success());
+    assert_nothing_stored(&[a.path(), b.path()], &relay);
+    relay_task.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn yes_typed_after_the_code_is_shown_confirms_room_confirm() {
+    // Control for the type-ahead test: the terminal path accepts "yes" when
+    // it is typed after the prompt.
+    let (relay, relay_task) = start_relay().await;
+    let a = TempDir::new().unwrap();
+    let b = TempDir::new().unwrap();
+    let (pid, code, mut confirm) = confirm_at_terminal(a.path(), &relay).await;
+    let joiner = join_and_answer_with_shown_code(b.path(), &relay, &code).await;
+    confirm.wait_for(TERMINAL_PROMPT).await;
+    confirm.type_line("yes");
+    let (status, shown) = confirm.finish().await;
+    let join = tokio::time::timeout(Duration::from_secs(20), joiner.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    if !status.success() {
+        kill_pid(pid);
+        panic!("\"yes\" after the prompt did not confirm: {shown}");
+    }
+    assert!(shown.contains("paired"), "{shown}");
+    assert!(
+        join.status.success(),
+        "{}",
+        String::from_utf8_lossy(&join.stderr)
+    );
+    relay_task.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn yes_typed_before_the_code_is_shown_does_not_confirm_room_join() {
+    // Same type-ahead, on the joining device's terminal prompt.
+    let (relay, relay_task) = start_relay().await;
+    let a = TempDir::new().unwrap();
+    let b = TempDir::new().unwrap();
+    seed_identity_file(a.path());
+    seed_identity_file(b.path());
+    let create = clipsync(
+        a.path(),
+        &relay,
+        &["--json", "room", "create", "--no-auto-sync"],
+    );
+    assert!(
+        create.status.success(),
+        "{}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let offer = json_out(&create);
+    let code = offer["pairing_code"].as_str().unwrap().to_string();
+    let pid = offer["pid"].as_u64().unwrap() as u32;
+    let mut joiner =
+        terminal::TerminalCli::spawn(b.path(), &relay, &["room", "join", &code, "--no-auto-sync"]);
+    joiner.type_line("yes");
+    joiner.wait_for("yes\n").await;
+    let creator_wait = background_sas(a.path()).await;
+    joiner.wait_for(TERMINAL_PROMPT).await;
+    joiner.type_line("no");
+    // The creator's user compares correctly; only the joiner's answer decides.
+    let (home, relay_url, sas) = (
+        a.path().to_path_buf(),
+        relay.clone(),
+        creator_wait.sas.clone().unwrap(),
+    );
+    let creator = tokio::task::spawn_blocking(move || {
+        clipsync(&home, &relay_url, &["room", "confirm", &sas])
+    });
+    let (status, shown) = joiner.finish().await;
+    let creator = creator.await.unwrap();
+    if status.success() {
+        kill_pid(pid);
+        panic!("type-ahead \"yes\" confirmed a code the user never saw: {shown}");
+    }
+    assert!(shown.contains("verification code rejected"), "{shown}");
+    assert!(!creator.status.success());
+    assert_nothing_stored(&[a.path(), b.path()], &relay);
+    relay_task.abort();
+}

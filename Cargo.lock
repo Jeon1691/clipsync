@@ -964,6 +964,7 @@ dependencies = [
  "clipsync-relay",
  "clipsync-storage",
  "humantime",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

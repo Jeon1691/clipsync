@@ -67,7 +67,12 @@ device is the most reliable comparison, and the only one the CLI accepts
 without a terminal: `clipsync room confirm CODE` and a piped `room join`
 answer must be the other device's digits, which are checked against the local
 code. Answering "yes" is accepted only at an interactive prompt that has just
-displayed the local code, and relies on the user having looked.
+displayed the local code, and relies on the user having looked. Before that
+prompt the CLI discards everything already typed at the terminal, so a "yes"
+typed while `room confirm` or `room join` was still waiting cannot approve a
+code that appears later. If the terminal's pending input cannot be discarded
+(for example an MSYS terminal on Windows, whose stdin is a pipe rather than a
+console), only the other device's digits are accepted.
 
 **Limit: offline search by a relay.** There is no commitment step: a device
 sends its SPAKE2 message before it sees the peer's. A relay in the middle sees
