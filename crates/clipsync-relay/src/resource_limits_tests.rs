@@ -40,7 +40,7 @@ fn every_limit_is_configurable_from_the_command_line() {
         "--pairing-relay-create-limit",
         "7",
         "--max-rooms",
-        "40",
+        "2000",
         "--max-connections",
         "9",
         "--max-client-connections",
@@ -52,7 +52,7 @@ fn every_limit_is_configurable_from_the_command_line() {
             client_create_limit: 3,
             client_create_window_secs: 600,
             relay_create_limit: 7,
-            max_rooms: 40,
+            max_rooms: 2000,
             max_connections: 9,
             max_client_connections: 4,
         }
@@ -113,6 +113,14 @@ fn limits_that_cannot_work_are_refused_with_the_variable_name() {
             },
             "CLIPSYNC_RELAY_MAX_ROOMS",
         ),
+        // Every room could have a device online, leaving none to evict.
+        (
+            RelayResourceLimits {
+                max_rooms: defaults.max_connections + MAX_ACTIVE_PAIRING_SESSIONS,
+                ..defaults
+            },
+            "CLIPSYNC_RELAY_MAX_ROOMS",
+        ),
         (
             RelayResourceLimits {
                 max_connections: 0,
@@ -139,4 +147,44 @@ fn limits_that_cannot_work_are_refused_with_the_variable_name() {
         let error = limits.validate().unwrap_err().to_string();
         assert!(error.contains(variable), "{limits:?}: {error}");
     }
+}
+
+#[test]
+fn the_smallest_valid_room_cap_leaves_a_room_to_evict() {
+    let defaults = RelayResourceLimits::default();
+    RelayResourceLimits {
+        max_rooms: defaults.max_connections + MAX_ACTIVE_PAIRING_SESSIONS + 1,
+        ..defaults
+    }
+    .validate()
+    .unwrap();
+}
+
+#[test]
+fn derived_limits_keep_a_reserve_for_authenticated_sockets_and_group_ipv6_sites() {
+    let defaults = RelayResourceLimits::default();
+    let connections = defaults.connection_limits();
+    assert_eq!(connections.max_total, MAX_CONNECTIONS);
+    assert_eq!(connections.max_unauthenticated, 384);
+    assert_eq!(connections.max_per_client, MAX_CLIENT_CONNECTIONS);
+    assert_eq!(connections.max_per_site, 96);
+    assert_eq!(defaults.create_budget().site_limit, Some(60));
+    // The per-site allowance never exceeds the relay-wide one.
+    let tight = RelayResourceLimits {
+        client_create_limit: PAIRING_CREATE_RELAY_LIMIT,
+        max_client_connections: MAX_CONNECTIONS,
+        ..defaults
+    };
+    assert_eq!(
+        tight.create_budget().site_limit,
+        Some(PAIRING_CREATE_RELAY_LIMIT)
+    );
+    assert_eq!(tight.connection_limits().max_per_site, MAX_CONNECTIONS);
+    // A one-slot relay still admits one unauthenticated socket.
+    let single = RelayResourceLimits {
+        max_connections: 1,
+        max_client_connections: 1,
+        ..defaults
+    };
+    assert_eq!(single.connection_limits().max_unauthenticated, 1);
 }

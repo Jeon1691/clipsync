@@ -26,6 +26,9 @@ fn pending_pairing(state: &RelayState) -> (PairingSessionId, ConnCtx) {
             pairing_sid: Some(sid.to_string()),
             device_role: DeviceRole::Owner,
             pairing_side: None,
+            client: TEST_CLIENT,
+            presence: None,
+            pairing_deadline: None,
         },
     )
 }

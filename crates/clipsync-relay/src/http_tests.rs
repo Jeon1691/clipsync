@@ -548,24 +548,6 @@ async fn invalid_resource_limits_stop_the_relay_from_starting() {
     .is_err());
 }
 
-fn resource_limited_state(proxy: IpAddr, limits: RelayResourceLimits) -> Arc<RelayState> {
-    Arc::new(
-        RelayState::with_limits(
-            RelayConfig {
-                bind: "127.0.0.1:0".parse().unwrap(),
-                public_url: "http://127.0.0.1".into(),
-                token_secret: rand::random::<[u8; 32]>().to_vec(),
-                webhook_url: None,
-                webhook_secret: None,
-            },
-            vec![proxy.into()],
-            PairingJoinLimits::default(),
-            limits,
-        )
-        .unwrap(),
-    )
-}
-
 async fn create_status(
     state: &Arc<RelayState>,
     peer: SocketAddr,
@@ -594,16 +576,24 @@ async fn create_status(
 #[tokio::test]
 async fn pairing_create_answers_429_per_client_and_503_when_the_relay_is_full() {
     const CLIENT_LIMIT: u32 = 2;
+    // Far below what startup accepts, so open sessions alone fill it.
     const MAX_ROOMS: usize = 3;
     let proxy: SocketAddr = "127.0.0.1:4000".parse().unwrap();
-    let state = resource_limited_state(
-        proxy.ip(),
+    let state = Arc::new(RelayState::unvalidated(
+        RelayConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            public_url: "http://127.0.0.1".into(),
+            token_secret: rand::random::<[u8; 32]>().to_vec(),
+            webhook_url: None,
+            webhook_secret: None,
+        },
+        vec![proxy.ip().into()],
         RelayResourceLimits {
             client_create_limit: CLIENT_LIMIT,
             max_rooms: MAX_ROOMS,
             ..Default::default()
         },
-    );
+    ));
     for _ in 0..CLIENT_LIMIT {
         create_status(&state, proxy, forwarded_for("192.0.2.1"))
             .await
@@ -634,83 +624,103 @@ async fn pairing_create_answers_429_per_client_and_503_when_the_relay_is_full() 
     }
 }
 
+/// Serve the relay with `limits` and every peer trusted as a proxy, so tests
+/// pick each connection's client address with `X-Forwarded-For`.
+async fn serve_limited(limits: RelayResourceLimits) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = router_with_limits(
+        RelayConfig {
+            bind: address,
+            public_url: format!("http://{address}"),
+            token_secret: rand::random::<[u8; 32]>().to_vec(),
+            webhook_url: None,
+            webhook_secret: None,
+        },
+        vec![address.ip().into()],
+        PairingJoinLimits::default(),
+        limits,
+    )
+    .unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    (address, server)
+}
+
+type WsClient =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Open a WebSocket as forwarded client `client`, or return the refusal status.
+async fn connect_as(address: SocketAddr, client: &str) -> Result<WsClient, StatusCode> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::Error as WsError;
+    let mut request = format!("ws://{address}/v1/ws")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("x-forwarded-for", client.parse().unwrap());
+    match tokio_tungstenite::connect_async(request).await {
+        Ok((socket, _)) => Ok(socket),
+        Err(WsError::Http(response)) => Err(response.status()),
+        Err(other) => panic!("unexpected WebSocket error {other}"),
+    }
+}
+
 /// Regression for unlimited WebSocket connections: the connection after a
 /// client's cap, and after the relay-wide cap, is refused before the upgrade,
 /// and a closed socket frees its slot.
 #[tokio::test]
 async fn websocket_connections_past_the_client_and_relay_caps_are_refused() {
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-    use tokio_tungstenite::tungstenite::Error as WsError;
     const MAX_CONNECTIONS: usize = 3;
     const MAX_CLIENT_CONNECTIONS: usize = 2;
 
     tokio::time::timeout(Duration::from_secs(10), async {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let app = router_with_limits(
-            RelayConfig {
-                bind: address,
-                public_url: format!("http://{address}"),
-                token_secret: rand::random::<[u8; 32]>().to_vec(),
-                webhook_url: None,
-                webhook_secret: None,
-            },
-            vec![address.ip().into()],
-            PairingJoinLimits::default(),
-            RelayResourceLimits {
-                max_connections: MAX_CONNECTIONS,
-                max_client_connections: MAX_CLIENT_CONNECTIONS,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await
-            .unwrap();
-        });
-        let connect = |client: &'static str| async move {
-            let mut request = format!("ws://{address}/v1/ws")
-                .into_client_request()
-                .unwrap();
-            request
-                .headers_mut()
-                .insert("x-forwarded-for", client.parse().unwrap());
-            match tokio_tungstenite::connect_async(request).await {
-                Ok((socket, _)) => Ok(socket),
-                Err(WsError::Http(response)) => Err(response.status()),
-                Err(other) => panic!("unexpected WebSocket error {other}"),
-            }
-        };
-
+        let (address, server) = serve_limited(RelayResourceLimits {
+            max_connections: MAX_CONNECTIONS,
+            max_client_connections: MAX_CLIENT_CONNECTIONS,
+            ..Default::default()
+        })
+        .await;
         let mut first = Vec::new();
         for _ in 0..MAX_CLIENT_CONNECTIONS {
-            first.push(connect("192.0.2.1").await.unwrap());
+            first.push(connect_as(address, "192.0.2.1").await.unwrap());
         }
         assert_eq!(
-            connect("192.0.2.1").await.err(),
+            connect_as(address, "192.0.2.1").await.err(),
             Some(StatusCode::TOO_MANY_REQUESTS)
         );
-        let _second = connect("192.0.2.2").await.unwrap();
-        assert_eq!(
-            connect("192.0.2.3").await.err(),
-            Some(StatusCode::SERVICE_UNAVAILABLE)
-        );
-
         first.pop().unwrap().close(None).await.unwrap();
         let reopened = loop {
-            match connect("192.0.2.1").await {
+            match connect_as(address, "192.0.2.1").await {
                 Ok(socket) => break socket,
-                Err(StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE) => {
+                Err(StatusCode::TOO_MANY_REQUESTS) => {
                     tokio::time::sleep(Duration::from_millis(10)).await
                 }
                 Err(other) => panic!("unexpected status {other}"),
             }
         };
         drop(reopened);
+        server.abort();
+
+        // A one-slot relay: the second connection, from anyone, gets 503.
+        let (address, server) = serve_limited(RelayResourceLimits {
+            max_connections: 1,
+            max_client_connections: 1,
+            ..Default::default()
+        })
+        .await;
+        let _held = connect_as(address, "192.0.2.1").await.unwrap();
+        assert_eq!(
+            connect_as(address, "192.0.2.2").await.err(),
+            Some(StatusCode::SERVICE_UNAVAILABLE)
+        );
         let metrics = reqwest::get(format!("http://{address}/metrics"))
             .await
             .unwrap()
@@ -721,7 +731,45 @@ async fn websocket_connections_past_the_client_and_relay_caps_are_refused() {
             .lines()
             .find_map(|line| line.strip_prefix("clipsync_ws_refused "))
             .unwrap();
-        assert!(refused.parse::<u64>().unwrap() >= 2, "{metrics}");
+        assert!(refused.parse::<u64>().unwrap() >= 1, "{metrics}");
+        server.abort();
+    })
+    .await
+    .unwrap();
+}
+
+/// Regression for pre-hello sockets holding every connection slot: once
+/// unauthenticated sockets fill their share, a newcomer is admitted and the
+/// oldest of them is closed, instead of the newcomer being refused.
+#[tokio::test]
+async fn a_newcomer_evicts_the_oldest_unauthenticated_socket_instead_of_being_refused() {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message as ClientMessage;
+    const MAX_CONNECTIONS: usize = 4;
+    // 75% of four slots.
+    const MAX_UNAUTHENTICATED: usize = 3;
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (address, server) = serve_limited(RelayResourceLimits {
+            max_connections: MAX_CONNECTIONS,
+            max_client_connections: 1,
+            ..Default::default()
+        })
+        .await;
+        let mut flood = Vec::new();
+        for n in 0..MAX_UNAUTHENTICATED {
+            flood.push(connect_as(address, &format!("192.0.2.{n}")).await.unwrap());
+        }
+        let _newcomer = connect_as(address, "203.0.113.1")
+            .await
+            .expect("a newcomer must not be refused while pre-hello sockets hold the slots");
+        // The oldest flood socket is closed by the relay.
+        loop {
+            match flood[0].next().await {
+                None | Some(Err(_)) | Some(Ok(ClientMessage::Close(_))) => break,
+                Some(Ok(_)) => {}
+            }
+        }
         server.abort();
     })
     .await

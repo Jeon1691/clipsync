@@ -13,17 +13,17 @@ use tokio::sync::mpsc;
 use clipsync_protocol::{
     clamp_ttl, CreatePairingRequest, CreatePairingResponse, DeviceRole, JoinPairingRequest,
     JoinPairingResponse, PairingSessionId, PeerInfo, QueuedEnvelope, RoomId, HARD_MAX_TTL_SECS,
-    PAIRING_MAX_ATTEMPTS, PAIRING_TTL_SECS,
+    PAIRING_MAX_ATTEMPTS, PAIRING_TTL_SECS, QUEUE_TTL_SECS,
 };
 
 use crate::auth::issue_token;
 use crate::client_ip::TrustedProxies;
 use crate::connection_limits::{ConnectionCounts, ConnectionRefused, ConnectionSlot};
 use crate::join_limits::{PairingJoinLimits, PAIRING_CODE_SPACE};
-use crate::rate_limit::Budget;
+use crate::rate_limit::{client_key, Budget};
 use crate::resource_limits::{
-    RelayResourceLimits, SocketDeadlines, MAX_ACTIVE_PAIRING_SESSIONS, MAX_PAIRING_FIELD_BYTES,
-    MAX_QUEUED_TEXT_ENVELOPES,
+    RelayResourceLimits, SocketDeadlines, MAX_ACTIVE_PAIRING_SESSIONS,
+    MAX_CLIENT_QUEUED_TEXT_ENVELOPES, MAX_PAIRING_FIELD_BYTES, MAX_QUEUED_TEXT_ENVELOPES,
 };
 use crate::{CreateError, JoinError, RelayConfig, WsOut};
 
@@ -37,6 +37,18 @@ const DEVICE_TOKEN_TTL_SECS: i64 = 365 * 24 * 60 * 60;
 /// Tokens carry whole-second expiry times and stay valid through that second,
 /// so a room outlives its tokens by this margin.
 const TOKEN_EXPIRY_GRACE_SECS: i64 = 1;
+/// Scans for an idle room to evict before giving up. A scan only misses when
+/// a device attached to its candidate between the scan and the removal, so a
+/// few scans always find one unless every room really has a device online.
+const ROOM_EVICTION_ATTEMPTS: usize = 4;
+
+/// One offline text envelope, charged to the client that sent it.
+struct QueuedText {
+    envelope: QueuedEnvelope,
+    expires_at: DateTime<Utc>,
+    /// The sender's client key (see [`client_key`]).
+    sender: IpAddr,
+}
 
 pub struct RelayState {
     pub config: RelayConfig,
@@ -44,7 +56,11 @@ pub struct RelayState {
     pairing_by_id: DashMap<String, String>,
     rooms: DashMap<String, Room>,
     pub connections: DashMap<String, mpsc::Sender<WsOut>>,
-    queue: DashMap<String, (QueuedEnvelope, DateTime<Utc>)>,
+    queue: DashMap<String, QueuedText>,
+    /// Queued envelopes per sending client.
+    queue_senders: DashMap<IpAddr, usize>,
+    /// Orders room activity for least-recently-used eviction.
+    activity_clock: AtomicU64,
     /// Failed pairing joins, per client and relay-wide.
     join_budget: Budget,
     /// Created pairing sessions, per client and relay-wide.
@@ -69,8 +85,11 @@ pub struct RelayState {
     pub pairing_create_full: AtomicU64,
     /// WebSocket connections refused by a connection cap.
     pub connections_refused: AtomicU64,
-    /// Offline text envelopes not queued because the queue was full.
+    /// Offline text envelopes not queued because the queue, or the sender's
+    /// share of it, was full.
     pub queue_full: AtomicU64,
+    /// Rooms dropped to make way for a new pairing at the room cap.
+    pub rooms_evicted: AtomicU64,
     pub expired: AtomicU64,
 }
 
@@ -97,6 +116,36 @@ pub struct Room {
     pub default_ttl: u64,
     /// When the device tokens issued for this room expire.
     pub tokens_expire_at: DateTime<Utc>,
+    /// Authenticated device sockets attached to this room. A room with any is
+    /// never evicted.
+    pub(crate) online_sockets: usize,
+    /// When the room was last used, on the relay's activity clock: a device
+    /// attaching, sending or leaving.
+    pub(crate) last_active: AtomicU64,
+}
+
+/// An authenticated device socket's presence in its room; dropping it marks
+/// the socket gone. While any presence exists the room cannot be evicted.
+pub(crate) struct RoomPresence {
+    state: Arc<RelayState>,
+    room_id: String,
+}
+
+impl RoomPresence {
+    /// Record traffic in the room, for least-recently-used eviction.
+    pub(crate) fn touch(&self) {
+        self.state.touch_room(&self.room_id);
+    }
+}
+
+impl Drop for RoomPresence {
+    fn drop(&mut self) {
+        let stamp = self.state.next_activity();
+        if let Some(mut room) = self.state.rooms.get_mut(&self.room_id) {
+            room.online_sockets = room.online_sockets.saturating_sub(1);
+            room.last_active.store(stamp, Ordering::Relaxed);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -156,6 +205,22 @@ impl RelayState {
         ))
     }
 
+    /// Test helper: apply `resource_limits` without validating them, for
+    /// caps far below what a relay accepts at startup.
+    #[cfg(test)]
+    pub(crate) fn unvalidated(
+        config: RelayConfig,
+        trusted_proxies: Vec<ipnet::IpNet>,
+        resource_limits: RelayResourceLimits,
+    ) -> Self {
+        Self::build(
+            config,
+            trusted_proxies,
+            PairingJoinLimits::default(),
+            resource_limits,
+        )
+    }
+
     fn build(
         config: RelayConfig,
         trusted_proxies: Vec<ipnet::IpNet>,
@@ -169,6 +234,8 @@ impl RelayState {
             rooms: DashMap::new(),
             connections: DashMap::new(),
             queue: DashMap::new(),
+            queue_senders: DashMap::new(),
+            activity_clock: AtomicU64::new(0),
             join_budget: Budget::default(),
             create_budget: Budget::default(),
             pairing_admission: Mutex::new(()),
@@ -186,14 +253,17 @@ impl RelayState {
             pairing_create_full: AtomicU64::new(0),
             connections_refused: AtomicU64::new(0),
             queue_full: AtomicU64::new(0),
+            rooms_evicted: AtomicU64::new(0),
             expired: AtomicU64::new(0),
         }
     }
 
     /// Open a pairing session for a request from client address `ip`. Every
     /// accepted creation counts against the client's and the relay-wide
-    /// creation budgets; a spent budget refuses with `Throttled`, and a full
-    /// relay (open sessions or rooms at their cap) refuses with `Full`.
+    /// creation budgets; a spent budget refuses with `Throttled`. At the room
+    /// cap the least recently used room with no device online is evicted;
+    /// only open sessions at their cap, or a room cap where every room has a
+    /// device online, refuse with `Full`.
     pub fn create_pairing(
         &self,
         req: CreatePairingRequest,
@@ -233,6 +303,10 @@ impl RelayState {
             // refuse a creation.
             self.prune_pairings(Utc::now());
         }
+        while self.pairing_by_code.len() < MAX_ACTIVE_PAIRING_SESSIONS
+            && !self.has_pairing_capacity()
+            && self.evict_idle_room()
+        {}
         let code = self
             .has_pairing_capacity()
             .then(|| self.alloc_code())
@@ -290,11 +364,73 @@ impl RelayState {
     /// Room for one more pairing session: below the open-session cap, and
     /// every open session can still complete into a room without passing the
     /// room cap. Completed sessions count until GC removes them, which only
-    /// errs toward refusing.
+    /// errs toward evicting or refusing.
     fn has_pairing_capacity(&self) -> bool {
         let sessions = self.pairing_by_code.len();
         sessions < MAX_ACTIVE_PAIRING_SESSIONS
             && self.rooms.len() + sessions < self.resource_limits.max_rooms
+    }
+
+    /// Drop the least recently used room that has no device online. Returns
+    /// false when every room has one. Its devices then get `unknown room` and
+    /// must pair again, as after a relay restart. The scan is linear in the
+    /// room count, which creation's rate limit keeps cheap.
+    fn evict_idle_room(&self) -> bool {
+        for _ in 0..ROOM_EVICTION_ATTEMPTS {
+            let candidate = self
+                .rooms
+                .iter()
+                .filter(|room| room.online_sockets == 0)
+                .map(|room| (room.last_active.load(Ordering::Relaxed), room.key().clone()))
+                .min();
+            let Some((_, room_id)) = candidate else {
+                return false;
+            };
+            // Re-checked under the room's write lock, which `attach_member`
+            // also takes: a room a device just attached to is never removed.
+            // A room used since the scan but idle again is still a fair victim.
+            let removed = self
+                .rooms
+                .remove_if(&room_id, |_, room| room.online_sockets == 0);
+            if removed.is_some() {
+                self.rooms_evicted.fetch_add(1, Ordering::Relaxed);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn next_activity(&self) -> u64 {
+        self.activity_clock.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    fn touch_room(&self, room_id: &str) {
+        let stamp = self.next_activity();
+        if let Some(room) = self.rooms.get(room_id) {
+            room.last_active.store(stamp, Ordering::Relaxed);
+        }
+    }
+
+    /// Attach an authenticated device socket to its room, refusing an unknown
+    /// room or device and a revoked device. The room cannot be evicted while
+    /// the returned presence lives.
+    pub(crate) fn attach_member(
+        self: &Arc<Self>,
+        room_id: &str,
+        device_id: &str,
+    ) -> Result<RoomPresence, &'static str> {
+        let stamp = self.next_activity();
+        let mut room = self.rooms.get_mut(room_id).ok_or("unknown room")?;
+        let device = room.devices.get(device_id).ok_or("unknown device")?;
+        if device.revoked {
+            return Err("device revoked");
+        }
+        room.online_sockets += 1;
+        room.last_active.store(stamp, Ordering::Relaxed);
+        Ok(RoomPresence {
+            state: self.clone(),
+            room_id: room_id.to_string(),
+        })
     }
 
     fn alloc_code(&self) -> Option<String> {
@@ -499,6 +635,8 @@ impl RelayState {
                 // Read after both tokens were issued, so neither outlives it.
                 tokens_expire_at: Utc::now()
                     + chrono::Duration::seconds(DEVICE_TOKEN_TTL_SECS + TOKEN_EXPIRY_GRACE_SECS),
+                online_sockets: 0,
+                last_active: AtomicU64::new(self.next_activity()),
             },
         );
         self.pairing_ok.fetch_add(1, Ordering::Relaxed);
@@ -544,38 +682,73 @@ impl RelayState {
         self.connections.contains_key(device_id)
     }
 
-    /// Queue `env` as `device_id`'s latest offline text, replacing any earlier
-    /// one, until `expires_at` but never past the protocol's hard TTL. Returns
-    /// false, queuing nothing, when the queue already holds
-    /// `MAX_QUEUED_TEXT_ENVELOPES` other recipients. Concurrent senders may
-    /// pass the check together, so the queue can exceed the cap by at most the
-    /// number of concurrent connections.
+    /// Queue `env` as `device_id`'s latest offline text, sent from client
+    /// address `sender`, replacing any earlier one, until `expires_at` but
+    /// never longer than `QUEUE_TTL_SECS`: the expiry is sender-chosen.
+    /// Returns false, queuing nothing, when the queue already holds
+    /// `MAX_QUEUED_TEXT_ENVELOPES` other recipients or the sender already has
+    /// `MAX_CLIENT_QUEUED_TEXT_ENVELOPES` other envelopes queued. Concurrent
+    /// senders may pass the checks together, so either cap can be exceeded by
+    /// at most the number of concurrent connections.
     pub fn queue_text(
         &self,
         device_id: &str,
         env: QueuedEnvelope,
         expires_at: DateTime<Utc>,
+        sender: IpAddr,
     ) -> bool {
+        let sender = client_key(sender);
         let now = Utc::now();
-        let expires_at = expires_at.min(now + chrono::Duration::seconds(HARD_MAX_TTL_SECS as i64));
-        if !self.queue.contains_key(device_id) && self.queue.len() >= MAX_QUEUED_TEXT_ENVELOPES {
+        let expires_at = expires_at.min(now + chrono::Duration::seconds(QUEUE_TTL_SECS as i64));
+        let replaced_sender = self.queue.get(device_id).map(|queued| queued.sender);
+        if replaced_sender != Some(sender)
+            && !self.queue_has_room(replaced_sender.is_some(), sender)
+        {
             self.prune_queue(now);
-            if self.queue.len() >= MAX_QUEUED_TEXT_ENVELOPES {
+            let replaced_sender = self.queue.get(device_id).map(|queued| queued.sender);
+            if !self.queue_has_room(replaced_sender.is_some(), sender) {
                 self.queue_full.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
         }
-        self.queue.insert(device_id.to_string(), (env, expires_at));
+        *self.queue_senders.entry(sender).or_insert(0) += 1;
+        let replaced = self.queue.insert(
+            device_id.to_string(),
+            QueuedText {
+                envelope: env,
+                expires_at,
+                sender,
+            },
+        );
+        if let Some(replaced) = replaced {
+            self.uncharge_sender(replaced.sender);
+        }
         true
     }
 
+    /// Whether `sender` may add an envelope: below its own share, and either
+    /// replacing a recipient's envelope or below the relay-wide cap.
+    fn queue_has_room(&self, replaces: bool, sender: IpAddr) -> bool {
+        let held = self.queue_senders.get(&sender).map_or(0, |held| *held);
+        held < MAX_CLIENT_QUEUED_TEXT_ENVELOPES
+            && (replaces || self.queue.len() < MAX_QUEUED_TEXT_ENVELOPES)
+    }
+
+    fn uncharge_sender(&self, sender: IpAddr) {
+        self.queue_senders.remove_if_mut(&sender, |_, held| {
+            *held = held.saturating_sub(1);
+            *held == 0
+        });
+    }
+
     pub fn take_queue(&self, device_id: &str) -> Option<QueuedEnvelope> {
-        let (_, (env, exp)) = self.queue.remove(device_id)?;
-        if exp < Utc::now() {
+        let (_, queued) = self.queue.remove(device_id)?;
+        self.uncharge_sender(queued.sender);
+        if queued.expires_at < Utc::now() {
             self.expired.fetch_add(1, Ordering::Relaxed);
             None
         } else {
-            Some(env)
+            Some(queued.envelope)
         }
     }
 
@@ -594,17 +767,13 @@ impl RelayState {
     }
 
     /// Take a connection slot for a WebSocket from client address `ip`, or
-    /// refuse when the relay or that client holds its maximum.
+    /// refuse when the relay, that client or its IPv6 site holds its maximum.
     pub(crate) fn acquire_connection(
         &self,
         ip: IpAddr,
     ) -> Result<ConnectionSlot, ConnectionRefused> {
         self.connection_counts
-            .acquire(
-                ip,
-                self.resource_limits.max_connections,
-                self.resource_limits.max_client_connections,
-            )
+            .acquire(ip, self.resource_limits.connection_limits())
             .inspect_err(|_| {
                 self.connections_refused.fetch_add(1, Ordering::Relaxed);
             })
@@ -645,28 +814,28 @@ impl RelayState {
         self.rooms.retain(|_, room| {
             let any_active = room.devices.values().any(|device| !device.revoked);
             let tokens_valid = room.tokens_expire_at > now;
-            let any_online = room
-                .devices
-                .keys()
-                .any(|device_id| self.connections.contains_key(device_id));
-            any_active && (tokens_valid || any_online)
+            any_active && (tokens_valid || room.online_sockets > 0)
         });
     }
 
     fn prune_queue(&self, now: DateTime<Utc>) {
-        self.queue.retain(|_, (_, exp)| {
-            if *exp > now {
-                true
-            } else {
-                self.expired.fetch_add(1, Ordering::Relaxed);
-                false
+        let mut expired = Vec::new();
+        self.queue.retain(|_, queued| {
+            let keep = queued.expires_at > now;
+            if !keep {
+                expired.push(queued.sender);
             }
+            keep
         });
+        for sender in expired {
+            self.expired.fetch_add(1, Ordering::Relaxed);
+            self.uncharge_sender(sender);
+        }
     }
 
     pub fn metrics_text(&self) -> String {
         format!(
-            "clipsync_ws_connections {}\nclipsync_frames_forwarded {}\nclipsync_pairing_ok {}\nclipsync_pairing_fail {}\nclipsync_pairing_throttled {}\nclipsync_expired {}\nclipsync_ws_sockets {}\nclipsync_ws_refused {}\nclipsync_pairing_sessions {}\nclipsync_pairing_create_throttled {}\nclipsync_pairing_create_full {}\nclipsync_rooms {}\nclipsync_queue_full {}\n",
+            "clipsync_ws_connections {}\nclipsync_frames_forwarded {}\nclipsync_pairing_ok {}\nclipsync_pairing_fail {}\nclipsync_pairing_throttled {}\nclipsync_expired {}\nclipsync_ws_sockets {}\nclipsync_ws_refused {}\nclipsync_pairing_sessions {}\nclipsync_pairing_create_throttled {}\nclipsync_pairing_create_full {}\nclipsync_rooms {}\nclipsync_queue_full {}\nclipsync_rooms_evicted {}\n",
             self.connections.len(),
             self.frames_forwarded.load(Ordering::Relaxed),
             self.pairing_ok.load(Ordering::Relaxed),
@@ -680,6 +849,7 @@ impl RelayState {
             self.pairing_create_full.load(Ordering::Relaxed),
             self.rooms.len(),
             self.queue_full.load(Ordering::Relaxed),
+            self.rooms_evicted.load(Ordering::Relaxed),
         )
     }
 

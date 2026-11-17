@@ -1,6 +1,7 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::ops::ControlFlow;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,7 +11,7 @@ use axum::extract::{ConnectInfo, Query, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, Stream, StreamExt};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -21,8 +22,22 @@ use clipsync_protocol::{
 };
 
 use crate::auth::verify_token;
-use crate::connection_limits::ConnectionRefused;
+use crate::connection_limits::{ConnectionRefused, ConnectionSlot};
+use crate::state::RoomPresence;
 use crate::RelayState;
+
+/// Outbound messages queued per socket before senders wait for its writer.
+const OUTBOUND_QUEUE_CAPACITY: usize = 256;
+/// How long a closing socket's writer may take to flush its queue and close
+/// frame. A peer that still reads needs far less; a writer still blocked after
+/// this writes to a peer that stopped reading, so it is aborted, which frees
+/// the queue and closes the TCP connection.
+const WRITER_CLOSE_GRACE: Duration = Duration::from_secs(5);
+/// The same grace for a socket that never became a room member: enough to
+/// flush a close frame to a client that still reads, while an evicted or
+/// expired socket gives back its slot almost at once, so closing sockets
+/// cannot fill the slots kept for authenticated ones.
+const NON_MEMBER_CLOSE_GRACE: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Debug)]
 pub enum WsOut {
@@ -52,10 +67,7 @@ pub async fn ws_handler(
     };
     ws.max_message_size(FRAME_HARD_CAP)
         .max_frame_size(FRAME_HARD_CAP)
-        .on_upgrade(move |socket| async move {
-            let _slot = slot;
-            handle_socket(socket, state, q.token).await;
-        })
+        .on_upgrade(move |socket| handle_socket(socket, state, q.token, client, slot))
 }
 
 fn connection_refused(refused: ConnectionRefused) -> Response {
@@ -84,6 +96,25 @@ struct ConnCtx {
     pairing_sid: Option<String>,
     device_role: DeviceRole,
     pairing_side: Option<usize>,
+    /// The client address the socket came from (see `RelayState::client_ip`).
+    client: IpAddr,
+    /// Set for device-token sockets: keeps the room from being evicted.
+    presence: Option<RoomPresence>,
+    /// Set for pairing-token sockets: when their pairing session expires.
+    pairing_deadline: Option<tokio::time::Instant>,
+}
+
+impl ConnCtx {
+    /// A device-token socket of a room member. Only these may wait for queue
+    /// space and hold a connection slot that cannot be evicted; pairing tokens
+    /// are issued without authentication for any device ID.
+    fn is_member(&self) -> bool {
+        self.presence.is_some()
+    }
+}
+
+fn is_member(ctx: &Option<ConnCtx>) -> bool {
+    ctx.as_ref().is_some_and(ConnCtx::is_member)
 }
 
 // A protocol-v1 Ed25519 SPAKE message is 33 bytes (44 in base64). Retain only
@@ -93,6 +124,7 @@ const PAIRING_SPAKE_MAX_BYTES: usize = 1024;
 struct PairingArrival {
     joined: Option<(mpsc::Sender<WsOut>, PeerInfo)>,
     pending: Option<ControlMessage>,
+    expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 fn register_pairing_connection(
@@ -161,14 +193,24 @@ fn register_pairing_connection(
     } else {
         None
     };
-    Ok(PairingArrival { joined, pending })
+    Ok(PairingArrival {
+        joined,
+        pending,
+        expires_at: session.expires_at,
+    })
 }
 
-async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Option<String>) {
+async fn handle_socket(
+    socket: WebSocket,
+    state: Arc<RelayState>,
+    token_q: Option<String>,
+    client: IpAddr,
+    slot: ConnectionSlot,
+) {
     let (mut sink, mut stream) = socket.split();
-    let (tx, mut rx) = mpsc::channel::<WsOut>(256);
+    let (tx, mut rx) = mpsc::channel::<WsOut>(OUTBOUND_QUEUE_CAPACITY);
 
-    let writer = tokio::spawn(async move {
+    let mut writer = tokio::spawn(async move {
         while let Some(out) = rx.recv().await {
             let r = match out {
                 WsOut::Text(t) => sink.send(Message::Text(t.into())).await,
@@ -184,59 +226,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
         }
     });
 
-    let mut ctx: Option<ConnCtx> = None;
-    let mut last_msg = Instant::now();
-    let mut burst = 0u32;
-    let deadlines = state.socket_deadlines;
-    let hello_deadline = tokio::time::Instant::now() + deadlines.hello;
-
-    loop {
-        // An unauthenticated socket gets one fixed deadline for `hello`; an
-        // authenticated one is closed after `idle` without any message.
-        let deadline = match ctx {
-            None => hello_deadline,
-            Some(_) => tokio::time::Instant::now() + deadlines.idle,
-        };
-        let msg = match tokio::time::timeout_at(deadline, stream.next()).await {
-            Ok(Some(Ok(msg))) => msg,
-            Ok(_) => break,
-            Err(_) => {
-                debug!(authenticated = ctx.is_some(), "closing idle websocket");
-                break;
-            }
-        };
-        if message_rate_exceeded(&mut last_msg, &mut burst, Instant::now()) {
-            send_err(&tx, "rate_limited", "too many messages").await;
-            break;
-        }
-        match msg {
-            Message::Text(t) => {
-                let parsed = match ControlMessage::decode(&t) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        warn!(error = %e, "bad control");
-                        continue;
-                    }
-                };
-                if let Err(e) =
-                    handle_control(&state, &tx, &mut ctx, parsed, token_q.as_deref()).await
-                {
-                    send_err(&tx, "error", &e).await;
-                }
-            }
-            Message::Binary(b) => {
-                if let Some(c) = &ctx {
-                    forward_binary(&state, c, b.to_vec(), &tx).await;
-                }
-            }
-            Message::Ping(p) => {
-                let _ = tx.send(WsOut::Binary(Vec::new())).await;
-                let _ = p;
-            }
-            Message::Close(_) => break,
-            _ => {}
-        }
-    }
+    let ctx = read_loop(&mut stream, &state, &tx, token_q.as_deref(), client, &slot).await;
+    let close_grace = if is_member(&ctx) {
+        WRITER_CLOSE_GRACE
+    } else {
+        NON_MEMBER_CLOSE_GRACE
+    };
 
     if let Some(c) = ctx {
         state
@@ -259,8 +254,150 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, token_q: Optio
             notify_peers_left(&state, &c).await;
         }
     }
-    let _ = tx.send(WsOut::Close).await;
-    let _ = writer.await;
+    // A socket whose client stopped reading may have a full queue behind a
+    // writer blocked on its sink, so the close is queued without waiting.
+    let close_queued = tx.try_send(WsOut::Close).is_ok();
+    if !close_queued
+        || tokio::time::timeout(close_grace, &mut writer)
+            .await
+            .is_err()
+    {
+        writer.abort();
+        let _ = writer.await;
+    }
+    drop(slot);
+}
+
+/// Reads and handles the socket's messages until it closes, misses a
+/// deadline, sends too fast or, while not a room member, is evicted to admit
+/// a newer socket. Returns the context, if any, for cleanup.
+///
+/// A socket that is not a room member (before `hello`, or holding a pairing
+/// token) has a fixed deadline: the hello deadline, then its pairing
+/// session's expiry. It stays evictable, and its messages are handled under
+/// that deadline and eviction, so a client that never reads cannot stall the
+/// loop past either. `hello` itself never waits (see `handle_control_from`),
+/// so cancelling a handler never leaves a half-registered socket.
+async fn read_loop<S>(
+    stream: &mut S,
+    state: &Arc<RelayState>,
+    tx: &mpsc::Sender<WsOut>,
+    token_q: Option<&str>,
+    client: IpAddr,
+    slot: &ConnectionSlot,
+) -> Option<ConnCtx>
+where
+    S: Stream<Item = Result<Message, axum::Error>> + Unpin,
+{
+    let mut ctx: Option<ConnCtx> = None;
+    let mut last_msg = Instant::now();
+    let mut burst = 0u32;
+    let deadlines = state.socket_deadlines;
+    let hello_deadline = tokio::time::Instant::now() + deadlines.hello;
+
+    loop {
+        let bound = match &ctx {
+            None => Some(hello_deadline),
+            Some(c) if c.is_member() => None,
+            Some(c) => Some(
+                c.pairing_deadline
+                    .unwrap_or(hello_deadline)
+                    .min(tokio::time::Instant::now() + deadlines.read_idle),
+            ),
+        };
+        let received = match bound {
+            Some(deadline) => tokio::select! {
+                received = tokio::time::timeout_at(deadline, stream.next()) => received,
+                () = slot.evicted() => {
+                    debug!("closing a non-member websocket to admit a newer one");
+                    break;
+                }
+            },
+            None => tokio::time::timeout(deadlines.read_idle, stream.next()).await,
+        };
+        let msg = match received {
+            Ok(Some(Ok(msg))) => msg,
+            Ok(_) => break,
+            Err(_) => {
+                debug!(authenticated = ctx.is_some(), "closing idle websocket");
+                break;
+            }
+        };
+        if let Some(presence) = ctx.as_ref().and_then(|c| c.presence.as_ref()) {
+            presence.touch();
+        }
+        if message_rate_exceeded(&mut last_msg, &mut burst, Instant::now()) {
+            // The socket closes next; never wait for room in its queue.
+            try_send_msg(tx, &error_message("rate_limited", "too many messages"));
+            break;
+        }
+        let was_member = is_member(&ctx);
+        let handled = handle_message(state, tx, &mut ctx, msg, token_q, client);
+        let outcome = match bound {
+            Some(deadline) => tokio::select! {
+                outcome = handled => outcome,
+                () = tokio::time::sleep_until(deadline) => {
+                    debug!("closing a non-member websocket stalled past its deadline");
+                    break;
+                }
+                () = slot.evicted() => {
+                    debug!("closing a stalled non-member websocket to admit a newer one");
+                    break;
+                }
+            },
+            None => handled.await,
+        };
+        if outcome.is_break() {
+            break;
+        }
+        // A member socket can no longer be evicted; one evicted while its
+        // `hello` was being handled closes like any other evicted socket.
+        if !was_member && is_member(&ctx) && !slot.authenticate() {
+            debug!("closing a websocket evicted while it authenticated");
+            break;
+        }
+    }
+    ctx
+}
+
+/// Handles one message; `Break` closes the socket.
+async fn handle_message(
+    state: &Arc<RelayState>,
+    tx: &mpsc::Sender<WsOut>,
+    ctx: &mut Option<ConnCtx>,
+    msg: Message,
+    token_q: Option<&str>,
+    client: IpAddr,
+) -> ControlFlow<()> {
+    match msg {
+        Message::Text(t) => {
+            let parsed = match ControlMessage::decode(&t) {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!(error = %e, "bad control");
+                    return ControlFlow::Continue(());
+                }
+            };
+            if let Err(e) = handle_control_from(state, tx, ctx, parsed, token_q, client).await {
+                reply(tx, is_member(ctx), &error_message("error", &e)).await;
+            }
+        }
+        Message::Binary(b) => {
+            if let Some(c) = ctx.as_ref() {
+                forward_binary(state, c, b.to_vec(), tx).await;
+            }
+        }
+        Message::Ping(_) => {
+            if is_member(ctx) {
+                let _ = tx.send(WsOut::Binary(Vec::new())).await;
+            } else {
+                let _ = tx.try_send(WsOut::Binary(Vec::new()));
+            }
+        }
+        Message::Close(_) => return ControlFlow::Break(()),
+        _ => {}
+    }
+    ControlFlow::Continue(())
 }
 
 fn message_rate_exceeded(last: &mut Instant, burst: &mut u32, now: Instant) -> bool {
@@ -274,12 +411,14 @@ fn message_rate_exceeded(last: &mut Instant, burst: &mut u32, now: Instant) -> b
     }
 }
 
-async fn handle_control(
+/// Handles one control message from a socket at client address `client`.
+async fn handle_control_from(
     state: &Arc<RelayState>,
     tx: &mpsc::Sender<WsOut>,
     ctx: &mut Option<ConnCtx>,
     msg: ControlMessage,
     token_q: Option<&str>,
+    client: IpAddr,
 ) -> Result<(), String> {
     match msg {
         ControlMessage::Hello {
@@ -330,16 +469,19 @@ async fn handle_control(
                 },
                 device_role: claims.role,
                 pairing_side: None,
+                client,
+                presence: None,
+                pairing_deadline: None,
             };
             if claims.typ != "pair" {
-                let room = state.room(&conn.room_id).ok_or("unknown room")?;
-                let device = room.devices.get(&conn.device_id).ok_or("unknown device")?;
-                if device.revoked {
-                    return Err("device revoked".into());
-                }
+                conn.presence = Some(state.attach_member(&conn.room_id, &conn.device_id)?);
             }
             if claims.typ == "pair" {
                 let arrival = register_pairing_connection(state, &mut conn, tx, role)?;
+                let remaining = (arrival.expires_at - chrono::Utc::now())
+                    .to_std()
+                    .unwrap_or_default();
+                conn.pairing_deadline = Some(tokio::time::Instant::now() + remaining);
                 let hello_ok = ControlMessage::HelloOk {
                     room_id: claims.rid.clone(),
                     peer_online: false,
@@ -347,12 +489,15 @@ async fn handle_control(
                     queued_text: None,
                     device_token: None,
                 };
-                send_msg(tx, &hello_ok).await;
+                // Nothing in `hello` waits for queue space: it runs before the
+                // socket's context exists, so it must never stall (see
+                // `read_loop`). A client that reads has an empty queue here.
+                try_send_msg(tx, &hello_ok);
                 if let Some((creator, device)) = arrival.joined {
-                    send_msg(&creator, &ControlMessage::PeerJoined { device }).await;
+                    try_send_msg(&creator, &ControlMessage::PeerJoined { device });
                 }
                 if let Some(pending) = arrival.pending {
-                    send_msg(tx, &pending).await;
+                    try_send_msg(tx, &pending);
                 }
             } else {
                 state.register_conn(&conn.device_id, tx.clone());
@@ -375,7 +520,7 @@ async fn handle_control(
                     queued_text: queued,
                     device_token: None,
                 };
-                send_msg(tx, &hello_ok).await;
+                try_send_msg(tx, &hello_ok);
                 let joined = ControlMessage::PeerJoined {
                     device: PeerInfo {
                         device_id: device_id.clone(),
@@ -385,7 +530,7 @@ async fn handle_control(
                         online: true,
                     },
                 };
-                fanout_except(state, &conn.room_id, &conn.device_id, &joined).await;
+                fanout_except_now(state, &conn.room_id, &conn.device_id, &joined);
                 state.webhook_spawn(serde_json::json!({
                     "type": "device.joined",
                     "room_id": conn.room_id,
@@ -399,7 +544,7 @@ async fn handle_control(
             Ok(())
         }
         ControlMessage::Ping { ts } => {
-            send_msg(tx, &ControlMessage::Pong { ts }).await;
+            reply(tx, is_member(ctx), &ControlMessage::Pong { ts }).await;
             Ok(())
         }
         ControlMessage::Spake2Msg { .. }
@@ -458,6 +603,7 @@ async fn handle_control(
                             ciphertext: ciphertext.clone(),
                         },
                         routing.expires_at,
+                        c.client,
                     );
                 }
             }
@@ -468,7 +614,7 @@ async fn handle_control(
             } else {
                 (
                     AckStatus::PeerOffline,
-                    Some("the relay's offline queue is full".into()),
+                    Some("the relay's offline queue is full for this sender".into()),
                 )
             };
             send_msg(
@@ -708,6 +854,18 @@ async fn fanout_except(state: &Arc<RelayState>, room_id: &str, except: &str, msg
     }
 }
 
+/// [`fanout_except`] without waiting: a peer whose queue is full misses `msg`.
+fn fanout_except_now(state: &RelayState, room_id: &str, except: &str, msg: &ControlMessage) {
+    if let Ok(s) = msg.encode() {
+        for peer in state.peer_ids(room_id, except) {
+            let online = state.connections.get(&peer).map(|p| p.value().clone());
+            if online.is_some_and(|p| p.try_send(WsOut::Text(s.clone())).is_ok()) {
+                state.frames_forwarded.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
 async fn notify_peers_left(state: &Arc<RelayState>, c: &ConnCtx) {
     let msg = ControlMessage::PeerLeft {
         device_id: DeviceId::from(c.device_id.as_str()),
@@ -721,15 +879,28 @@ async fn send_msg(tx: &mpsc::Sender<WsOut>, msg: &ControlMessage) {
     }
 }
 
-async fn send_err(tx: &mpsc::Sender<WsOut>, code: &str, message: &str) {
-    send_msg(
-        tx,
-        &ControlMessage::Error {
-            code: code.into(),
-            message: message.into(),
-        },
-    )
-    .await;
+fn error_message(code: &str, message: &str) -> ControlMessage {
+    ControlMessage::Error {
+        code: code.into(),
+        message: message.into(),
+    }
+}
+
+/// Queues `msg` without waiting; it is dropped when the queue is full.
+fn try_send_msg(tx: &mpsc::Sender<WsOut>, msg: &ControlMessage) {
+    if let Ok(s) = msg.encode() {
+        let _ = tx.try_send(WsOut::Text(s));
+    }
+}
+
+/// Replies to the socket's own client. Only a room member's socket waits for
+/// queue space (see [`read_loop`]).
+async fn reply(tx: &mpsc::Sender<WsOut>, member: bool, msg: &ControlMessage) {
+    if member {
+        send_msg(tx, msg).await;
+    } else {
+        try_send_msg(tx, msg);
+    }
 }
 
 #[cfg(test)]

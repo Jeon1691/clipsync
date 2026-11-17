@@ -137,6 +137,8 @@ impl PairingJoinLimits {
         BudgetLimits {
             client_limit: self.client_fail_limit,
             client_window: self.client_fail_window(),
+            // Failed joins keep #26's per-client accounting.
+            site_limit: None,
             relay_limit: self.relay_fail_limit,
             relay_window: GLOBAL_FAILED_JOIN_WINDOW,
         }

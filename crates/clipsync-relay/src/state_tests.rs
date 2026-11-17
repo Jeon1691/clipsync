@@ -6,12 +6,15 @@ use crate::join_limits::{
     IP_FAILED_JOIN_WINDOW,
 };
 use crate::resource_limits::{
-    PAIRING_CREATE_CLIENT_LIMIT, PAIRING_CREATE_CLIENT_WINDOW, PAIRING_CREATE_RELAY_LIMIT,
-    PAIRING_CREATE_RELAY_WINDOW,
+    MAX_ROOMS, PAIRING_CREATE_CLIENT_LIMIT, PAIRING_CREATE_CLIENT_WINDOW,
+    PAIRING_CREATE_RELAY_LIMIT, PAIRING_CREATE_RELAY_WINDOW,
 };
 use clipsync_protocol::{DeviceId, ItemKind, MessageId, Recipient, RoutingHeader, TransferId};
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
+
+/// Sender of envelopes queued directly in tests.
+const SENDER: IpAddr = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 30));
 
 fn fixture() -> (
     RelayState,
@@ -149,17 +152,20 @@ fn queue_expiry_discards_only_expired_envelopes_and_gc_counts_them() {
         "expired-on-read",
         envelope.clone(),
         now - chrono::Duration::seconds(1),
+        SENDER,
     );
     assert!(state.take_queue("expired-on-read").is_none());
     state.queue_text(
         "expired-on-gc",
         envelope.clone(),
         now - chrono::Duration::seconds(1),
+        SENDER,
     );
     state.queue_text(
         "fresh",
         envelope.clone(),
         now + chrono::Duration::seconds(60),
+        SENDER,
     );
     state.gc();
     assert!(state.take_queue("expired-on-gc").is_none());
@@ -561,14 +567,12 @@ fn complete(state: &RelayState, offer: &CreatePairingResponse, sid: &str) -> [St
 }
 
 /// Rooms are capped too: open sessions that could still complete count
-/// against the cap, so rooms never exceed it.
+/// against the cap, so rooms never exceed it. Sessions alone fill it; a room
+/// whose devices are offline makes way for a new session.
 #[test]
-fn rooms_and_sessions_that_may_become_rooms_are_capped() {
+fn open_sessions_count_against_the_room_cap_and_idle_rooms_make_way() {
     const MAX_ROOMS: usize = 2;
-    let state = resource_limited_state(RelayResourceLimits {
-        max_rooms: MAX_ROOMS,
-        ..RelayResourceLimits::default()
-    });
+    let state = small_room_state(MAX_ROOMS);
     let ip: IpAddr = Ipv4Addr::LOCALHOST.into();
     let first = create_request();
     let sid = first.pairing_session_id.clone();
@@ -581,6 +585,9 @@ fn rooms_and_sessions_that_may_become_rooms_are_capped() {
     complete(&state, &offer, sid.as_str());
     state.gc();
     assert_eq!(state.rooms.len(), 1);
+    state.create_pairing(create_request(), ip).unwrap();
+    assert_eq!(state.rooms.len(), 0);
+    assert_eq!(state.pairing_by_code.len(), MAX_ROOMS);
     assert!(matches!(
         state.create_pairing(create_request(), ip),
         Err(CreateError::Full)
@@ -643,6 +650,7 @@ fn gc_prunes_pairing_by_id_with_expired_completed_and_aborted_sessions() {
 #[test]
 fn gc_drops_only_rooms_that_can_never_be_used_again() {
     let (state, _, _, _) = fixture();
+    let state = Arc::new(state);
     let ip: IpAddr = Ipv4Addr::LOCALHOST.into();
     let mut rooms = Vec::new();
     for _ in 0..4 {
@@ -661,8 +669,9 @@ fn gc_drops_only_rooms_that_can_never_be_used_again() {
     for room in [&expired, &expired_online] {
         state.room_mut(room).unwrap().tokens_expire_at = Utc::now() - chrono::Duration::seconds(1);
     }
-    let (tx, _rx) = mpsc::channel(1);
-    state.register_conn(&devices(&expired_online)[0], tx);
+    let _online = state
+        .attach_member(&expired_online, &devices(&expired_online)[0])
+        .unwrap();
     // One revoked device does not end a room.
     let live_devices = devices(&live);
     assert!(state.revoke(&live, &live_devices[0]));
@@ -714,23 +723,177 @@ fn envelope(id: &str) -> QueuedEnvelope {
 }
 
 #[test]
-fn the_offline_queue_is_capped_and_never_outlives_the_hard_ttl() {
+fn the_offline_queue_is_capped_and_never_outlives_the_queue_ttl() {
     let (state, _, _, _) = fixture();
     let far_future = Utc::now() + chrono::Duration::days(365);
+    // Spread over enough senders that no one reaches its own share.
+    let sender = |n: usize| client(n / MAX_CLIENT_QUEUED_TEXT_ENVELOPES);
     for n in 0..MAX_QUEUED_TEXT_ENVELOPES {
-        assert!(state.queue_text(&format!("device-{n}"), envelope("m"), far_future));
+        assert!(state.queue_text(&format!("device-{n}"), envelope("m"), far_future, sender(n)));
     }
-    assert!(!state.queue_text("one-too-many", envelope("m"), far_future));
+    let fresh = client(MAX_QUEUED_TEXT_ENVELOPES);
+    assert!(!state.queue_text("one-too-many", envelope("m"), far_future, fresh));
     assert_eq!(state.queue_full.load(Ordering::Relaxed), 1);
     assert_eq!(state.queue.len(), MAX_QUEUED_TEXT_ENVELOPES);
     // Replacing a recipient's envelope does not grow the queue.
-    assert!(state.queue_text("device-0", envelope("newer"), far_future));
-    let hard_max = Utc::now() + chrono::Duration::seconds(HARD_MAX_TTL_SECS as i64);
-    assert!(state.queue.get("device-0").unwrap().1 <= hard_max);
+    assert!(state.queue_text("device-0", envelope("newer"), far_future, sender(0)));
+    let retention = Utc::now() + chrono::Duration::seconds(QUEUE_TTL_SECS as i64);
+    assert!(state.queue.get("device-0").unwrap().expires_at <= retention);
     // An expired envelope frees its slot without waiting for GC.
-    state.queue.get_mut("device-1").unwrap().1 = Utc::now() - chrono::Duration::seconds(1);
-    assert!(state.queue_text("one-too-many", envelope("m"), far_future));
+    state.queue.get_mut("device-1").unwrap().expires_at = Utc::now() - chrono::Duration::seconds(1);
+    assert!(state.queue_text("one-too-many", envelope("m"), far_future, fresh));
     assert_eq!(state.queue.len(), MAX_QUEUED_TEXT_ENVELOPES);
+    let charged: usize = state.queue_senders.iter().map(|held| *held).sum();
+    assert_eq!(charged, state.queue.len(), "every envelope is charged once");
+}
+
+/// Regression for one client filling the relay-wide offline queue with
+/// self-made rooms: its share is capped, replacing its own envelope stays
+/// free, and other clients can still queue.
+#[test]
+fn regression_one_client_cannot_fill_the_relay_wide_offline_queue() {
+    let (state, _, _, _) = fixture();
+    let far_future = Utc::now() + chrono::Duration::days(365);
+    let attacker: IpAddr = "2001:db8:91::1".parse().unwrap();
+    let queued = (0..MAX_QUEUED_TEXT_ENVELOPES)
+        .filter(|n| {
+            // Any address in the attacker's /64 is the same sender.
+            let mut octets = match attacker {
+                IpAddr::V6(v6) => v6.octets(),
+                IpAddr::V4(_) => unreachable!(),
+            };
+            octets[15] = *n as u8;
+            state.queue_text(
+                &format!("attacker-peer-{n}"),
+                envelope("m"),
+                far_future,
+                IpAddr::from(octets),
+            )
+        })
+        .count();
+    assert_eq!(queued, MAX_CLIENT_QUEUED_TEXT_ENVELOPES);
+    assert!(state.queue_text("attacker-peer-0", envelope("newer"), far_future, attacker));
+    let victim: IpAddr = "203.0.113.91".parse().unwrap();
+    assert!(state.queue_text("victim-peer", envelope("m"), far_future, victim));
+    // A delivered envelope returns its sender's share.
+    assert!(state.take_queue("attacker-peer-0").is_some());
+    assert!(state.queue_text("attacker-peer-next", envelope("m"), far_future, attacker));
+    assert!(!state.queue_text("attacker-peer-over", envelope("m"), far_future, attacker));
+    // So does an envelope that expires.
+    state.queue.get_mut("attacker-peer-1").unwrap().expires_at =
+        Utc::now() - chrono::Duration::seconds(1);
+    state.gc();
+    assert!(state.queue_text("attacker-peer-over", envelope("m"), far_future, attacker));
+}
+
+/// A state with `limits` applied without validation, for room caps far below
+/// what a relay accepts at startup.
+fn small_room_state(max_rooms: usize) -> Arc<RelayState> {
+    Arc::new(RelayState::build(
+        RelayConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            public_url: "http://127.0.0.1".into(),
+            token_secret: rand::random::<[u8; 32]>().to_vec(),
+            webhook_url: None,
+            webhook_secret: None,
+        },
+        Vec::new(),
+        PairingJoinLimits::default(),
+        RelayResourceLimits {
+            max_rooms,
+            ..RelayResourceLimits::default()
+        },
+    ))
+}
+
+/// Pair two fresh devices into a new room; returns its ID and one device.
+fn paired_room(state: &RelayState) -> (String, String) {
+    reset_create_budget(state);
+    let request = create_request();
+    let sid = request.pairing_session_id.clone();
+    let owner = request.device_id.as_str().to_string();
+    let offer = state
+        .create_pairing(request, Ipv4Addr::LOCALHOST.into())
+        .unwrap();
+    complete(state, &offer, sid.as_str());
+    state.gc();
+    (offer.room_id.as_str().to_string(), owner)
+}
+
+/// A room with a device online is never evicted, and a cap where every room
+/// has one refuses with `Full`; the room whose devices left makes way, and
+/// its devices then get `unknown room`.
+#[test]
+fn rooms_with_a_device_online_are_never_evicted() {
+    const MAX_ROOMS: usize = 3;
+    let state = small_room_state(MAX_ROOMS);
+    let rooms: Vec<_> = (0..MAX_ROOMS).map(|_| paired_room(&state)).collect();
+    let mut online: Vec<_> = rooms
+        .iter()
+        .map(|(room, device)| Some(state.attach_member(room, device).unwrap()))
+        .collect();
+    reset_create_budget(&state);
+    assert!(matches!(
+        state.create_pairing(create_request(), Ipv4Addr::LOCALHOST.into()),
+        Err(CreateError::Full)
+    ));
+    assert_eq!(state.rooms.len(), MAX_ROOMS);
+    state.gc();
+    assert_eq!(state.rooms.len(), MAX_ROOMS, "GC keeps online rooms");
+
+    online[1] = None;
+    reset_create_budget(&state);
+    state
+        .create_pairing(create_request(), Ipv4Addr::LOCALHOST.into())
+        .unwrap();
+    let (left, left_device) = &rooms[1];
+    assert!(state.room(left).is_none());
+    assert!(state.room(&rooms[0].0).is_some() && state.room(&rooms[2].0).is_some());
+    assert_eq!(state.rooms_evicted.load(Ordering::Relaxed), 1);
+    assert!(state
+        .metrics_text()
+        .lines()
+        .any(|line| line == "clipsync_rooms_evicted 1"));
+    assert_eq!(
+        state.attach_member(left, left_device).err(),
+        Some("unknown room")
+    );
+    drop(online);
+}
+
+/// At the room cap the least recently used idle room goes first: activity
+/// (a device attaching, sending or leaving) moves a room to the back.
+#[test]
+fn room_eviction_follows_least_recent_use() {
+    const MAX_ROOMS: usize = 3;
+    let state = small_room_state(MAX_ROOMS);
+    let [(oldest, oldest_device), (middle, _), (newest, _)]: [(String, String); MAX_ROOMS] = (0
+        ..MAX_ROOMS)
+        .map(|_| paired_room(&state))
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    // The oldest room is used again: a device attaches, sends and leaves.
+    let presence = state.attach_member(&oldest, &oldest_device).unwrap();
+    presence.touch();
+    drop(presence);
+
+    let evicted_in_order: Vec<_> = (0..MAX_ROOMS)
+        .map(|_| {
+            let before: Vec<String> = [&oldest, &middle, &newest]
+                .into_iter()
+                .filter(|room| state.room(room).is_some())
+                .cloned()
+                .collect();
+            paired_room(&state);
+            before
+                .into_iter()
+                .find(|room| state.room(room).is_none())
+                .expect("each new room evicts one idle room")
+        })
+        .collect();
+    assert_eq!(evicted_in_order, [middle, newest, oldest]);
+    assert_eq!(state.rooms.len(), MAX_ROOMS);
 }
 
 #[test]
@@ -769,10 +932,7 @@ fn oversized_pairing_fields_are_refused_before_any_budget_or_session() {
 fn concurrent_creations_never_overshoot_the_cap() {
     const MAX_ROOMS: usize = 7;
     const THREADS: usize = 16;
-    let state = resource_limited_state(RelayResourceLimits {
-        max_rooms: MAX_ROOMS,
-        ..RelayResourceLimits::default()
-    });
+    let state = small_room_state(MAX_ROOMS);
     let created = std::sync::atomic::AtomicUsize::new(0);
     std::thread::scope(|scope| {
         for thread in 0..THREADS {
@@ -790,4 +950,66 @@ fn concurrent_creations_never_overshoot_the_cap() {
     assert_eq!(created.into_inner(), MAX_ROOMS);
     assert_eq!(state.pairing_by_code.len(), MAX_ROOMS);
     assert_eq!(state.pairing_by_id.len(), MAX_ROOMS);
+}
+
+/// Regression for the room-cap pairing denial: anyone can fill the room cap
+/// by pairing their own devices, and those rooms hold valid tokens. A fresh
+/// client must still be able to pair; the least recently used room with no
+/// device online makes way.
+#[test]
+fn regression_filled_room_cap_never_blocks_a_fresh_pairing() {
+    let state = resource_limited_state(RelayResourceLimits::default());
+    let attacker: IpAddr = "198.51.100.90".parse().unwrap();
+    for _ in 0..MAX_ROOMS {
+        reset_create_budget(&state);
+        let request = create_request();
+        let sid = request.pairing_session_id.clone();
+        let offer = state.create_pairing(request, attacker).unwrap();
+        complete(&state, &offer, sid.as_str());
+    }
+    state.gc();
+    assert_eq!(state.rooms.len(), MAX_ROOMS);
+    reset_create_budget(&state);
+    let victim: IpAddr = "203.0.113.90".parse().unwrap();
+    state
+        .create_pairing(create_request(), victim)
+        .expect("a full room cap must not refuse a fresh pairing");
+    assert_eq!(state.rooms.len(), MAX_ROOMS - 1);
+    assert_eq!(state.rooms_evicted.load(Ordering::Relaxed), 1);
+}
+
+/// Regression for one IPv6 site spending the relay-wide creation budget from
+/// many /64s: one /48 gets a few clients' worth of creations, then is
+/// refused, while another site and IPv4 clients are unaffected.
+#[test]
+fn ipv6_pairing_creation_is_also_limited_per_48_site() {
+    use crate::rate_limit::IPV6_SITE_CLIENT_SHARE;
+    let state = resource_limited_state(RelayResourceLimits::default());
+    let site_limit = PAIRING_CREATE_CLIENT_LIMIT as usize * IPV6_SITE_CLIENT_SHARE;
+    // One creation from each of many /64s inside 2001:db8:5::/48.
+    let in_site = |subnet: u16| IpAddr::from([0x2001, 0xdb8, 0x5, subnet, 0, 0, 0, 1]);
+    for subnet in 0..site_limit {
+        state
+            .create_pairing(create_request(), in_site(subnet as u16))
+            .unwrap();
+    }
+    assert!(matches!(
+        state.create_pairing(create_request(), in_site(u16::MAX)),
+        Err(CreateError::Throttled)
+    ));
+    // The refusal is not charged to the fresh /64.
+    assert!(state
+        .create_budget
+        .clients
+        .get(&crate::rate_limit::client_key(in_site(u16::MAX)))
+        .is_none());
+    let other_site = IpAddr::from([0x2001, 0xdb8, 0x6, 0, 0, 0, 0, 1]);
+    state.create_pairing(create_request(), other_site).unwrap();
+    state.create_pairing(create_request(), client(1)).unwrap();
+    // The site window resets and GC drops stale sites.
+    let site = crate::rate_limit::site_key(in_site(0)).unwrap();
+    state.create_budget.sites.get_mut(&site).unwrap().1 =
+        Instant::now() - PAIRING_CREATE_CLIENT_WINDOW - Duration::from_secs(1);
+    state.gc();
+    assert!(state.create_budget.sites.get(&site).is_none());
 }
