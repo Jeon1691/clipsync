@@ -821,6 +821,12 @@ mod tests {
             return;
         };
         let home = std::env::var("CLIPSYNC_TEST_MOBILE_HOME").unwrap();
+        // Background pairings report failures only through `warn!`; print
+        // them on stderr, which the parent test shows when this child fails.
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(std::io::stderr)
+            .try_init();
         let created = ClipSyncClient::new(
             home,
             "http://127.0.0.1:0".into(),
@@ -992,23 +998,23 @@ mod tests {
             .unwrap();
         assert_eq!(joined, offer.room_id);
         let until = std::time::Instant::now() + Duration::from_secs(5);
-        // The creator stores its room before its configuration, and Windows
-        // refuses to open a file that is being replaced. Wait until both are
-        // committed and readable, treating a read error as not yet.
-        let committed = |client: &ClipSyncClient| {
-            client
-                .status()
-                .is_ok_and(|status| status.room_id.as_deref() == Some(joined.as_str()))
-                && client
-                    .app
-                    .store
-                    .load_config()
-                    .is_ok_and(|cfg| cfg.sync.enabled)
+        // The creator stores its room before its configuration. Wait until
+        // both are committed, keeping what the creator last reported so a
+        // timeout shows it.
+        let observe = |client: &ClipSyncClient| {
+            (
+                client.status().map(|status| status.room_id),
+                client.app.store.load_config().map(|cfg| cfg.sync.enabled),
+            )
         };
-        while !committed(&verified_creator) {
+        loop {
+            let seen = observe(&verified_creator);
+            if matches!(&seen, (Ok(Some(room)), Ok(true)) if *room == joined) {
+                break;
+            }
             assert!(
                 std::time::Instant::now() < until,
-                "verified creator did not commit completed pairing"
+                "verified creator did not commit completed pairing: {seen:?}"
             );
             std::thread::sleep(Duration::from_millis(5));
         }
