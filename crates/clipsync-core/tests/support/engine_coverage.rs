@@ -1,7 +1,7 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
 use super::*;
-use crate::test_relay::{receive, send, Server};
+use crate::test_relay::{close, receive, send, Server};
 use clipsync_protocol::PeerInfo;
 
 fn online_peer(identity: &DeviceIdentity) -> PeerInfo {
@@ -201,8 +201,7 @@ async fn live_presence_and_untrusted_noise_do_not_replace_the_last_authenticated
                 ),
             )
             .await;
-            // A room without pinned peers accepts no sender, so nothing is acknowledged;
-            // closing after the frame still lets the session process it first.
+            // A room without pinned peers accepts no sender, so nothing is acknowledged.
             if case != "no-peers" {
                 assert!(matches!(
                     receive(&mut socket).await,
@@ -212,6 +211,12 @@ async fn live_presence_and_untrusted_noise_do_not_replace_the_last_authenticated
                     }
                 ));
             }
+            // The client's connect-time heartbeat is still unread here, notably when no
+            // Ack was awaited; dropping the socket would reset the connection and could
+            // discard the frames above before the session reads them. A graceful close
+            // delivers them all, so the session handles the final envelope before it
+            // reports the disconnect.
+            close(socket).await;
         })
         .await;
         let peer = scripted_peer(&server.url, room_id);
