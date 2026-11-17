@@ -58,6 +58,10 @@ pub struct PairingWait {
     /// The user's answer, written by `clipsync room confirm` or `room reject`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sas_decision: Option<String>,
+    /// Whether the SAS was derived after the commitment round (`committed`
+    /// or `uncommitted`), shown next to it by `clipsync room confirm`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sas_protection: Option<String>,
 }
 
 #[derive(Clone)]
@@ -363,6 +367,7 @@ mod failure_tests {
             sas: None,
             peer_device_name: None,
             sas_decision: None,
+            sas_protection: None,
         }
     }
 

@@ -47,6 +47,8 @@ url = "https://hooks.example.test/π"
         let webhook = config.webhook.as_ref().unwrap();
         assert_eq!(webhook.url, "https://hooks.example.test/π");
         assert_eq!(webhook.secret, "synthetic-roundtrip-credential");
+        // A file without a [pairing] table keeps pairing with older peers.
+        assert!(!config.pairing.require_commitment);
     };
     let config = store.load_config().unwrap();
     assert_values(&config);
@@ -85,6 +87,7 @@ fn supported_configuration_keys_roundtrip_and_unknown_keys_do_not_mutate() {
         ("notify.enabled", "1", "true"),
         ("notify.preview", "on", "true"),
         ("sync.ttl_secs", "60", "60"),
+        ("pairing.require_commitment", "on", "true"),
     ] {
         assert!(config.set(key, value));
         assert_eq!(config.get(key).as_deref(), Some(expected));

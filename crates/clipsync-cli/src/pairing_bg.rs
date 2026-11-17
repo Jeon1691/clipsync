@@ -206,6 +206,7 @@ mod tests {
             sas: None,
             peer_device_name: None,
             sas_decision: None,
+            sas_protection: None,
         }
     }
 

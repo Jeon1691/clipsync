@@ -20,7 +20,8 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use clipsync_core::{
-    display_sas, parse_sas, sanitize_untrusted, App, CoreError, SasCheck, SasDecision,
+    display_sas, parse_protection, parse_sas, protection_name, protection_notice,
+    sanitize_untrusted, App, CoreError, SasCheck, SasDecision, SasProtection,
     MAX_PEER_NAME_COLUMNS, SAS_DIGITS,
 };
 use clipsync_protocol::PAIRING_TTL_SECS;
@@ -67,9 +68,9 @@ pub fn terminal_confirmer(mode: SasMode) -> SasConfirm {
     Box::new(move |check: SasCheck| {
         Box::pin(async move {
             if mode.skip {
-                return skipped(mode, &check.sas, &check.peer_device_name);
+                return skipped(mode, &check.sas, &check.peer_device_name, check.protection);
             }
-            announce(mode, &check.sas, &check.peer_device_name);
+            announce(mode, &check.sas, &check.peer_device_name, check.protection);
             if mode.non_interactive {
                 eprintln!(
                     "error: the verification code must be confirmed; rerun without --non-interactive, or pass --insecure-skip-sas"
@@ -156,6 +157,7 @@ pub fn background_confirmer(store: LocalStore, skip: bool) -> SasConfirm {
                     wait.status = STATUS_CONFIRM_SAS.into();
                     wait.sas = Some(check.sas.clone());
                     wait.peer_device_name = Some(check.peer_device_name.clone());
+                    wait.sas_protection = Some(protection_name(check.protection).into());
                     // A confirmation can only come from a user who saw this code.
                     wait.sas_decision = None;
                     (Some(wait), true)
@@ -266,6 +268,7 @@ where
     }
     let sas = wait.sas.clone().unwrap_or_default();
     let peer = wait.peer_device_name.clone().unwrap_or_default();
+    let protection = parse_protection(wait.sas_protection.as_deref());
     let decision = if let Some(entered) = entered {
         if entered == sas {
             SasDecision::Confirmed
@@ -273,7 +276,7 @@ where
             SasDecision::Rejected
         }
     } else {
-        announce(mode, &sas, &peer);
+        announce(mode, &sas, &peer, protection);
         if mode.non_interactive {
             return Err(CoreError::Message(
                 "pass the code shown on the other device: clipsync room confirm <code>".into(),
@@ -528,17 +531,18 @@ fn not_answerable(wait: &PairingWait) -> CoreError {
     }
 }
 
-fn announce(mode: SasMode, sas: &str, peer_device_name: &str) {
+fn announce(mode: SasMode, sas: &str, peer_device_name: &str, protection: SasProtection) {
     emit(
         mode.json,
         serde_json::json!({
             "event": "sas_confirmation",
             "sas": sas,
             "peer_device_name": untrusted_name(peer_device_name),
+            "protection": protection_name(protection),
         }),
     );
     if !mode.json {
-        print!("{}", announcement(sas, peer_device_name));
+        print!("{}", announcement(sas, peer_device_name, protection));
     }
     let _ = io::stdout().flush();
 }
@@ -548,12 +552,14 @@ fn announce(mode: SasMode, sas: &str, peer_device_name: &str) {
 /// printed first: the code then sits alone on its own line, and nothing
 /// untrusted is printed after it. The sanitizer bounds the name's width, so
 /// the name line cannot wrap into a row that starts like the code line (see
-/// [`clipsync_core::MAX_PEER_NAME_COLUMNS`]).
-fn announcement(sas: &str, peer_device_name: &str) -> String {
+/// [`clipsync_core::MAX_PEER_NAME_COLUMNS`]). The protection line after the
+/// code is fixed local text, never relay input.
+fn announcement(sas: &str, peer_device_name: &str, protection: SasProtection) -> String {
     format!(
-        "other device: {}\nverification code: {}\nCheck that the other device shows the same verification code.\n",
+        "other device: {}\nverification code: {}\n{}\nCheck that the other device shows the same verification code.\n",
         display_name(peer_device_name),
         display_sas(sas),
+        protection_notice(protection),
     )
 }
 
@@ -574,7 +580,12 @@ fn prompt_line(mode: SasMode, interactive: bool) {
     }
 }
 
-fn skipped(mode: SasMode, sas: &str, peer_device_name: &str) -> SasDecision {
+fn skipped(
+    mode: SasMode,
+    sas: &str,
+    peer_device_name: &str,
+    protection: SasProtection,
+) -> SasDecision {
     eprintln!(
         "warning: verification code not compared (--insecure-skip-sas); a malicious relay or a guessed code would go unnoticed"
     );
@@ -584,6 +595,7 @@ fn skipped(mode: SasMode, sas: &str, peer_device_name: &str) -> SasDecision {
             "event": "sas_skipped",
             "sas": sas,
             "peer_device_name": untrusted_name(peer_device_name),
+            "protection": protection_name(protection),
         }),
     );
     SasDecision::Confirmed
@@ -696,6 +708,7 @@ mod tests {
             sas: SAS.into(),
             peer_device_id: "joiner".into(),
             peer_device_name: "Laptop".into(),
+            protection: SasProtection::Committed,
         }
     }
 
@@ -725,6 +738,7 @@ mod tests {
             sas: (status == STATUS_CONFIRM_SAS).then(|| SAS.into()),
             peer_device_name: (status == STATUS_CONFIRM_SAS).then(|| "Laptop".into()),
             sas_decision: None,
+            sas_protection: None,
         }
     }
 
@@ -873,6 +887,7 @@ mod tests {
         .await;
         assert_eq!(published.sas.as_deref(), Some(SAS));
         assert_eq!(published.peer_device_name.as_deref(), Some("Laptop"));
+        assert_eq!(published.sas_protection.as_deref(), Some("committed"));
         // Only a user who saw this code can confirm it.
         assert_eq!(published.sas_decision, None);
         let mut stale = decided(published.clone(), DECISION_CONFIRMED);
@@ -1211,11 +1226,33 @@ mod tests {
     }
 
     #[test]
+    fn the_confirmation_screen_states_whether_the_commitment_round_ran() {
+        for (protection, stated) in [
+            (SasProtection::Committed, "protection: full"),
+            (SasProtection::Uncommitted, "protection: REDUCED"),
+        ] {
+            let shown = announcement(SAS, "Laptop", protection);
+            let lines: Vec<&str> = shown.lines().collect();
+            // The code keeps its own line; the protection follows it.
+            assert_eq!(lines[1], "verification code: 482 913");
+            assert!(lines[2].starts_with(stated), "{shown:?}");
+            assert_eq!(
+                parse_protection(Some(protection_name(protection))),
+                protection
+            );
+        }
+        // A pairing file without the field (or with anything unexpected)
+        // never overstates the protection.
+        assert_eq!(parse_protection(None), SasProtection::Uncommitted);
+        assert_eq!(parse_protection(Some("full")), SasProtection::Uncommitted);
+    }
+
+    #[test]
     fn hostile_peer_names_never_share_or_follow_the_code_line() {
         // Clear line, carriage return, cursor up, backspace, 8-bit CSI, and
         // bidi override, isolate and mark around a fake code.
         let hostile = "Laptop\u{1b}[2K\r\u{1b}[1Averification code: 000 000\u{8}\u{9b}2J\u{202e}\u{2066}\u{200f}";
-        let shown = announcement(SAS, hostile);
+        let shown = announcement(SAS, hostile, SasProtection::Committed);
         assert!(
             !shown
                 .chars()
@@ -1232,7 +1269,7 @@ mod tests {
         assert!(!lines[2..].iter().any(|line| line.contains("Laptop")));
         let long = "x".repeat(MAX_PEER_NAME_COLUMNS * 2);
         assert!(
-            announcement(SAS, &long)
+            announcement(SAS, &long, SasProtection::Committed)
                 .lines()
                 .next()
                 .unwrap()
@@ -1307,7 +1344,7 @@ mod tests {
                 ]);
             }
             for name in names {
-                let shown = announcement(SAS, &name);
+                let shown = announcement(SAS, &name, SasProtection::Committed);
                 let lines: Vec<&str> = shown.lines().collect();
                 // The code keeps a line of its own, right after the name.
                 assert_eq!(lines[1], "verification code: 482 913", "{shown:?}");

@@ -837,6 +837,7 @@ async fn unauthenticated_forwarding_and_absent_pairing_peers_fail_without_invent
     let message = ControlMessage::Spake2Msg {
         pairing_session_id: sid.clone(),
         message: "opaque".into(),
+        after_commitment: false,
     };
     forward_pairing_or_peer(&state, creator.as_ref().unwrap(), &tx, message.clone())
         .await
@@ -1265,11 +1266,13 @@ fn regression_f98_late_creator_completes_real_core_pairing_and_persists_matching
                         .await
                     })
                 };
-                // Observe a genuine processed B SPAKE; do not fabricate pairing state
-                // or rely on socket-file presence, scheduler order or a blind delay.
+                // Observe a genuine processed B commitment (its first pairing
+                // frame; B keeps its SPAKE message back until A's arrives); do
+                // not fabricate pairing state or rely on socket-file presence,
+                // scheduler order or a blind delay.
                 tokio::time::timeout(Duration::from_secs(5), async {
                     loop {
-                        if state.pairing(&offered.pairing_code).unwrap().pending_spake[1].is_some()
+                        if state.pairing(&offered.pairing_code).unwrap().pending_commit[1].is_some()
                         {
                             break;
                         }
@@ -1296,12 +1299,10 @@ fn regression_f98_late_creator_completes_real_core_pairing_and_persists_matching
                     owner_store.load_epoch_key(&created.room_id).unwrap(),
                     member_store.load_epoch_key(&created.room_id).unwrap()
                 );
-                assert!(state
-                    .pairing(&offered.pairing_code)
-                    .unwrap()
-                    .pending_spake
-                    .iter()
-                    .all(Option::is_none));
+                let session = state.pairing(&offered.pairing_code).unwrap();
+                assert!(session.pending_spake.iter().all(Option::is_none));
+                assert!(session.pending_commit.iter().all(Option::is_none));
+                drop(session);
                 server.abort();
             })
             .await
@@ -1353,12 +1354,15 @@ async fn regression_f98_expiry_discards_pending_spake_and_prevents_admission_or_
     let early = ControlMessage::Spake2Msg {
         pairing_session_id: sid.clone(),
         message: "early".into(),
+        after_commitment: false,
     };
     handle_control(&state, &member_tx, &mut member_ctx, early.clone(), None)
         .await
         .unwrap();
     assert_eq!(
-        state.pairing(sid.as_str()).unwrap().pending_spake[1].as_deref(),
+        state.pairing(sid.as_str()).unwrap().pending_spake[1]
+            .as_ref()
+            .map(|pending| pending.message.as_str()),
         Some("early")
     );
     // Advance the existing session's expiry boundary without a two-minute test.

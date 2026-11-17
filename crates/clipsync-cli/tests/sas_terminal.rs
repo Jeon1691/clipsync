@@ -132,6 +132,7 @@ fn home_waiting_for_confirmation(worker: u32, peer_device_name: &str) -> (TempDi
             sas: Some(SAS.into()),
             peer_device_name: Some(peer_device_name.into()),
             sas_decision: None,
+            sas_protection: None,
         })
         .unwrap();
     (home, store)

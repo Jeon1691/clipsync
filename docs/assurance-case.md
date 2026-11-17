@@ -23,9 +23,13 @@ directories and correctly configured HTTPS/WSS for public transport. Attackers
 may control the network, malformed protocol/file inputs or a webhook
 destination. The relay generates the pairing password, so a malicious relay
 operator can run one SPAKE2 session with each device. Users compare a
-verification code (SAS) before anything is stored, which detects this unless
-the relay searches offline for colliding codes; see
-[security](security.md#verification-code-sas). Use a trusted relay for pairing. TLS authenticates the selected service; it does not make a malicious
+verification code (SAS) before anything is stored, which detects this. When
+both devices show full protection, a commitment round limits such a relay to
+one try per pairing at colliding codes; otherwise (an older device or relay,
+or a relay that withheld the commitment, shown as reduced protection on at
+least one device) the relay can search offline for colliding codes; see
+[security](security.md#commitment-round). Use a trusted relay for pairing, or
+set `pairing.require_commitment`. TLS authenticates the selected service; it does not make a malicious
 service operator trustworthy. This is the honest-but-curious relay model already
 stated in the security requirements. An authorized malicious peer can intentionally send content; the
 receiver still treats its filenames, manifests and sizes as untrusted. Relay

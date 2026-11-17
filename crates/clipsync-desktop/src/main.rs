@@ -16,6 +16,8 @@ use eframe::egui;
 const INK: egui::Color32 = egui::Color32::from_rgb(18, 20, 22);
 const PANEL: egui::Color32 = egui::Color32::from_rgb(30, 33, 36);
 const MINT: egui::Color32 = egui::Color32::from_rgb(79, 227, 194);
+/// Warning amber for a verification code shown without the commitment round.
+const REDUCED: egui::Color32 = egui::Color32::from_rgb(255, 184, 77);
 
 enum Work {
     Created(Result<String, String>),
@@ -233,6 +235,13 @@ impl DesktopApp {
                     .show(ui, |ui| {
                         ui.label(egui::RichText::new("VERIFICATION CODE").color(MINT).monospace());
                         ui.label(egui::RichText::new(prompt.check.display()).size(40.0).monospace().strong());
+                        // Local text: whether the commitment round ran.
+                        let notice = egui::RichText::new(prompt.check.protection_notice()).monospace();
+                        ui.label(if prompt.check.protection == clipsync_core::SasProtection::Committed {
+                            notice.weak()
+                        } else {
+                            notice.color(REDUCED).strong()
+                        });
                         ui.label(format!("Check that {peer} shows the same code."));
                         ui.label("Confirm only if both devices show the same code.");
                         ui.horizontal(|ui| {
@@ -554,6 +563,18 @@ mod tests {
         app: &DesktopApp,
         peer_device_name: &str,
     ) -> tokio::sync::oneshot::Receiver<SasDecision> {
+        sas_prompt_with(
+            app,
+            peer_device_name,
+            clipsync_core::SasProtection::Committed,
+        )
+    }
+
+    fn sas_prompt_with(
+        app: &DesktopApp,
+        peer_device_name: &str,
+        protection: clipsync_core::SasProtection,
+    ) -> tokio::sync::oneshot::Receiver<SasDecision> {
         let (answer_tx, answer) = tokio::sync::oneshot::channel();
         let confirm = app.confirmer();
         let peer_device_name = peer_device_name.to_owned();
@@ -562,6 +583,7 @@ mod tests {
                 sas: "482913".into(),
                 peer_device_id: "peer".into(),
                 peer_device_name,
+                protection,
             })
             .await;
             let _ = answer_tx.send(decision);
@@ -602,6 +624,28 @@ mod tests {
     }
 
     #[test]
+    fn headless_sas_prompt_states_reduced_protection_without_a_commitment() {
+        let (_root, mut app) = fixture();
+        let ui = HeadlessUi::default();
+        let _answer = sas_prompt_with(
+            &app,
+            "Work laptop",
+            clipsync_core::SasProtection::Uncommitted,
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while app.sas_prompt.is_none() {
+            assert!(std::time::Instant::now() < deadline, "prompt never arrived");
+            app.drain();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let text = ui.text(&mut app);
+        assert!(text.contains("482 913"), "{text:?}");
+        assert!(text.contains("protection: REDUCED"), "{text:?}");
+        assert!(!text.contains("protection: full"), "{text:?}");
+        app.answer_sas(SasDecision::Rejected);
+    }
+
+    #[test]
     fn headless_sas_prompt_shows_code_and_peer_and_reports_the_answer() {
         for (label, expected) in [
             (SAS_CONFIRM_LABEL, SasDecision::Confirmed),
@@ -625,6 +669,7 @@ mod tests {
             let text = ui.text(&mut app);
             assert!(text.contains("VERIFICATION CODE") && text.contains("482 913"));
             assert!(text.contains("Check that \"Work laptop\" shows the same code."));
+            assert!(text.contains("protection: full"), "{text:?}");
             assert!(
                 !text.contains("PAIRING CODE"),
                 "the SAS replaces the pairing code"
@@ -656,6 +701,7 @@ mod tests {
                     sas: "482913".into(),
                     peer_device_id: "peer".into(),
                     peer_device_name: "Work laptop".into(),
+                    protection: clipsync_core::SasProtection::Committed,
                 })
                 .await,
             );

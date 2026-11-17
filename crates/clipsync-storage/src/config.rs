@@ -13,6 +13,18 @@ pub struct AppConfig {
     pub notify: NotifyConfig,
     #[serde(default)]
     pub webhook: Option<WebhookConfig>,
+    #[serde(default)]
+    pub pairing: PairingConfig,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PairingConfig {
+    /// Refuse to pair when the other device or the relay does not support
+    /// the commitment round that keeps a relay from searching for matching
+    /// verification codes (see `docs/security.md`). Off by default, so
+    /// devices and relays without it still pair, with reduced protection.
+    #[serde(default)]
+    pub require_commitment: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -46,6 +58,7 @@ impl Default for AppConfig {
             sync: SyncConfig::default(),
             notify: NotifyConfig::default(),
             webhook: None,
+            pairing: PairingConfig::default(),
         }
     }
 }
@@ -86,6 +99,7 @@ impl AppConfig {
             "sync.ttl_secs" => Some(self.sync.ttl_secs.to_string()),
             "notify.enabled" => Some(self.notify.enabled.to_string()),
             "notify.preview" => Some(self.notify.preview.to_string()),
+            "pairing.require_commitment" => Some(self.pairing.require_commitment.to_string()),
             _ => None,
         }
     }
@@ -127,6 +141,10 @@ impl AppConfig {
             }
             "notify.preview" => {
                 self.notify.preview = parse_bool(value);
+                true
+            }
+            "pairing.require_commitment" => {
+                self.pairing.require_commitment = parse_bool(value);
                 true
             }
             _ => false,

@@ -22,6 +22,38 @@ pub const SAS_DIGITS: u32 = 6;
 /// bias toward low values below 10^6 / 2^64 (about 2^-44).
 const SAS_SAMPLE_BYTES: usize = 8;
 const SAS_MODULUS: u64 = 10u64.pow(SAS_DIGITS);
+/// HKDF info label for the SAS of a pairing whose joiner committed to its
+/// SPAKE2 message first. It differs from [`SAS_LABEL`], so the two modes
+/// show unrelated codes: a relay that merely strips or withholds the
+/// commitment from one device makes the codes differ. It does not stop a
+/// relay that downgrades a device and then searches for messages toward
+/// it; users must check that both devices show full protection.
+pub const COMMITTED_SAS_LABEL: &[u8] = b"clipsync/v1/sas-committed";
+/// Domain label of the joiner's commitment to its SPAKE2 message.
+pub const SPAKE2_COMMIT_LABEL: &[u8] = b"clipsync/v1/spake2-commit";
+/// Bytes in a commitment: one SHA-256 digest.
+pub const SPAKE2_COMMITMENT_LEN: usize = 32;
+
+/// Whether the SAS was derived after a commitment round.
+///
+/// With [`SasProtection::Committed`] the joiner (B) sent
+/// `SHA-256(label, version, session, device IDs, role, its SPAKE2 message)`
+/// before it saw the creator's message, and the creator (A) sent its own
+/// message only after it held that commitment. A relay in the middle then
+/// has to fix its message toward each device before it learns what that
+/// device sends, so it gets one try per pairing at making two independent
+/// codes collide. This is the commit-then-reveal order of ZRTP (RFC 6189,
+/// section 4.4.1.1, `hvi`) and of the Bluetooth LE Secure Connections
+/// numeric comparison (Core Specification v5.x, Vol 3, Part H, 2.3.5.6.2).
+///
+/// [`SasProtection::Uncommitted`] is the exchange without that round, used
+/// with a peer or relay that does not support it. A relay can then search
+/// offline for messages that make the codes match.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SasProtection {
+    Committed,
+    Uncommitted,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PairingRole {
@@ -44,8 +76,12 @@ pub struct PairingKeys {
     pub confirm_key_b: [u8; KEY_LEN],
     pub pairing_wrap_key: [u8; KEY_LEN],
     pub room_root_key: [u8; KEY_LEN],
-    /// Input to [`short_authentication_string`]; never sent on the wire.
+    /// Input to [`short_authentication_string`] for
+    /// [`SasProtection::Uncommitted`]; never sent on the wire.
     pub sas_key: [u8; KEY_LEN],
+    /// Input to [`short_authentication_string`] for
+    /// [`SasProtection::Committed`]; never sent on the wire.
+    pub committed_sas_key: [u8; KEY_LEN],
     #[zeroize(skip)]
     pub transcript_hash: [u8; 32],
 }
@@ -68,6 +104,77 @@ pub fn pairing_transcript(
     t.extend_from_slice(&(msg_b.len() as u32).to_be_bytes());
     t.extend_from_slice(msg_b);
     t
+}
+
+/// Commitment input: the label and version, then every field with a 32-bit
+/// big-endian length prefix, so no two field splits encode alike.
+fn commitment_digest(
+    version: u16,
+    session_id: &PairingSessionId,
+    device_a: &DeviceId,
+    device_b: &DeviceId,
+    role: PairingRole,
+    message: &[u8],
+) -> [u8; SPAKE2_COMMITMENT_LEN] {
+    let role: &[u8] = match role {
+        PairingRole::A => b"A",
+        PairingRole::B => b"B",
+    };
+    let mut hash = Sha256::new();
+    hash.update(SPAKE2_COMMIT_LABEL);
+    hash.update(version.to_be_bytes());
+    for field in [
+        session_id.as_str().as_bytes(),
+        device_a.as_str().as_bytes(),
+        device_b.as_str().as_bytes(),
+        role,
+        message,
+    ] {
+        hash.update((field.len() as u32).to_be_bytes());
+        hash.update(field);
+    }
+    hash.finalize().into()
+}
+
+/// Commitment to this side's SPAKE2 message, bound to the protocol version,
+/// session, both device IDs and the role. The joiner sends it before its
+/// message. The message itself is a fresh random group element, so it is
+/// its own hiding randomness and no separate nonce is needed (as in ZRTP's
+/// `hvi`); binding rests on SHA-256 collision resistance.
+pub fn spake2_commitment(state: &PairingState) -> [u8; SPAKE2_COMMITMENT_LEN] {
+    commitment_digest(
+        PROTOCOL_VERSION,
+        &state.session_id,
+        &state.device_a,
+        &state.device_b,
+        state.role,
+        &state.outbound,
+    )
+}
+
+/// Check that the peer's SPAKE2 message opens the commitment it sent first.
+pub fn verify_spake2_commitment(
+    state: &PairingState,
+    commitment: &[u8],
+    peer_message: &[u8],
+) -> Result<()> {
+    let peer_role = match state.role {
+        PairingRole::A => PairingRole::B,
+        PairingRole::B => PairingRole::A,
+    };
+    let expected = commitment_digest(
+        PROTOCOL_VERSION,
+        &state.session_id,
+        &state.device_a,
+        &state.device_b,
+        peer_role,
+        peer_message,
+    );
+    use subtle::ConstantTimeEq;
+    if commitment.len() != expected.len() || expected.ct_eq(commitment).unwrap_u8() != 1 {
+        return Err(CryptoError::Commitment);
+    }
+    Ok(())
 }
 
 pub fn start_pairing_a(
@@ -163,6 +270,7 @@ pub fn finish_pairing(state: PairingState, inbound: &[u8]) -> Result<PairingKeys
     let pairing_wrap_key = derive_labeled(&shared, &transcript_hash, b"clipsync/v1/pairing-wrap")?;
     let room_root_key = derive_labeled(&shared, &transcript_hash, b"clipsync/v1/room-root")?;
     let sas_key = derive_sas_key(&shared, &transcript_hash)?;
+    let committed_sas_key = derive_labeled(&shared, &transcript_hash, COMMITTED_SAS_LABEL)?;
 
     Ok(PairingKeys {
         confirm_key_a,
@@ -170,6 +278,7 @@ pub fn finish_pairing(state: PairingState, inbound: &[u8]) -> Result<PairingKeys
         pairing_wrap_key,
         room_root_key,
         sas_key,
+        committed_sas_key,
         transcript_hash,
     })
 }
@@ -188,13 +297,17 @@ fn render_sas(sas_key: &[u8; KEY_LEN]) -> String {
 /// Short authentication string both users compare out of band before a
 /// pairing is committed.
 ///
-/// It is computed locally from the SPAKE2 secret and transcript, so it adds
-/// nothing to the wire. Two devices show the same value only when they ran
-/// SPAKE2 with each other. A relay that ran one session with each device, or
-/// a joiner that guessed the code, makes the values differ. See
-/// `docs/security.md` for what the comparison does and does not cover.
-pub fn short_authentication_string(keys: &PairingKeys) -> String {
-    render_sas(&keys.sas_key)
+/// It is computed locally from the SPAKE2 secret, the transcript and the
+/// [`SasProtection`] mode. Two devices show the same value only when they
+/// ran SPAKE2 with each other in the same mode. A relay that ran one session
+/// with each device, or a joiner that guessed the code, makes the values
+/// differ. See `docs/security.md` for what the comparison does and does not
+/// cover in each mode.
+pub fn short_authentication_string(keys: &PairingKeys, protection: SasProtection) -> String {
+    match protection {
+        SasProtection::Committed => render_sas(&keys.committed_sas_key),
+        SasProtection::Uncommitted => render_sas(&keys.sas_key),
+    }
 }
 
 pub fn confirm_mac(keys: &PairingKeys, role: PairingRole) -> Vec<u8> {
@@ -321,6 +434,12 @@ mod tests {
     /// the transcript layout, the HKDF label, and the decimal rendering
     /// together, so a change to any of them is visible as a compatibility break.
     const SEEDED_VECTOR_SAS: &str = "401515";
+    /// The same seeded run in committed mode (`COMMITTED_SAS_LABEL`).
+    const SEEDED_VECTOR_COMMITTED_SAS: &str = "153704";
+    /// SHA-256 commitment for the fixed inputs in
+    /// `commitment_matches_independent_sha256_vector`.
+    const COMMITMENT_VECTOR: &str =
+        "579d2556e8ff14a848720df6e46b37b4710252692c4602e66c3e6b283025bd30";
 
     /// Deterministic `rand_core` 0.6 source for SPAKE2 scalars in tests only.
     struct SeededRng(u64);
@@ -389,8 +508,11 @@ mod tests {
         let (msg_a, msg_b) = (sa.outbound.clone(), sb.outbound.clone());
         let ka = finish_pairing(sa, &msg_b).unwrap();
         let kb = finish_pairing(sb, &msg_a).unwrap();
-        let sas = short_authentication_string(&ka);
-        assert_eq!(sas, short_authentication_string(&kb));
+        let sas = short_authentication_string(&ka, SasProtection::Uncommitted);
+        assert_eq!(
+            sas,
+            short_authentication_string(&kb, SasProtection::Uncommitted)
+        );
         assert_eq!(sas.len(), SAS_DIGITS as usize);
         assert!(sas.bytes().all(|byte| byte.is_ascii_digit()));
     }
@@ -428,8 +550,8 @@ mod tests {
         )
         .unwrap();
         assert_ne!(
-            short_authentication_string(&keys_a),
-            short_authentication_string(&keys_b),
+            short_authentication_string(&keys_a, SasProtection::Uncommitted),
+            short_authentication_string(&keys_b, SasProtection::Uncommitted),
             "a split pairing must not show matching SAS values"
         );
         assert_ne!(keys_a.sas_key, keys_b.sas_key);
@@ -450,8 +572,8 @@ mod tests {
         let creator_keys = finish_pairing(creator, &msg_b).unwrap();
         let guesser_keys = finish_pairing(joiner, &msg_a).unwrap();
         assert_eq!(
-            short_authentication_string(&creator_keys),
-            short_authentication_string(&guesser_keys)
+            short_authentication_string(&creator_keys, SasProtection::Uncommitted),
+            short_authentication_string(&guesser_keys, SasProtection::Uncommitted)
         );
         let other_a = seeded(PairingRole::A, 7, &code, &session, &a, &intended);
         let other_b = seeded(PairingRole::B, 8, &code, &session, &a, &intended);
@@ -459,8 +581,8 @@ mod tests {
         let intended_keys = finish_pairing(other_b, &msg_a).unwrap();
         let _ = finish_pairing(other_a, &msg_b).unwrap();
         assert_ne!(
-            short_authentication_string(&creator_keys),
-            short_authentication_string(&intended_keys)
+            short_authentication_string(&creator_keys, SasProtection::Uncommitted),
+            short_authentication_string(&intended_keys, SasProtection::Uncommitted)
         );
     }
 
@@ -475,6 +597,13 @@ mod tests {
         );
         assert_eq!(render_sas(&key), "882453");
         assert_eq!(SAS_LABEL, b"clipsync/v1/sas");
+        // Same inputs with info=b"clipsync/v1/sas-committed".
+        let committed = derive_labeled(&[7; 32], &[3; 32], COMMITTED_SAS_LABEL).unwrap();
+        assert_eq!(
+            hex::encode(committed),
+            "381c2212a4cbc77b14f50c75a413b79e6be30faea4a91e604ab26ea18fc14898"
+        );
+        assert_eq!(render_sas(&committed), "436795");
     }
 
     #[test]
@@ -500,8 +629,190 @@ mod tests {
         let (msg_a, msg_b) = (sa.outbound.clone(), sb.outbound.clone());
         let ka = finish_pairing(sa, &msg_b).unwrap();
         let kb = finish_pairing(sb, &msg_a).unwrap();
-        assert_eq!(short_authentication_string(&ka), SEEDED_VECTOR_SAS);
-        assert_eq!(short_authentication_string(&kb), SEEDED_VECTOR_SAS);
+        assert_eq!(
+            short_authentication_string(&ka, SasProtection::Uncommitted),
+            SEEDED_VECTOR_SAS
+        );
+        assert_eq!(
+            short_authentication_string(&kb, SasProtection::Uncommitted),
+            SEEDED_VECTOR_SAS
+        );
+    }
+
+    /// Two honest devices in the order the protocol fixes: the joiner (B)
+    /// commits, the creator (A) answers with its message, B reveals.
+    fn committed_exchange(code: &str) -> (PairingKeys, PairingKeys) {
+        let session = PairingSessionId::new();
+        let a = DeviceId::from("dev-a");
+        let b = DeviceId::from("dev-b");
+        let sa = start_pairing_a(code, session.clone(), a.clone(), b.clone()).unwrap();
+        let sb = start_pairing_b(code, session, a, b).unwrap();
+        let commitment = spake2_commitment(&sb);
+        let (msg_a, msg_b) = (sa.outbound.clone(), sb.outbound.clone());
+        verify_spake2_commitment(&sa, &commitment, &msg_b).unwrap();
+        (
+            finish_pairing(sa, &msg_b).unwrap(),
+            finish_pairing(sb, &msg_a).unwrap(),
+        )
+    }
+
+    #[test]
+    fn honest_committed_pairing_opens_the_commitment_and_derives_the_same_sas() {
+        let (ka, kb) = committed_exchange(&random_code());
+        let sas = short_authentication_string(&ka, SasProtection::Committed);
+        assert_eq!(
+            sas,
+            short_authentication_string(&kb, SasProtection::Committed)
+        );
+        assert_eq!(sas.len(), SAS_DIGITS as usize);
+        assert_eq!(
+            short_authentication_string(&ka, SasProtection::Uncommitted),
+            short_authentication_string(&kb, SasProtection::Uncommitted)
+        );
+    }
+
+    #[test]
+    fn a_relay_must_fix_its_message_before_it_sees_the_creators() {
+        // The relay plays B toward the creator. The creator sends its SPAKE2
+        // message only after it holds a commitment, so the relay commits
+        // first and learns the creator's message afterwards. Any message it
+        // grinds from then on, to steer the creator's SAS toward the one the
+        // joiner will show, fails to open the commitment; only the message it
+        // committed to before seeing anything opens it.
+        const GRINDING_CANDIDATES: u64 = 64;
+        let session = PairingSessionId::new();
+        let a = DeviceId::from("dev-a");
+        let b = DeviceId::from("dev-b");
+        let code = random_code();
+        let committed = seeded(PairingRole::B, 21, &code, &session, &a, &b);
+        let commitment = spake2_commitment(&committed);
+        // Only now does the creator send its message.
+        let honest_a = start_pairing_a(&code, session.clone(), a.clone(), b.clone()).unwrap();
+        let mut accepted = 0;
+        for seed in 0..GRINDING_CANDIDATES {
+            let candidate = seeded(PairingRole::B, 1_000 + seed, &code, &session, &a, &b);
+            assert!(
+                matches!(
+                    verify_spake2_commitment(&honest_a, &commitment, &candidate.outbound),
+                    Err(CryptoError::Commitment)
+                ),
+                "a ground message opened the relay's commitment"
+            );
+            if verify_spake2_commitment(&honest_a, &commitment, &committed.outbound).is_ok() {
+                accepted += 1;
+            }
+        }
+        assert_eq!(accepted, GRINDING_CANDIDATES);
+        // A commitment cannot be replayed into another session, toward
+        // another device pair, or from the other role.
+        let other_session =
+            start_pairing_a(&code, PairingSessionId::new(), a.clone(), b.clone()).unwrap();
+        let other_device =
+            start_pairing_a(&code, session.clone(), a.clone(), "dev-c".into()).unwrap();
+        let as_joiner = start_pairing_b(&code, session.clone(), a.clone(), b.clone()).unwrap();
+        for verifier in [&other_session, &other_device, &as_joiner] {
+            assert!(matches!(
+                verify_spake2_commitment(verifier, &commitment, &committed.outbound),
+                Err(CryptoError::Commitment)
+            ));
+        }
+        for malformed in [Vec::new(), commitment[..SPAKE2_COMMITMENT_LEN - 1].to_vec()] {
+            assert!(matches!(
+                verify_spake2_commitment(&honest_a, &malformed, &committed.outbound),
+                Err(CryptoError::Commitment)
+            ));
+        }
+    }
+
+    #[test]
+    fn commitment_binds_version_session_devices_role_and_message() {
+        let session = PairingSessionId::from("01JCLIPSYNCCOMMITVECTOR00");
+        let a = DeviceId::from("dev-a");
+        let b = DeviceId::from("dev-b");
+        let base = commitment_digest(PROTOCOL_VERSION, &session, &a, &b, PairingRole::B, b"msg");
+        let changed = [
+            commitment_digest(
+                PROTOCOL_VERSION + 1,
+                &session,
+                &a,
+                &b,
+                PairingRole::B,
+                b"msg",
+            ),
+            commitment_digest(
+                PROTOCOL_VERSION,
+                &PairingSessionId::new(),
+                &a,
+                &b,
+                PairingRole::B,
+                b"msg",
+            ),
+            commitment_digest(PROTOCOL_VERSION, &session, &b, &a, PairingRole::B, b"msg"),
+            commitment_digest(
+                PROTOCOL_VERSION,
+                &session,
+                &"dev-ad".into(),
+                &"ev-b".into(),
+                PairingRole::B,
+                b"msg",
+            ),
+            commitment_digest(PROTOCOL_VERSION, &session, &a, &b, PairingRole::A, b"msg"),
+            commitment_digest(PROTOCOL_VERSION, &session, &a, &b, PairingRole::B, b"msh"),
+        ];
+        for other in changed {
+            assert_ne!(base, other);
+        }
+    }
+
+    #[test]
+    fn commitment_matches_independent_sha256_vector() {
+        // Python: hashlib.sha256(b"clipsync/v1/spake2-commit" + (1).to_bytes(2, "big")
+        //   + b"".join(len(f).to_bytes(4, "big") + f for f in
+        //     [b"01JCLIPSYNCCOMMITVECTOR00", b"dev-a", b"dev-b", b"B", b"msg"])).hexdigest()
+        let digest = commitment_digest(
+            1,
+            &PairingSessionId::from("01JCLIPSYNCCOMMITVECTOR00"),
+            &"dev-a".into(),
+            &"dev-b".into(),
+            PairingRole::B,
+            b"msg",
+        );
+        assert_eq!(hex::encode(digest), COMMITMENT_VECTOR);
+        assert_eq!(SPAKE2_COMMIT_LABEL, b"clipsync/v1/spake2-commit");
+        assert_eq!(COMMITTED_SAS_LABEL, b"clipsync/v1/sas-committed");
+    }
+
+    #[test]
+    fn the_mode_is_an_input_to_the_sas() {
+        // The same SPAKE2 run yields unrelated codes in the two modes, so
+        // devices left in different modes without a further search show
+        // different codes.
+        let session = PairingSessionId::from("01JCLIPSYNCSASVECTOR00000");
+        let a = DeviceId::from("dev-a");
+        let b = DeviceId::from("dev-b");
+        let sa = seeded(PairingRole::A, 11, "482913", &session, &a, &b);
+        let sb = seeded(PairingRole::B, 12, "482913", &session, &a, &b);
+        let (msg_a, msg_b) = (sa.outbound.clone(), sb.outbound.clone());
+        let ka = finish_pairing(sa, &msg_b).unwrap();
+        let kb = finish_pairing(sb, &msg_a).unwrap();
+        // The uncommitted value is the one an older (pre-commitment) peer shows.
+        assert_eq!(
+            short_authentication_string(&ka, SasProtection::Uncommitted),
+            SEEDED_VECTOR_SAS
+        );
+        assert_eq!(
+            short_authentication_string(&kb, SasProtection::Committed),
+            SEEDED_VECTOR_COMMITTED_SAS
+        );
+        assert_ne!(
+            short_authentication_string(&ka, SasProtection::Committed),
+            short_authentication_string(&kb, SasProtection::Uncommitted)
+        );
+        assert_ne!(
+            short_authentication_string(&ka, SasProtection::Uncommitted),
+            short_authentication_string(&kb, SasProtection::Committed)
+        );
+        assert_ne!(ka.sas_key, ka.committed_sas_key);
     }
 
     #[test]
