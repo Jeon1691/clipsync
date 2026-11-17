@@ -1,14 +1,15 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
 //! `clipsync room confirm` on a real terminal (a pseudo-terminal): what the
-//! user sees next to the verification code.
+//! user sees next to the verification code, and that the prompt ends when
+//! the pairing does.
 #![cfg(unix)]
 
 use std::fs::File;
 use std::io::Read;
 use std::os::fd::FromRawFd;
 use std::path::Path;
-use std::process::{Child, Command};
+use std::process::{Child, Command, ExitStatus};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -17,7 +18,8 @@ use tempfile::TempDir;
 
 /// The code the simulated background worker asks the user to compare.
 const SAS: &str = "482913";
-/// Wall-clock budget for the CLI to start and print its prompt.
+/// Wall-clock budget for the CLI to start, print its prompt, or react to a
+/// pairing-file change it polls every tenth of a second.
 const REACTION: Duration = Duration::from_secs(10);
 /// How long a hung worker stand-in may live; far beyond any test here.
 const STAND_IN_SECS: &str = "300";
@@ -135,6 +137,19 @@ fn home_waiting_for_confirmation(worker: u32, peer_device_name: &str) -> (TempDi
     (home, store)
 }
 
+fn exit_within(child: &mut Child, budget: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + budget;
+    while Instant::now() < deadline {
+        if let Some(status) = child.try_wait().unwrap() {
+            return Some(status);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    None
+}
+
 /// True for characters a terminal acts on instead of showing.
 fn rewrites_terminal(c: char) -> bool {
     (c.is_control() && c != '\n')
@@ -179,4 +194,57 @@ fn hostile_peer_name_is_shown_inert_and_never_shares_the_code_line() {
             .all(|line| !line.contains("Laptop")),
         "{shown:?}"
     );
+}
+
+#[test]
+fn prompt_ends_without_input_when_the_pairing_ends() {
+    type End = fn(&LocalStore, &mut Child);
+    let endings: [(End, &str); 3] = [
+        // The worker saw the other device reject, or the pairing expire.
+        (
+            |store, _| {
+                store
+                    .update_pairing_wait(|wait| {
+                        let failed = wait.map(|wait| PairingWait {
+                            status: "failed".into(),
+                            error: Some("the other device rejected the verification code".into()),
+                            ..wait
+                        });
+                        (failed, ())
+                    })
+                    .unwrap()
+            },
+            "the other device rejected the verification code",
+        ),
+        // `room leave` removed the request.
+        (|store, _| store.clear_pairing_wait(), "cancelled"),
+        // The worker stopped without writing an outcome.
+        (
+            |_, worker| {
+                worker.kill().unwrap();
+                worker.wait().unwrap();
+            },
+            "no longer running",
+        ),
+    ];
+    for (end, reason) in endings {
+        let mut worker = worker_stand_in();
+        let (home, store) = home_waiting_for_confirmation(worker.id(), "Laptop");
+        let terminal = Terminal::open();
+        let mut confirm = terminal.run_confirm(home.path());
+        terminal.wait_until_shown("Type the code");
+        end(&store, &mut worker);
+        let status = exit_within(&mut confirm, REACTION);
+        let _ = worker.kill();
+        let _ = worker.wait();
+        let shown = terminal.shown();
+        let status = status
+            .unwrap_or_else(|| panic!("prompt kept waiting for input after {reason:?}: {shown:?}"));
+        assert!(!status.success(), "{reason:?}: {shown:?}");
+        assert!(shown.contains(reason), "{reason:?}: {shown:?}");
+        // Nothing was answered on the user's behalf.
+        if let Some(wait) = store.load_pairing_wait().unwrap() {
+            assert_eq!(wait.sas_decision, None, "{reason:?}");
+        }
+    }
 }

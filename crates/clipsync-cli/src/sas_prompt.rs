@@ -83,6 +83,10 @@ pub fn terminal_confirmer(mode: SasMode) -> SasConfirm {
 
 /// Prompt for and read one answer line, then decide. "yes" counts only
 /// when a person answers at a terminal that has just shown the code.
+///
+/// Dropping the future stops waiting at once. The blocking read it started
+/// stays parked on the terminal, which is harmless: every caller ends the
+/// command, and `main` exits the process without waiting for it.
 async fn ask(mode: SasMode, sas: String) -> SasDecision {
     // The caller has just shown the code. A line typed before that (say,
     // "yes" while waiting for a joiner) answers a code nobody has seen, so
@@ -203,6 +207,25 @@ pub async fn answer_background(
     reject: bool,
     mode: SasMode,
 ) -> Result<(), CoreError> {
+    answer_background_with(app, shown_on_other_device, reject, mode, ask).await
+}
+
+/// [`answer_background`] with the terminal prompt supplied by the caller.
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
+async fn answer_background_with<A, F>(
+    app: &App,
+    shown_on_other_device: Option<&str>,
+    reject: bool,
+    mode: SasMode,
+    prompt: A,
+) -> Result<(), CoreError>
+where
+    A: FnOnce(SasMode, String) -> F,
+    F: Future<Output = SasDecision>,
+{
     // This command shows no code before it reads its argument, so only the
     // digits from the other device are a comparison. Refuse anything else
     // before waiting, so it can never approve a code that appears later.
@@ -256,7 +279,19 @@ pub async fn answer_background(
                 "pass the code shown on the other device: clipsync room confirm <code>".into(),
             ));
         }
-        ask(mode, sas.clone()).await
+        // The worker keeps running while the user compares. If the pairing
+        // ends meanwhile (the other device rejected, it expired, `room
+        // reject` or `room leave` ran), stop asking and say why at once.
+        tokio::select! {
+            decision = prompt(mode, sas.clone()) => decision,
+            ended = pairing_ended(app, &wait, deadline) => {
+                if !mode.json {
+                    // End the unanswered prompt line before the error.
+                    println!();
+                }
+                return Err(ended);
+            }
+        }
     };
 
     // The prompt may have taken a while: answer only the same live request,
@@ -430,6 +465,36 @@ async fn wait_for_worker_exit(
             return Err(CoreError::Timeout);
         }
         tokio::time::sleep(PAIRING_FILE_POLL).await;
+    }
+}
+
+/// Resolve once the request `asked` can no longer be answered: its worker
+/// finished, failed (the other device rejected, or the pairing expired) or
+/// stopped; the request was removed, replaced or rejected; or the command's
+/// deadline passed.
+async fn pairing_ended(app: &App, asked: &PairingWait, deadline: Instant) -> CoreError {
+    loop {
+        tokio::time::sleep(PAIRING_FILE_POLL).await;
+        let current = match app.store.load_pairing_wait() {
+            Ok(Some(current)) => current,
+            Ok(None) => return CoreError::Message("pairing was cancelled".into()),
+            Err(error) => return error.into(),
+        };
+        if current.pid != asked.pid
+            || current.status != STATUS_CONFIRM_SAS
+            || current.sas != asked.sas
+            || !pid_alive(current.pid)
+        {
+            return not_answerable(&current);
+        }
+        if rejected(&current) {
+            return CoreError::Pairing(
+                "pairing was rejected with `clipsync room reject`; nothing was stored".into(),
+            );
+        }
+        if Instant::now() >= deadline {
+            return CoreError::Timeout;
+        }
     }
 }
 
@@ -1173,6 +1238,137 @@ mod tests {
                 <= "other device: ".len() + MAX_PEER_NAME_CHARS
         );
         assert_eq!(untrusted_name(hostile), display_name(hostile));
+    }
+
+    /// A terminal prompt nobody answers.
+    async fn unanswered(_: SasMode, _: String) -> SasDecision {
+        std::future::pending().await
+    }
+
+    #[tokio::test]
+    async fn room_confirm_prompt_ends_when_the_pairing_does() {
+        type End = fn(&LocalStore, PairingWait);
+        let endings: [(End, &str); 6] = [
+            // The worker saw the other device reject, or the pairing expire.
+            (
+                |store, wait| {
+                    store
+                        .save_pairing_wait(&PairingWait {
+                            status: STATUS_FAILED.into(),
+                            error: Some("the other device rejected the verification code".into()),
+                            ..wait
+                        })
+                        .unwrap()
+                },
+                "the other device rejected the verification code",
+            ),
+            (|store, _| store.clear_pairing_wait(), "cancelled"),
+            (
+                |store, wait| {
+                    store
+                        .save_pairing_wait(&decided(wait, DECISION_REJECTED))
+                        .unwrap()
+                },
+                "room reject",
+            ),
+            (
+                |store, wait| {
+                    store
+                        .save_pairing_wait(&PairingWait {
+                            pid: exited(),
+                            ..wait
+                        })
+                        .unwrap()
+                },
+                "no longer running",
+            ),
+            // A newer `room create` replaced the request.
+            (
+                |store, wait| {
+                    store
+                        .save_pairing_wait(&PairingWait {
+                            sas: Some(OTHER_SAS.into()),
+                            ..wait
+                        })
+                        .unwrap()
+                },
+                "the pairing request changed",
+            ),
+            (
+                |store, wait| {
+                    store
+                        .save_pairing_wait(&PairingWait {
+                            status: STATUS_PAIRED.into(),
+                            ..wait
+                        })
+                        .unwrap()
+                },
+                "already completed",
+            ),
+        ];
+        let interactive = SasMode {
+            non_interactive: false,
+            ..TEXT
+        };
+        for (end, expected) in endings {
+            let (_root, app) = fixture();
+            app.store
+                .save_pairing_wait(&request(STATUS_CONFIRM_SAS, live()))
+                .unwrap();
+            let store = app.store.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(PAIRING_FILE_POLL * 3).await;
+                let wait = store.load_pairing_wait().unwrap().unwrap();
+                end(&store, wait);
+            });
+            let error = within(answer_background_with(
+                &app,
+                None,
+                false,
+                interactive,
+                unanswered,
+            ))
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains(expected), "{expected:?}: {error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn room_confirm_prompt_answer_still_reaches_the_worker() {
+        let (_root, app) = fixture();
+        app.store
+            .save_pairing_wait(&request(STATUS_CONFIRM_SAS, live()))
+            .unwrap();
+        worker(
+            &app.store,
+            |wait| wait.sas_decision.as_deref() == Some(DECISION_CONFIRMED),
+            |store, wait| {
+                store
+                    .save_pairing_wait(&PairingWait {
+                        status: STATUS_PAIRED.into(),
+                        ..wait
+                    })
+                    .unwrap()
+            },
+        );
+        let interactive = SasMode {
+            non_interactive: false,
+            ..TEXT
+        };
+        within(answer_background_with(
+            &app,
+            None,
+            false,
+            interactive,
+            |_, sas| async move {
+                assert_eq!(sas, SAS);
+                SasDecision::Confirmed
+            },
+        ))
+        .await
+        .unwrap();
     }
 
     #[cfg(unix)]

@@ -78,6 +78,12 @@ receive the sanitized name and show it apart from the code. The CLI device
 list (`clipsync devices`) applies the same sanitizer to peer names and OS
 strings.
 
+**A pairing that ends during the comparison.** If the other device rejects,
+the pairing expires, or the request is removed or rejected while `clipsync
+room confirm` is prompting, the prompt ends at once with the reason; it does
+not wait for another line. Foreground `room create` and `room join` already
+stop their prompt when the pairing ends.
+
 Users must actually compare the codes. Typing the code shown on the other
 device is the most reliable comparison, and the only one the CLI accepts
 without a terminal: `clipsync room confirm CODE` and a piped `room join`
