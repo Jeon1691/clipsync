@@ -192,12 +192,8 @@ mod file_failure_tests {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod identity_cache_tests {
     use super::*;
+    use crate::paths::{PERMISSION_BITS, PRIVATE_FILE_MODE};
     use std::os::unix::fs::PermissionsExt;
-
-    /// Owner read/write only: the mode every secret file must carry on Unix.
-    const PRIVATE_FILE_MODE: u32 = 0o600;
-    /// Permission bits of `st_mode`, excluding file-type bits.
-    const PERMISSION_BITS: u32 = 0o777;
 
     fn keychain_payload(identity: &DeviceIdentity) -> String {
         serde_json::to_string(&identity.to_stored()).unwrap()

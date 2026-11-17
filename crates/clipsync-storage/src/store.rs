@@ -358,11 +358,8 @@ mod failure_tests {
     #[cfg(unix)]
     #[test]
     fn pairing_wait_is_written_privately_without_following_a_planted_temp_link() {
+        use crate::paths::{PERMISSION_BITS, PRIVATE_FILE_MODE};
         use std::os::unix::fs::PermissionsExt;
-        /// Owner read/write only: the pairing code is a live one-time password.
-        const PRIVATE_FILE_MODE: u32 = 0o600;
-        /// Permission bits of `st_mode`, excluding file-type bits.
-        const PERMISSION_BITS: u32 = 0o777;
 
         let (root, store) = fixture();
         // The previous writer used this fixed sibling name and followed links there.

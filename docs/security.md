@@ -81,9 +81,18 @@ atomically renamed over the destination, followed by a parent-directory sync on
 Unix. A secret is therefore never readable under the process umask while being
 written, a crash leaves the previous file rather than a truncated one, and a
 link planted at the destination is replaced rather than followed. Unix
-data/inbox directories are set to `0700` (best effort) when storage opens; Windows
-relies on the user's profile-directory access controls rather than POSIX modes.
-Received filenames are sanitized to basenames.
+data/inbox/log directories are set to `0700` (best effort) when storage opens,
+and so is the runtime directory when ClipSync creates it (an existing one, such
+as `$XDG_RUNTIME_DIR`, is left as is). Windows relies on the user's
+profile-directory access controls rather than POSIX modes. Received filenames
+are sanitized to basenames.
+
+`clipsync.log` in the log directory captures the background pairing worker's
+stdout/stderr (and, on macOS, the launchd daemon's). The pairing worker opens it
+as a `0600` file on Unix and narrows an existing log with a wider mode; a log
+that launchd creates relies on the `0700` log directory. The worker writes only
+status lines, never the pairing code: the foreground command reads the code
+from `pairing.json` and shows it on the terminal.
 
 Device tokens are stored separately as `device-token-<hex-room-id>.secret`;
 webhook credentials use `webhook.secret`. These credentials use canonical private files without OS-keychain fallback; missing or empty files are errors. New `state.json` and `config.toml`
