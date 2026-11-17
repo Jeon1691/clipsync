@@ -114,6 +114,27 @@ pub async fn receive(socket: &mut WebSocket) -> ControlMessage {
     }
 }
 
+/// End a script with a complete WebSocket closing handshake.
+///
+/// Dropping the socket while client frames are still unread (the client's
+/// connect-time heartbeat, for example) makes the kernel abort the connection
+/// with a TCP reset, and a reset can discard frames the client has not read
+/// yet. Draining until the client disconnects (or answers the close frame)
+/// guarantees that every frame sent before this call reaches the client
+/// before it observes the disconnect. The surrounding script deadline bounds
+/// the wait.
+pub async fn close(mut socket: WebSocket) {
+    if socket.send(Message::Close(None)).await.is_err() {
+        // The client already disconnected, so no frame is left to drain.
+        return;
+    }
+    while let Some(Ok(frame)) = socket.recv().await {
+        if matches!(frame, Message::Close(_)) {
+            break;
+        }
+    }
+}
+
 pub async fn send(socket: &mut WebSocket, message: ControlMessage) {
     socket
         .send(Message::Text(message.encode().unwrap().into()))
