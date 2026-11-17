@@ -94,14 +94,10 @@ impl StagingArea {
                 let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600));
             }
             // Mark before the directory is published so a received file is never
-            // visible in the inbox without Gatekeeper's first-open check. A file
-            // system without xattr support (for example some network or FAT
-            // volumes) must not make peer transfers fail outright, so a failure
-            // is logged and the validated file is still delivered.
+            // visible in the inbox without Gatekeeper's first-open check. See
+            // `quarantine::mark_or_warn` for why a failure still delivers.
             #[cfg(target_os = "macos")]
-            if let Err(error) = crate::quarantine::mark(&dest, &quarantine) {
-                tracing::warn!(%error, "could not quarantine received file");
-            }
+            crate::quarantine::mark_or_warn(&dest, &quarantine);
             written.push(name);
             offset = end;
         }
@@ -404,28 +400,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn committed_files_carry_launch_services_quarantine_attribute() {
-        use std::os::unix::ffi::OsStrExt;
         fn quarantine_of(path: &Path) -> Option<String> {
-            let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-            let name = c"com.apple.quarantine";
-            let mut buf = vec![0u8; 256];
-            // SAFETY: both strings are NUL-terminated and `buf` outlives the call
-            // with its real length passed as the size.
-            let len = unsafe {
-                libc::getxattr(
-                    c_path.as_ptr(),
-                    name.as_ptr(),
-                    buf.as_mut_ptr().cast(),
-                    buf.len(),
-                    0,
-                    libc::XATTR_NOFOLLOW,
-                )
-            };
-            if len < 0 {
-                return None;
-            }
-            buf.truncate(len as usize);
-            Some(String::from_utf8(buf).unwrap())
+            crate::quarantine::value_of(path).unwrap()
         }
 
         let root = tempfile::tempdir().unwrap();
