@@ -5,12 +5,18 @@
 #[path = "engine_coverage.rs"]
 mod coverage_expansion;
 
+#[path = "envelope_security.rs"]
+mod envelope_security;
+
 use super::*;
+use crate::envelope::EnvelopePolicy;
 use crate::{App, AppPaths};
 use clipsync_clipboard::{ClipboardBackend, MockClipboard};
+use clipsync_crypto::{parse_public, NoiseHandshake};
 use clipsync_protocol::{
     CreatePairingRequest, CreatePairingResponse, DeviceRole, JoinPairingRequest,
-    JoinPairingResponse, PairingSessionId, RoomId, SyncDirection,
+    JoinPairingResponse, PairingSessionId, RoomId, SyncDirection, ENVELOPE_VERSION_AUTHENTICATED,
+    ENVELOPE_VERSION_LEGACY,
 };
 use clipsync_storage::{AppConfig, PeerRecord};
 use std::net::SocketAddr;
@@ -655,7 +661,10 @@ async fn authenticated_but_invalid_text_is_ignored_and_the_next_message_still_ar
         &pair.a.identity,
         &room,
         &EPOCH,
-        2,
+        EnvelopeStamp {
+            version: ENVELOPE_VERSION_AUTHENTICATED,
+            seq: 2,
+        },
         &ClipboardItem::Text {
             text: "valid after rejection".into(),
         },
@@ -670,7 +679,7 @@ async fn authenticated_but_invalid_text_is_ignored_and_the_next_message_still_ar
     );
     let logs = String::from_utf8(product_logs().lock().clone()).unwrap();
     assert!(
-        logs.contains("text decrypt"),
+        logs.contains("text envelope rejected"),
         "decryption failure lost its diagnostic context"
     );
     assert!(
@@ -1095,25 +1104,44 @@ fn daemon_answers_commands_and_removes_pid_and_socket_after_interrupt() {
     });
 }
 
-fn text_routing() -> RoutingHeader {
+/// Remote peer pinned by [`scripted_peer`]; scripted envelopes come from it.
+const SCRIPT_SENDER: &str = "script-device-z";
+
+/// Strictly increasing `seq` for scripted envelopes, in creation order.
+static SCRIPT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Authenticated (v2) header a pinned `sender` would emit into `room`.
+fn routing_from(room: &RoomId, sender: &str, kind: ItemKind) -> RoutingHeader {
     let now = Utc::now();
     RoutingHeader {
-        version: PROTOCOL_VERSION,
+        version: ENVELOPE_VERSION_AUTHENTICATED,
         message_id: MessageId::new(),
         transfer_id: TransferId::new(),
-        room_id: RoomId::new(),
-        sender_device_id: clipsync_protocol::DeviceId::new(),
+        room_id: room.clone(),
+        sender_device_id: sender.into(),
         recipient: Recipient::Broadcast,
         sent_at: now,
         expires_at: now + ChronoDuration::seconds(60),
-        item_kind: ItemKind::Text,
-        seq: 1,
+        item_kind: kind,
+        seq: SCRIPT_SEQ.fetch_add(1, Ordering::Relaxed),
+    }
+}
+
+fn text_routing(room: &RoomId) -> RoutingHeader {
+    routing_from(room, SCRIPT_SENDER, ItemKind::Text)
+}
+
+/// Legacy (v1) header for checks of the AEAD layer alone.
+fn legacy_routing() -> RoutingHeader {
+    RoutingHeader {
+        version: ENVELOPE_VERSION_LEGACY,
+        ..routing_from(&RoomId::new(), SCRIPT_SENDER, ItemKind::Text)
     }
 }
 
 #[test]
 fn text_envelopes_reject_malformed_nonce_ciphertext_and_changed_message_context() {
-    let routing = text_routing();
+    let routing = legacy_routing();
     let key = derive_content_key(&EPOCH, routing.transfer_id.as_str()).unwrap();
     let nonce = [4; 12];
     let ciphertext = seal(
@@ -1156,37 +1184,22 @@ fn manifest(kind: ItemKind, payload: &[u8]) -> ManifestPlain {
     }
 }
 
+/// Text envelope sealed exactly as a sender of `routing.version` seals it.
 fn encrypted_text(routing: RoutingHeader, text: &str) -> ControlMessage {
-    let key = derive_content_key(&EPOCH, routing.transfer_id.as_str()).unwrap();
-    let nonce = derive_nonce(&key, 0).unwrap();
-    let ciphertext = seal(
-        &key,
-        &nonce,
-        format!("{}:text", routing.message_id).as_bytes(),
-        text.as_bytes(),
-    )
-    .unwrap();
+    let (nonce, ciphertext) = seal_text(&EPOCH, &routing, text).unwrap();
     ControlMessage::TextEnvelope {
         routing,
-        nonce: hex::encode(nonce),
-        ciphertext: hex::encode(ciphertext),
+        nonce,
+        ciphertext,
     }
 }
 
 fn encrypted_manifest(routing: RoutingHeader, manifest: &ManifestPlain) -> ControlMessage {
-    let key = derive_content_key(&EPOCH, routing.transfer_id.as_str()).unwrap();
-    let nonce = derive_nonce(&key, u32::MAX).unwrap();
-    let ciphertext = seal(
-        &key,
-        &nonce,
-        format!("{}:manifest", routing.transfer_id).as_bytes(),
-        &serde_json::to_vec(manifest).unwrap(),
-    )
-    .unwrap();
+    let (nonce, ciphertext) = seal_manifest(&EPOCH, &routing, manifest).unwrap();
     ControlMessage::Manifest {
         routing,
-        nonce: hex::encode(nonce),
-        ciphertext: hex::encode(ciphertext),
+        nonce,
+        ciphertext,
         chunk_count: manifest.chunk_count,
         total_bytes: manifest.total_bytes,
     }
@@ -1221,7 +1234,7 @@ async fn live_session_recovers_from_repeated_hello_duplicate_text_and_corrupt_tr
             ControlMessage::Hello { .. }
         ));
         send(&mut socket, hello(&room)).await;
-        let queued_routing = text_routing();
+        let queued_routing = text_routing(&room);
         let ControlMessage::TextEnvelope {
             routing,
             nonce,
@@ -1262,7 +1275,7 @@ async fn live_session_recovers_from_repeated_hello_duplicate_text_and_corrupt_tr
             },
         )
         .await;
-        let text = encrypted_text(text_routing(), "deduplicated text");
+        let text = encrypted_text(text_routing(&room), "deduplicated text");
         send(&mut socket, text.clone()).await;
         assert!(matches!(
             receive(&mut socket).await,
@@ -1275,7 +1288,7 @@ async fn live_session_recovers_from_repeated_hello_duplicate_text_and_corrupt_tr
         send(
             &mut socket,
             ControlMessage::Manifest {
-                routing: text_routing(),
+                routing: text_routing(&room),
                 nonce: "not hex".into(),
                 ciphertext: "invalid".into(),
                 chunk_count: 1,
@@ -1287,13 +1300,13 @@ async fn live_session_recovers_from_repeated_hello_duplicate_text_and_corrupt_tr
             .send(Message::Binary(vec![0, 1, 2].into()))
             .await
             .unwrap();
-        let orphan = split_and_encrypt(&EPOCH, &TransferId::new(), b"orphan").unwrap();
+        let orphan = split_and_encrypt(&EPOCH, &text_routing(&room), b"orphan").unwrap();
         socket
             .send(Message::Binary(orphan.frames[0].clone().into()))
             .await
             .unwrap();
         for failure in ["count", "hash", "mime"] {
-            let routing = text_routing();
+            let routing = routing_from(&room, SCRIPT_SENDER, ItemKind::Image);
             let mut manifest = manifest(ItemKind::Image, b"invalid image");
             if failure == "count" {
                 manifest.chunk_count = 2;
@@ -1301,7 +1314,7 @@ async fn live_session_recovers_from_repeated_hello_duplicate_text_and_corrupt_tr
             if failure == "hash" {
                 manifest.content_hash = "wrong hash".into();
             }
-            let chunks = split_and_encrypt(&EPOCH, &routing.transfer_id, b"invalid image").unwrap();
+            let chunks = split_and_encrypt(&EPOCH, &routing, b"invalid image").unwrap();
             send(&mut socket, encrypted_manifest(routing, &manifest)).await;
             socket
                 .send(Message::Binary(chunks.frames[0].clone().into()))
@@ -1320,7 +1333,7 @@ async fn live_session_recovers_from_repeated_hello_duplicate_text_and_corrupt_tr
         socket.send(Message::Pong(vec![].into())).await.unwrap();
         send(
             &mut socket,
-            encrypted_text(text_routing(), "recovered after invalid transfers"),
+            encrypted_text(text_routing(&room), "recovered after invalid transfers"),
         )
         .await;
         assert!(matches!(
@@ -1389,14 +1402,18 @@ async fn pull_reports_empty_closed_and_live_text_states_and_recovers_from_corrup
                 return;
             }
             if case == "text" {
-                send(&mut socket, encrypted_text(text_routing(), "live pull")).await;
+                send(
+                    &mut socket,
+                    encrypted_text(text_routing(&room), "live pull"),
+                )
+                .await;
                 let _ = release.await;
                 return;
             }
             send(
                 &mut socket,
                 ControlMessage::Manifest {
-                    routing: text_routing(),
+                    routing: text_routing(&room),
                     nonce: "!".into(),
                     ciphertext: "!".into(),
                     chunk_count: 1,
@@ -1405,13 +1422,13 @@ async fn pull_reports_empty_closed_and_live_text_states_and_recovers_from_corrup
             )
             .await;
             socket.send(Message::Binary(vec![0].into())).await.unwrap();
-            let orphan = split_and_encrypt(&EPOCH, &TransferId::new(), b"orphan").unwrap();
+            let orphan = split_and_encrypt(&EPOCH, &text_routing(&room), b"orphan").unwrap();
             socket
                 .send(Message::Binary(orphan.frames[0].clone().into()))
                 .await
                 .unwrap();
             for failure in ["count", "hash", "valid"] {
-                let routing = text_routing();
+                let routing = text_routing(&room);
                 let mut manifest = manifest(ItemKind::Text, b"binary pull");
                 if failure == "count" {
                     manifest.chunk_count = 2;
@@ -1419,8 +1436,7 @@ async fn pull_reports_empty_closed_and_live_text_states_and_recovers_from_corrup
                 if failure == "hash" {
                     manifest.content_hash = "bad hash".into();
                 }
-                let chunks =
-                    split_and_encrypt(&EPOCH, &routing.transfer_id, b"binary pull").unwrap();
+                let chunks = split_and_encrypt(&EPOCH, &routing, b"binary pull").unwrap();
                 send(&mut socket, encrypted_manifest(routing, &manifest)).await;
                 socket
                     .send(Message::Binary(chunks.frames[0].clone().into()))
@@ -1584,7 +1600,7 @@ async fn hello_presence_only_starts_noise_for_a_known_online_peer_with_a_valid_p
         "unknown",
         "bad-key",
         "responder",
-        "already-done",
+        "already-started",
         "eligible",
     ] {
         let mut room = room.clone();
@@ -1618,25 +1634,41 @@ async fn hello_presence_only_starts_noise_for_a_known_online_peer_with_a_valid_p
                 device_token: None,
             }
         };
-        let mut noise = None;
-        let mut done = case == "already-done";
+        let mut handshakes = HandshakeTracker::new(Vec::new());
+        let remote: DeviceId = "script-device-z".into();
+        if case == "already-started" {
+            // A repeated presence announcement must not restart a running handshake.
+            assert!(handshakes
+                .initiate(&peer.identity, &room, &remote, false)
+                .is_some());
+        }
+        let inbound = Inbound {
+            store: &peer.app.store,
+            room: &room,
+            local: &peer.identity.device_id,
+            epoch_key: &EPOCH,
+            policy: EnvelopePolicy::Negotiate,
+        };
         apply_hello_ok(
             &message,
             &peer.identity,
             &room,
-            &EPOCH,
+            &inbound,
             &clipboard,
             &mut guard,
             &handle,
             &notifier,
             &mut signature,
-            &mut noise,
-            &mut done,
+            &mut handshakes,
             &connection,
         )
         .await;
-        assert_eq!(noise.is_some(), case == "eligible", "{case}");
-        assert_eq!(done, case == "already-done");
+        assert_eq!(
+            handshakes.is_pending(&remote),
+            matches!(case, "eligible" | "already-started"),
+            "{case}"
+        );
+        assert!(!handshakes.is_done(&remote));
     }
     server.finish().await;
     assert_eq!(signature, "unchanged");
@@ -2150,7 +2182,7 @@ async fn pull_reports_output_file_failures_for_each_item_kind_without_overwritin
 
 #[test]
 fn manifest_rejection_distinguishes_encoding_authentication_and_authenticated_json_errors() {
-    let routing = text_routing();
+    let routing = legacy_routing();
     let nonce = [6; 12];
     assert!(matches!(
         open_manifest(&EPOCH, &routing, &hex::encode(nonce), "!"),
@@ -2220,7 +2252,18 @@ async fn closed_relay_senders_report_failure_for_text_images_and_file_transfers(
         },
     ] {
         assert!(matches!(
-            send_item(&connection, &peer.identity, &room, &EPOCH, 1, &item).await,
+            send_item(
+                &connection,
+                &peer.identity,
+                &room,
+                &EPOCH,
+                EnvelopeStamp {
+                    version: ENVELOPE_VERSION_AUTHENTICATED,
+                    seq: 1
+                },
+                &item
+            )
+            .await,
             Err(CoreError::Transport(
                 clipsync_transport::TransportError::Closed
             ))

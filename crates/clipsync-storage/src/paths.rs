@@ -80,6 +80,18 @@ impl AppPaths {
         self.data_dir.join("state.json")
     }
 
+    /// Private envelope sequence/replay state; see `LocalStore::next_send_seq`.
+    pub fn replay_state_file(&self) -> PathBuf {
+        self.data_dir.join("replay-state.json")
+    }
+
+    /// Advisory lock serializing every read-modify-write of
+    /// [`Self::replay_state_file`] across processes. A separate file, because
+    /// the state file itself is replaced by rename on each write.
+    pub fn replay_state_lock_file(&self) -> PathBuf {
+        self.data_dir.join("replay-state.lock")
+    }
+
     pub fn identity_file(&self) -> PathBuf {
         self.data_dir.join("identity.json")
     }
@@ -108,7 +120,8 @@ impl AppPaths {
 /// Owner-only directory mode (`rwx------`) for ClipSync-owned directories.
 #[cfg(unix)]
 pub(crate) const PRIVATE_DIR_MODE: u32 = 0o700;
-/// Owner read/write file mode (`rw-------`) for secrets, `pairing.json` and logs.
+/// Owner read/write file mode (`rw-------`) for secrets, replay state,
+/// `pairing.json` and logs.
 #[cfg(unix)]
 pub(crate) const PRIVATE_FILE_MODE: u32 = 0o600;
 /// Permission bits of `st_mode`, excluding file-type bits (test assertions).

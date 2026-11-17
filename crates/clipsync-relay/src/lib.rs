@@ -4,6 +4,8 @@
 //! Zero-knowledge ClipSync relay: pairing rendezvous and encrypted frame routing.
 
 mod auth;
+mod client_ip;
+mod join_limits;
 mod state;
 mod transport;
 mod webhook;
@@ -14,19 +16,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 use clipsync_protocol::{
     CreatePairingRequest, CreatePairingResponse, ErrorBody, JoinPairingRequest,
     JoinPairingResponse, FRAME_HARD_CAP,
 };
 
-pub use state::RelayState;
+pub use join_limits::PairingJoinLimits;
+#[cfg(test)]
+use join_limits::IP_FAILED_JOIN_LIMIT;
+pub use state::{RelayState, MAX_MEMBER_SOCKETS};
 pub use transport::RelayTransportConfig;
 
 #[derive(Clone, Debug)]
@@ -104,9 +109,32 @@ pub async fn serve_with_transport(
     transport: RelayTransportConfig,
 ) -> anyhow::Result<()> {
     let tls = transport.tls_config(&config.public_url)?;
+    transport.join_limits.validate()?;
     let listener = std::net::TcpListener::bind(config.bind)?;
     let addr = listener.local_addr()?;
-    let app = router(config).into_make_service_with_connect_info::<SocketAddr>();
+    if !transport.trusted_proxies.is_empty() {
+        let trusted = client_ip::canonical_trusted_proxies(&transport.trusted_proxies);
+        info!(
+            ranges = trusted.len(),
+            "honoring X-Forwarded-For from trusted proxies for pairing limits"
+        );
+        for net in client_ip::trusts_every_address(&trusted) {
+            warn!(
+                %net,
+                "trusted proxy range covers every address: any client can choose \
+                 the address its pairing-join limits are charged to"
+            );
+        }
+    }
+    if transport.join_limits != PairingJoinLimits::default() {
+        info!(limits = ?transport.join_limits, "using configured pairing-join limits");
+    }
+    let app = router_with_join_policy(
+        config,
+        transport.trusted_proxies.clone(),
+        transport.join_limits,
+    )?
+    .into_make_service_with_connect_info::<SocketAddr>();
     let server = axum_server::from_tcp(listener)?.first_request_timeout(Duration::from_secs(10));
     if let Some(tls) = tls {
         info!(%addr, "clipsync-relay listening with TLS 1.2/1.3");
@@ -122,7 +150,25 @@ pub async fn serve_with_transport(
 }
 
 pub fn router(config: RelayConfig) -> Router {
-    let state = Arc::new(RelayState::new(config));
+    router_with_state(Arc::new(RelayState::new(config)))
+}
+
+/// Like [`router`], also honoring `X-Forwarded-For` from `trusted_proxies`
+/// when identifying clients for pairing limits, and applying `join_limits`.
+/// Fails if `join_limits` does not pass [`PairingJoinLimits::validate`].
+pub fn router_with_join_policy(
+    config: RelayConfig,
+    trusted_proxies: Vec<ipnet::IpNet>,
+    join_limits: PairingJoinLimits,
+) -> anyhow::Result<Router> {
+    Ok(router_with_state(Arc::new(RelayState::with_join_policy(
+        config,
+        trusted_proxies,
+        join_limits,
+    )?)))
+}
+
+fn router_with_state(state: Arc<RelayState>) -> Router {
     let janitor_state = state.clone();
     tokio::spawn(async move {
         loop {
@@ -169,6 +215,7 @@ async fn create_pairing(
 async fn join_pairing(
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
     State(state): State<Arc<RelayState>>,
+    headers: HeaderMap,
     Json(req): Json<JoinPairingRequest>,
 ) -> Result<Json<JoinPairingResponse>, (StatusCode, Json<ErrorBody>)> {
     if req.protocol_version != clipsync_protocol::PROTOCOL_VERSION {
@@ -178,7 +225,8 @@ async fn join_pairing(
             "unsupported protocol version",
         ));
     }
-    match state.join_pairing(req, addr.ip()) {
+    let client = state.client_ip(addr.ip(), &headers);
+    match state.join_pairing(req, client) {
         Ok(resp) => Ok(Json(resp)),
         Err(JoinError::NotFound) => Err(err(
             StatusCode::NOT_FOUND,
