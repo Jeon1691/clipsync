@@ -84,9 +84,10 @@ pub enum SeqCheck {
 }
 
 /// Exclusive advisory lock on the replay-state lock file, held for one
-/// read-modify-write. `File::lock` is `flock` on Unix and `LockFileEx` on
-/// Windows: it excludes other processes and other open handles in this
-/// process alike, and the OS releases it if the process dies.
+/// read-modify-write. It is `flock` on Unix (Android included) and
+/// `LockFileEx` on Windows: it excludes other processes and other open handles
+/// in this process alike, and the OS releases it if the process dies. Failing
+/// to take it is an error; there is no in-process-only fallback.
 struct ReplayStateLock(File);
 
 impl ReplayStateLock {
@@ -103,7 +104,7 @@ impl ReplayStateLock {
         let file = options.open(path)?;
         // Also tighten a lock file left behind by an older or foreign process.
         set_private_file(path)?;
-        file.lock()?;
+        lock_exclusive(&file)?;
         Ok(Self(file))
     }
 }
@@ -112,8 +113,50 @@ impl Drop for ReplayStateLock {
     fn drop(&mut self) {
         // Closing the handle releases the lock too, but Windows may do that
         // lazily; unlock explicitly so the next writer is not delayed.
-        let _ = self.0.unlock();
+        let _ = unlock(&self.0);
     }
+}
+
+/// Block until `file` holds an exclusive `flock`.
+///
+/// Not `File::lock`: before Rust 1.98 std returns `Unsupported` for it on
+/// Android, and the workspace MSRV is lower. std uses the same `flock` call on
+/// the other Unix targets, so the semantics are unchanged.
+#[cfg(unix)]
+fn lock_exclusive(file: &File) -> std::io::Result<()> {
+    use rustix::fs::{flock, FlockOperation};
+    loop {
+        match flock(file, FlockOperation::LockExclusive) {
+            // A signal interrupted the wait; the lock is not held yet.
+            Err(rustix::io::Errno::INTR) => {}
+            result => return result.map_err(std::io::Error::from),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn unlock(file: &File) -> std::io::Result<()> {
+    rustix::fs::flock(file, rustix::fs::FlockOperation::Unlock).map_err(std::io::Error::from)
+}
+
+/// `LockFileEx` on Windows. Any other target gets std's `Unsupported` error,
+/// which fails the replay-state update instead of running it unlocked.
+#[cfg(not(unix))]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "Not Unix, so not Android; std's lock is LockFileEx on Windows."
+)]
+fn lock_exclusive(file: &File) -> std::io::Result<()> {
+    file.lock()
+}
+
+#[cfg(not(unix))]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "Not Unix, so not Android; std's unlock is UnlockFile on Windows."
+)]
+fn unlock(file: &File) -> std::io::Result<()> {
+    file.unlock()
 }
 
 impl LocalStore {
@@ -410,6 +453,32 @@ mod tests {
                 highest_seq: ROUNDS
             }
         );
+    }
+
+    /// The lock must exclude a second handle on the same file (as a second
+    /// process would hold), and release it on drop. Checked with std's
+    /// `try_lock`, which is `flock`/`LockFileEx` on the test platforms, so this
+    /// also proves the lock interoperates with std's file locks.
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "Tests run on desktop targets, where std's file locks work."
+    )]
+    fn replay_lock_excludes_other_handles_until_released() {
+        let root = tempfile::tempdir().unwrap();
+        let store = store(root.path());
+        let path = store.paths.replay_state_lock_file();
+        let held = ReplayStateLock::acquire(&path).unwrap();
+        let other = File::open(&path).unwrap();
+        assert!(matches!(
+            other.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(held);
+        other.try_lock().unwrap();
+        other.unlock().unwrap();
+        // The store's own updates still go through once the handle is free.
+        store.next_send_seq(&RoomId::from("room"), 1).unwrap();
     }
 
     #[test]

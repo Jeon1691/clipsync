@@ -141,13 +141,14 @@ The daemon and one-shot processes use the same file: `push` of an image or
 files, `push` of text when the daemon is not reachable, and `pull` when the
 daemon is not reachable or has nothing to return. Every change is a
 load-modify-save under an exclusive advisory lock on `replay-state.lock` in the
-same directory (`flock` on Unix, `LockFileEx` on Windows; created `0600`). One
-process therefore cannot overwrite another's update; without the lock, a
-concurrent save could roll back a `highest_seq` and let a replay through, or
-clear a sender's v2 flag and re-open the v1 downgrade. The OS releases the lock
-if a process dies. Readers take no lock, because every save atomically
-replaces the whole file. If the file system does not support the lock, the
-change fails with an error, as for an unreadable file.
+same directory (`flock` on Unix including Android, `LockFileEx` on Windows;
+created `0600`). One process therefore cannot overwrite another's update;
+without the lock, a concurrent save could roll back a `highest_seq` and let a
+replay through, or clear a sender's v2 flag and re-open the v1 downgrade. The OS
+releases the lock if a process dies. Readers take no lock, because every save
+atomically replaces the whole file.
+If the lock cannot be taken, the change fails with an error, as for an
+unreadable file; there is no unlocked fallback.
 
 Because acceptance is strictly increasing, an older item that arrives after a
 newer one from the same sender is dropped. One relay connection delivers in
