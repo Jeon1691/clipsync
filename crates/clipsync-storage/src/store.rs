@@ -145,10 +145,8 @@ impl LocalStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(wait)?)?;
-        set_private_file(&tmp)?;
-        std::fs::rename(tmp, path)?;
+        // The pairing code is a live one-time password: write it like other secrets.
+        crate::secrets::write_private(&path, &serde_json::to_vec_pretty(wait)?)?;
         Ok(())
     }
 
@@ -350,10 +348,41 @@ mod failure_tests {
         std::fs::create_dir(store.paths.pairing_file()).unwrap();
         assert!(store.save_pairing_wait(&waiting()).is_err());
         assert!(store.paths.pairing_file().is_dir());
-        std::fs::remove_dir(store.paths.pairing_file()).unwrap();
-        std::fs::remove_file(store.paths.pairing_file().with_extension("json.tmp")).unwrap();
-        std::fs::create_dir(store.paths.pairing_file().with_extension("json.tmp")).unwrap();
-        assert!(store.save_pairing_wait(&waiting()).is_err());
+        // The failed replacement must not leave a temporary copy of the code behind.
+        assert_eq!(
+            std::fs::read_dir(&store.paths.runtime_dir).unwrap().count(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pairing_wait_is_written_privately_without_following_a_planted_temp_link() {
+        use crate::paths::{PERMISSION_BITS, PRIVATE_FILE_MODE};
+        use std::os::unix::fs::PermissionsExt;
+
+        let (root, store) = fixture();
+        // The previous writer used this fixed sibling name and followed links there.
+        let legacy_temp = store.paths.pairing_file().with_extension("json.tmp");
+        let outside = root.path().join("outside-pairing.json");
+        std::os::unix::fs::symlink(&outside, &legacy_temp).unwrap();
+
+        store.save_pairing_wait(&waiting()).unwrap();
+
+        assert!(
+            !outside.exists(),
+            "the pairing code must not be written through a link"
+        );
+        let metadata = std::fs::symlink_metadata(store.paths.pairing_file()).unwrap();
+        assert!(metadata.file_type().is_file());
+        assert_eq!(
+            metadata.permissions().mode() & PERMISSION_BITS,
+            PRIVATE_FILE_MODE
+        );
+        assert_eq!(
+            store.load_pairing_wait().unwrap().unwrap().pairing_code,
+            waiting().pairing_code
+        );
     }
 
     #[test]

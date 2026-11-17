@@ -394,3 +394,91 @@ async fn room_create_auto_inits_without_explicit_init() {
         );
     }
 }
+
+/// Upper bound for the detached worker to write its post-offer status line.
+#[cfg(unix)]
+const WORKER_LOG_DEADLINE: Duration = Duration::from_secs(10);
+/// Polling interval while waiting for the worker's status line.
+#[cfg(unix)]
+const WORKER_LOG_POLL: Duration = Duration::from_millis(20);
+/// Status text the worker prints after the offer, in both the old and new output.
+#[cfg(unix)]
+const WORKER_WAITING_MARKER: &str = "waiting for the other device";
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_worker_log_is_private_and_never_holds_the_pairing_code() {
+    use std::os::unix::fs::PermissionsExt;
+    /// Owner read/write only: the log is the detached worker's stdout/stderr.
+    const PRIVATE_FILE_MODE: u32 = 0o600;
+    /// Owner-only directory: nothing else may list or open the logs.
+    const PRIVATE_DIR_MODE: u32 = 0o700;
+    /// A typical umask-derived mode left by older builds.
+    const LEGACY_FILE_MODE: u32 = 0o644;
+    /// A typical umask-derived directory mode left by older builds.
+    const LEGACY_DIR_MODE: u32 = 0o755;
+    /// Permission bits of `st_mode`, excluding file-type bits.
+    const PERMISSION_BITS: u32 = 0o777;
+
+    let (relay, relay_task) = start_relay().await;
+    let home = TempDir::new().unwrap();
+    seed_identity_file(home.path());
+    let paths = clipsync_storage::AppPaths::from_root(home.path().into());
+    // Simulate an install whose log predates private log handling.
+    std::fs::set_permissions(
+        &paths.log_dir,
+        std::fs::Permissions::from_mode(LEGACY_DIR_MODE),
+    )
+    .unwrap();
+    std::fs::write(paths.log_file(), "earlier daemon output\n").unwrap();
+    std::fs::set_permissions(
+        paths.log_file(),
+        std::fs::Permissions::from_mode(LEGACY_FILE_MODE),
+    )
+    .unwrap();
+
+    let create = clipsync(home.path(), &relay, &["room", "create", "--no-auto-sync"]);
+    assert!(
+        create.status.success(),
+        "create failed: {}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let store = clipsync_storage::LocalStore::open_from(paths.clone()).unwrap();
+    let waiting = store.load_pairing_wait().unwrap().unwrap();
+    let code = waiting.pairing_code.clone();
+    assert!(String::from_utf8_lossy(&create.stdout).contains(&format!("pairing code: {code}")));
+
+    // The worker writes its status right after publishing the offer.
+    let deadline = Instant::now() + WORKER_LOG_DEADLINE;
+    let log = loop {
+        let log = std::fs::read_to_string(paths.log_file()).unwrap();
+        if log.contains(WORKER_WAITING_MARKER) || Instant::now() >= deadline {
+            break log;
+        }
+        tokio::time::sleep(WORKER_LOG_POLL).await;
+    };
+    let file_mode = std::fs::metadata(paths.log_file())
+        .unwrap()
+        .permissions()
+        .mode()
+        & PERMISSION_BITS;
+    let dir_mode = std::fs::metadata(&paths.log_dir)
+        .unwrap()
+        .permissions()
+        .mode()
+        & PERMISSION_BITS;
+    kill_pid(waiting.pid);
+    relay_task.abort();
+
+    assert!(
+        log.contains(WORKER_WAITING_MARKER),
+        "worker never reported its waiting state: {log}"
+    );
+    assert!(
+        !log.contains(&code),
+        "the live pairing code must not be written to the log"
+    );
+    assert!(log.starts_with("earlier daemon output\n"));
+    assert_eq!(file_mode, PRIVATE_FILE_MODE, "log file mode");
+    assert_eq!(dir_mode, PRIVATE_DIR_MODE, "log directory mode");
+}

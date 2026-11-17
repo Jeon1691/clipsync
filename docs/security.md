@@ -236,17 +236,39 @@ assurance case for current evidence and scope.
 
 ## Local storage
 
-For identity and room/epoch keys, the current implementation reads private files first and mirrors them to
-macOS Keychain / Windows Credential Manager when available. Linux currently
-uses private files; a Secret Service backend is not enabled. Secret files have
-mode `0600` on Unix. Unix data/inbox directories use `0700`; Windows relies on
-the user's profile-directory access controls rather than POSIX modes.
-Received filenames are sanitized to basenames. A file transfer whose names
+The canonical copy of the device identity (`identity.json`) and of each room
+and epoch key (`room-<id>.secret`, `epoch-<id>.secret`) is a private file in
+the data directory, and loads read that file first. On macOS and Windows every
+save also mirrors the value to Keychain / Credential Manager on a best-effort
+basis (a failure is logged and the file remains authoritative). The mirror is
+consulted only when the file is missing; a recovered identity is re-cached as
+the private file, while recovered room/epoch keys are not. Linux and other Unix
+platforms use the private files only; there is no Secret Service backend.
+
+Every secret file, and `pairing.json` (which holds the live pairing code), is
+written through one helper: a temporary file in the destination directory is
+restricted to mode `0600` on Unix before any bytes are written, synced, and
+atomically renamed over the destination, followed by a parent-directory sync on
+Unix. A secret is therefore never readable under the process umask while being
+written, a crash leaves the previous file rather than a truncated one, and a
+link planted at the destination is replaced rather than followed. Unix
+data/inbox/log directories are set to `0700` (best effort) when storage opens,
+and so is the runtime directory when ClipSync creates it (an existing one, such
+as `$XDG_RUNTIME_DIR`, is left as is). Windows relies on the user's
+profile-directory access controls rather than POSIX modes. Received filenames
+are sanitized to basenames. A file transfer whose names
 differ only by letter case is rejected whole on every platform, because
 case-insensitive filesystems (macOS, Windows) would store them as one file.
 Names the receiving filesystem otherwise resolves to one entry, such as
 Unicode normalization variants on APFS, are rejected when staging writes the
 second one; filesystems that keep them apart (ext4, NTFS) accept both.
+
+`clipsync.log` in the log directory captures the background pairing worker's
+stdout/stderr (and, on macOS, the launchd daemon's). The pairing worker opens it
+as a `0600` file on Unix and narrows an existing log with a wider mode; a log
+that launchd creates relies on the `0700` log directory. The worker writes only
+status lines, never the pairing code: the foreground command reads the code
+from `pairing.json` and shows it on the terminal.
 
 `replay-state.json` in the data directory holds envelope sequence numbers, not
 secrets. It is written atomically as a private file. Its integrity matters
