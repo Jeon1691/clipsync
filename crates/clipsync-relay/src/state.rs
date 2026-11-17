@@ -6,9 +6,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use chrono::{DateTime, Utc};
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use rand::Rng;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 use clipsync_protocol::{
     clamp_ttl, CreatePairingRequest, CreatePairingResponse, DeviceRole, JoinPairingRequest,
@@ -50,13 +51,75 @@ struct QueuedText {
     sender: IpAddr,
 }
 
+/// Identifies one room-member registration, so a socket's cleanup can retire
+/// only the route it installed and never a newer socket's replacement.
+pub type ConnectionId = u64;
+
+/// Device IDs are client-chosen and public (presence frames, webhooks), and
+/// one device may belong to several rooms, so member state is keyed per room.
+type MemberKey = (String, String);
+
+fn member_key(room_id: &str, device_id: &str) -> MemberKey {
+    (room_id.to_string(), device_id.to_string())
+}
+
+/// Most sockets one room member may have routed at once. A device runs its
+/// sync daemon and, alongside it, CLI commands that open their own socket
+/// (`push` of an image or file, `pull` without a daemon item, possibly both),
+/// and a daemon reconnect overlaps the old socket until that one closes:
+/// daemon, reconnect overlap, push and pull make four. Registering one more
+/// evicts the member's oldest socket, so one device token cannot pin an
+/// unbounded number of routed sockets and their outbound queues.
+pub const MAX_MEMBER_SOCKETS: usize = 4;
+
+pub(crate) struct MemberRoute {
+    pub(crate) id: ConnectionId,
+    pub(crate) sender: mpsc::Sender<WsOut>,
+    evicted: Arc<Notify>,
+}
+
+impl MemberRoute {
+    /// Tells the socket that installed this route to close. `notify_one`
+    /// keeps the signal until the socket next waits, so it cannot be missed.
+    fn evict(self) {
+        self.evicted.notify_one();
+    }
+}
+
+/// One socket's room-member registration. `evicted` fires once the relay
+/// drops this registration (revocation, the per-member socket cap, or a
+/// stalled outbound queue); the socket must then stop and close, because it
+/// is no longer routed.
+pub struct MemberRegistration {
+    pub id: ConnectionId,
+    pub evicted: Arc<Notify>,
+}
+
+/// Counts one authenticated socket, pairing or room member, until dropped.
+pub(crate) struct LiveConnection(Arc<AtomicU64>);
+
+impl Drop for LiveConnection {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 pub struct RelayState {
     pub config: RelayConfig,
     pairing_by_code: DashMap<String, PairingSession>,
     pairing_by_id: DashMap<String, String>,
     rooms: DashMap<String, Room>,
-    pub connections: DashMap<String, mpsc::Sender<WsOut>>,
-    queue: DashMap<String, QueuedText>,
+    // Only sockets authenticated with a device token for a non-revoked room
+    // member are routed here. Pairing sockets route via `pairing_senders`.
+    // Each member's registrations are kept oldest first, never empty, and at
+    // most `MAX_MEMBER_SOCKETS` long.
+    pub(crate) member_routes: DashMap<MemberKey, Vec<MemberRoute>>,
+    next_connection_id: AtomicU64,
+    /// Sockets past a valid `hello`, pairing or room member (exported as
+    /// `clipsync_ws_connections`); every open socket, authenticated or not,
+    /// is counted by `connection_counts` instead.
+    live_connections: Arc<AtomicU64>,
+    queue: DashMap<MemberKey, QueuedText>,
     /// Queued envelopes per sending client.
     queue_senders: DashMap<IpAddr, usize>,
     /// Orders room activity for least-recently-used eviction.
@@ -116,23 +179,29 @@ pub struct Room {
     pub default_ttl: u64,
     /// When the device tokens issued for this room expire.
     pub tokens_expire_at: DateTime<Utc>,
-    /// Authenticated device sockets attached to this room. A room with any is
-    /// never evicted.
-    pub(crate) online_sockets: usize,
     /// When the room was last used, on the relay's activity clock: a device
-    /// attaching, sending or leaving.
+    /// registering, sending or leaving.
     pub(crate) last_active: AtomicU64,
 }
 
-/// An authenticated device socket's presence in its room; dropping it marks
-/// the socket gone. While any presence exists the room cannot be evicted.
+/// Stamps a room member socket's traffic and departure on its room's
+/// activity clock, for least-recently-used eviction. Whether the room may be
+/// evicted is decided by its member routes (`RelayState::is_online`), not by
+/// this stamp.
 pub(crate) struct RoomPresence {
     state: Arc<RelayState>,
     room_id: String,
 }
 
 impl RoomPresence {
-    /// Record traffic in the room, for least-recently-used eviction.
+    pub(crate) fn new(state: &Arc<RelayState>, room_id: &str) -> Self {
+        Self {
+            state: state.clone(),
+            room_id: room_id.to_string(),
+        }
+    }
+
+    /// Record traffic in the room.
     pub(crate) fn touch(&self) {
         self.state.touch_room(&self.room_id);
     }
@@ -140,11 +209,7 @@ impl RoomPresence {
 
 impl Drop for RoomPresence {
     fn drop(&mut self) {
-        let stamp = self.state.next_activity();
-        if let Some(mut room) = self.state.rooms.get_mut(&self.room_id) {
-            room.online_sockets = room.online_sockets.saturating_sub(1);
-            room.last_active.store(stamp, Ordering::Relaxed);
-        }
+        self.state.touch_room(&self.room_id);
     }
 }
 
@@ -232,7 +297,9 @@ impl RelayState {
             pairing_by_code: DashMap::new(),
             pairing_by_id: DashMap::new(),
             rooms: DashMap::new(),
-            connections: DashMap::new(),
+            member_routes: DashMap::new(),
+            next_connection_id: AtomicU64::new(0),
+            live_connections: Arc::new(AtomicU64::new(0)),
             queue: DashMap::new(),
             queue_senders: DashMap::new(),
             activity_clock: AtomicU64::new(0),
@@ -380,18 +447,19 @@ impl RelayState {
             let candidate = self
                 .rooms
                 .iter()
-                .filter(|room| room.online_sockets == 0)
+                .filter(|room| !self.room_has_device_online(room.key(), room.value()))
                 .map(|room| (room.last_active.load(Ordering::Relaxed), room.key().clone()))
                 .min();
             let Some((_, room_id)) = candidate else {
                 return false;
             };
-            // Re-checked under the room's write lock, which `attach_member`
-            // also takes: a room a device just attached to is never removed.
-            // A room used since the scan but idle again is still a fair victim.
+            // Re-checked under the room's write lock. `register_conn` holds
+            // the room's entry while it inserts a member route, so a room a
+            // device just registered in is never removed. A room used since
+            // the scan but idle again is still a fair victim.
             let removed = self
                 .rooms
-                .remove_if(&room_id, |_, room| room.online_sockets == 0);
+                .remove_if(&room_id, |id, room| !self.room_has_device_online(id, room));
             if removed.is_some() {
                 self.rooms_evicted.fetch_add(1, Ordering::Relaxed);
                 return true;
@@ -411,26 +479,12 @@ impl RelayState {
         }
     }
 
-    /// Attach an authenticated device socket to its room, refusing an unknown
-    /// room or device and a revoked device. The room cannot be evicted while
-    /// the returned presence lives.
-    pub(crate) fn attach_member(
-        self: &Arc<Self>,
-        room_id: &str,
-        device_id: &str,
-    ) -> Result<RoomPresence, &'static str> {
-        let stamp = self.next_activity();
-        let mut room = self.rooms.get_mut(room_id).ok_or("unknown room")?;
-        let device = room.devices.get(device_id).ok_or("unknown device")?;
-        if device.revoked {
-            return Err("device revoked");
-        }
-        room.online_sockets += 1;
-        room.last_active.store(stamp, Ordering::Relaxed);
-        Ok(RoomPresence {
-            state: self.clone(),
-            room_id: room_id.to_string(),
-        })
+    /// Whether any device of `room` has a routed member socket. Lock order is
+    /// rooms, then member routes, as in `register_conn` and `revoke`.
+    fn room_has_device_online(&self, room_id: &str, room: &Room) -> bool {
+        room.devices
+            .keys()
+            .any(|device_id| self.is_online(room_id, device_id))
     }
 
     fn alloc_code(&self) -> Option<String> {
@@ -635,7 +689,6 @@ impl RelayState {
                 // Read after both tokens were issued, so neither outlives it.
                 tokens_expire_at: Utc::now()
                     + chrono::Duration::seconds(DEVICE_TOKEN_TTL_SECS + TOKEN_EXPIRY_GRACE_SECS),
-                online_sockets: 0,
                 last_active: AtomicU64::new(self.next_activity()),
             },
         );
@@ -658,13 +711,110 @@ impl RelayState {
         self.rooms.get_mut(id)
     }
 
-    pub fn register_conn(&self, device_id: &str, tx: mpsc::Sender<WsOut>) {
-        self.connections.insert(device_id.to_string(), tx);
-        self.connections_total.fetch_add(1, Ordering::Relaxed);
+    pub(crate) fn live_connection(&self) -> LiveConnection {
+        self.live_connections.fetch_add(1, Ordering::Relaxed);
+        LiveConnection(self.live_connections.clone())
     }
 
-    pub fn unregister_conn(&self, device_id: &str) {
-        self.connections.remove(device_id);
+    /// Adds `tx` to the sockets that receive room traffic for `device_id` in
+    /// `room_id`. A member may hold several sockets at once (daemon plus CLI
+    /// one-shot commands); past `MAX_MEMBER_SOCKETS` the oldest is evicted.
+    /// Only non-revoked members qualify.
+    pub fn register_conn(
+        &self,
+        room_id: &str,
+        device_id: &str,
+        tx: mpsc::Sender<WsOut>,
+    ) -> Result<MemberRegistration, &'static str> {
+        // Holding the room entry orders this insert with `revoke`, which
+        // removes the member's routes under the same entry's write lock, and
+        // with room eviction, which re-checks the routes under that lock.
+        let room = self.rooms.get(room_id).ok_or("unknown room")?;
+        let device = room.devices.get(device_id).ok_or("unknown device")?;
+        if device.revoked {
+            return Err("device revoked");
+        }
+        let id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
+        room.last_active
+            .store(self.next_activity(), Ordering::Relaxed);
+        let evicted = Arc::new(Notify::new());
+        let overflow: Vec<MemberRoute> = {
+            let mut routes = self
+                .member_routes
+                .entry(member_key(room_id, device_id))
+                .or_default();
+            routes.push(MemberRoute {
+                id,
+                sender: tx,
+                evicted: evicted.clone(),
+            });
+            let excess = routes.len().saturating_sub(MAX_MEMBER_SOCKETS);
+            routes.drain(..excess).collect()
+        };
+        drop(room);
+        for route in overflow {
+            route.evict();
+        }
+        self.connections_total.fetch_add(1, Ordering::Relaxed);
+        Ok(MemberRegistration { id, evicted })
+    }
+
+    /// Whether registration `id` is still routed for the member. Only routed
+    /// sockets may send room traffic; an evicted or revoked one may not.
+    pub fn owns_route(&self, room_id: &str, device_id: &str, id: ConnectionId) -> bool {
+        self.member_routes
+            .get(&member_key(room_id, device_id))
+            .is_some_and(|routes| routes.iter().any(|route| route.id == id))
+    }
+
+    /// Removes registration `id` from the member's routes, leaving the
+    /// member's other sockets in place.
+    fn remove_registration(
+        &self,
+        room_id: &str,
+        device_id: &str,
+        id: ConnectionId,
+    ) -> Option<MemberRoute> {
+        let Entry::Occupied(mut entry) = self.member_routes.entry(member_key(room_id, device_id))
+        else {
+            return None;
+        };
+        let routes = entry.get_mut();
+        let position = routes.iter().position(|route| route.id == id)?;
+        let removed = routes.remove(position);
+        if routes.is_empty() {
+            entry.remove();
+        }
+        Some(removed)
+    }
+
+    /// Removes only registration `id`; returns whether it was still routed.
+    pub fn unregister_conn(&self, room_id: &str, device_id: &str, id: ConnectionId) -> bool {
+        self.remove_registration(room_id, device_id, id).is_some()
+    }
+
+    /// Removes registration `id` and tells its socket to close.
+    pub(crate) fn evict_conn(&self, room_id: &str, device_id: &str, id: ConnectionId) -> bool {
+        self.remove_registration(room_id, device_id, id)
+            .map(MemberRoute::evict)
+            .is_some()
+    }
+
+    /// Every routed socket of the member, oldest first.
+    pub(crate) fn member_senders(
+        &self,
+        room_id: &str,
+        device_id: &str,
+    ) -> Vec<(ConnectionId, mpsc::Sender<WsOut>)> {
+        self.member_routes
+            .get(&member_key(room_id, device_id))
+            .map(|routes| {
+                routes
+                    .iter()
+                    .map(|route| (route.id, route.sender.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn peer_ids(&self, room_id: &str, except: &str) -> Vec<String> {
@@ -678,11 +828,14 @@ impl RelayState {
             .collect()
     }
 
-    pub fn is_online(&self, device_id: &str) -> bool {
-        self.connections.contains_key(device_id)
+    pub fn is_online(&self, room_id: &str, device_id: &str) -> bool {
+        self.member_routes
+            .get(&member_key(room_id, device_id))
+            .is_some_and(|routes| !routes.is_empty())
     }
 
-    /// Queue `env` as `device_id`'s latest offline text, sent from client
+    /// Queue `env` as the latest offline text for `device_id` in `room_id`,
+    /// sent from client
     /// address `sender`, replacing any earlier one, until `expires_at` but
     /// never longer than `QUEUE_TTL_SECS`: the expiry is sender-chosen.
     /// Returns false, queuing nothing, when the queue already holds
@@ -692,6 +845,7 @@ impl RelayState {
     /// at most the number of concurrent connections.
     pub fn queue_text(
         &self,
+        room_id: &str,
         device_id: &str,
         env: QueuedEnvelope,
         expires_at: DateTime<Utc>,
@@ -700,12 +854,13 @@ impl RelayState {
         let sender = client_key(sender);
         let now = Utc::now();
         let expires_at = expires_at.min(now + chrono::Duration::seconds(QUEUE_TTL_SECS as i64));
-        let replaced_sender = self.queue.get(device_id).map(|queued| queued.sender);
+        let key = member_key(room_id, device_id);
+        let replaced_sender = self.queue.get(&key).map(|queued| queued.sender);
         if replaced_sender != Some(sender)
             && !self.queue_has_room(replaced_sender.is_some(), sender)
         {
             self.prune_queue(now);
-            let replaced_sender = self.queue.get(device_id).map(|queued| queued.sender);
+            let replaced_sender = self.queue.get(&key).map(|queued| queued.sender);
             if !self.queue_has_room(replaced_sender.is_some(), sender) {
                 self.queue_full.fetch_add(1, Ordering::Relaxed);
                 return false;
@@ -713,7 +868,7 @@ impl RelayState {
         }
         *self.queue_senders.entry(sender).or_insert(0) += 1;
         let replaced = self.queue.insert(
-            device_id.to_string(),
+            key,
             QueuedText {
                 envelope: env,
                 expires_at,
@@ -741,8 +896,8 @@ impl RelayState {
         });
     }
 
-    pub fn take_queue(&self, device_id: &str) -> Option<QueuedEnvelope> {
-        let (_, queued) = self.queue.remove(device_id)?;
+    pub fn take_queue(&self, room_id: &str, device_id: &str) -> Option<QueuedEnvelope> {
+        let (_, queued) = self.queue.remove(&member_key(room_id, device_id))?;
         self.uncharge_sender(queued.sender);
         if queued.expires_at < Utc::now() {
             self.expired.fetch_add(1, Ordering::Relaxed);
@@ -752,18 +907,24 @@ impl RelayState {
         }
     }
 
+    /// Revokes a room member, removes all of its routes and evicts every one
+    /// of its sockets, so no socket of a revoked member stays routed. Returns
+    /// `false` when the device is not a member of the room.
     pub fn revoke(&self, room_id: &str, device_id: &str) -> bool {
         let Some(mut room) = self.rooms.get_mut(room_id) else {
             return false;
         };
-        if let Some(dev) = room.devices.get_mut(device_id) {
-            dev.revoked = true;
-            self.connections.remove(device_id);
-            room.epoch += 1;
-            true
-        } else {
-            false
+        let Some(device) = room.devices.get_mut(device_id) else {
+            return false;
+        };
+        device.revoked = true;
+        room.epoch += 1;
+        let removed = self.member_routes.remove(&member_key(room_id, device_id));
+        drop(room);
+        for route in removed.into_iter().flat_map(|(_, routes)| routes) {
+            route.evict();
         }
+        true
     }
 
     /// Take a connection slot for a WebSocket from client address `ip`, or
@@ -811,10 +972,10 @@ impl RelayState {
     /// token expired while no device is still connected. Tokens are only
     /// issued at pairing, so neither kind of room can be re-entered.
     fn prune_rooms(&self, now: DateTime<Utc>) {
-        self.rooms.retain(|_, room| {
+        self.rooms.retain(|room_id, room| {
             let any_active = room.devices.values().any(|device| !device.revoked);
             let tokens_valid = room.tokens_expire_at > now;
-            any_active && (tokens_valid || room.online_sockets > 0)
+            any_active && (tokens_valid || self.room_has_device_online(room_id, room))
         });
     }
 
@@ -836,7 +997,7 @@ impl RelayState {
     pub fn metrics_text(&self) -> String {
         format!(
             "clipsync_ws_connections {}\nclipsync_frames_forwarded {}\nclipsync_pairing_ok {}\nclipsync_pairing_fail {}\nclipsync_pairing_throttled {}\nclipsync_expired {}\nclipsync_ws_sockets {}\nclipsync_ws_refused {}\nclipsync_pairing_sessions {}\nclipsync_pairing_create_throttled {}\nclipsync_pairing_create_full {}\nclipsync_rooms {}\nclipsync_queue_full {}\nclipsync_rooms_evicted {}\n",
-            self.connections.len(),
+            self.live_connections.load(Ordering::Relaxed),
             self.frames_forwarded.load(Ordering::Relaxed),
             self.pairing_ok.load(Ordering::Relaxed),
             self.pairing_fail.load(Ordering::Relaxed),

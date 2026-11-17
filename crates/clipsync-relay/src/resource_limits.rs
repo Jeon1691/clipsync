@@ -105,7 +105,10 @@ pub(crate) const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 /// it. Clients themselves reconnect after two heartbeats plus 5 s, so three
 /// tolerates a late beat and never closes a socket its client still trusts.
 const READ_IDLE_HEARTBEATS: u64 = 3;
-/// Longest silence accepted on an authenticated WebSocket.
+/// Longest silence accepted on a room member's WebSocket before the relay
+/// closes it and drops its route. A half-open socket (laptop sleep, network
+/// change) never delivers a FIN; without this it would keep its member online
+/// and swallow the text that should have been queued for it.
 pub(crate) const READ_IDLE_TIMEOUT: Duration =
     Duration::from_secs(READ_IDLE_HEARTBEATS * HEARTBEAT_SECS);
 

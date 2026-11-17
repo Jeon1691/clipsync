@@ -130,6 +130,7 @@ fn failed_join_rate_limit_resets_after_its_window_and_abort_removes_the_code() {
 #[test]
 fn queue_expiry_discards_only_expired_envelopes_and_gc_counts_them() {
     let (state, offer, _, owner) = fixture();
+    let room = offer.room_id.to_string();
     let now = Utc::now();
     let routing = RoutingHeader {
         version: clipsync_protocol::PROTOCOL_VERSION,
@@ -149,27 +150,30 @@ fn queue_expiry_discards_only_expired_envelopes_and_gc_counts_them() {
         ciphertext: "opaque".into(),
     };
     state.queue_text(
+        &room,
         "expired-on-read",
         envelope.clone(),
         now - chrono::Duration::seconds(1),
         SENDER,
     );
-    assert!(state.take_queue("expired-on-read").is_none());
+    assert!(state.take_queue(&room, "expired-on-read").is_none());
     state.queue_text(
+        &room,
         "expired-on-gc",
         envelope.clone(),
         now - chrono::Duration::seconds(1),
         SENDER,
     );
     state.queue_text(
+        &room,
         "fresh",
         envelope.clone(),
         now + chrono::Duration::seconds(60),
         SENDER,
     );
     state.gc();
-    assert!(state.take_queue("expired-on-gc").is_none());
-    assert_eq!(state.take_queue("fresh"), Some(envelope));
+    assert!(state.take_queue(&room, "expired-on-gc").is_none());
+    assert_eq!(state.take_queue(&room, "fresh"), Some(envelope));
     assert_eq!(state.expired.load(Ordering::Relaxed), 2);
 }
 
@@ -669,8 +673,9 @@ fn gc_drops_only_rooms_that_can_never_be_used_again() {
     for room in [&expired, &expired_online] {
         state.room_mut(room).unwrap().tokens_expire_at = Utc::now() - chrono::Duration::seconds(1);
     }
+    let (tx, _rx) = mpsc::channel(1);
     let _online = state
-        .attach_member(&expired_online, &devices(&expired_online)[0])
+        .register_conn(&expired_online, &devices(&expired_online)[0], tx)
         .unwrap();
     // One revoked device does not end a room.
     let live_devices = devices(&live);
@@ -722,6 +727,213 @@ fn envelope(id: &str) -> QueuedEnvelope {
     }
 }
 
+fn paired_room() -> (RelayState, String, String, String) {
+    let (state, offer, sid, owner) = fixture();
+    let member = DeviceId::new();
+    state
+        .join_pairing(
+            join(&offer.pairing_code, member.clone()),
+            "127.0.0.1".parse().unwrap(),
+        )
+        .unwrap();
+    assert!(state.complete_pairing(sid.as_str()).is_none());
+    let (_, _, room_id, _, _) = state.complete_pairing(sid.as_str()).unwrap();
+    (
+        state,
+        room_id.to_string(),
+        owner.to_string(),
+        member.to_string(),
+    )
+}
+
+fn routed(state: &RelayState, room: &str, member: &str) -> Vec<ConnectionId> {
+    state
+        .member_senders(room, member)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
+#[test]
+fn closing_one_socket_keeps_the_member_s_other_sockets_routed() {
+    let (state, room, _, member) = paired_room();
+    let (old_tx, _old_rx) = mpsc::channel(1);
+    let (new_tx, _new_rx) = mpsc::channel(1);
+    let old = state.register_conn(&room, &member, old_tx).unwrap().id;
+    let new = state
+        .register_conn(&room, &member, new_tx.clone())
+        .unwrap()
+        .id;
+    assert_ne!(old, new);
+    assert_eq!(routed(&state, &room, &member), [old, new]);
+
+    assert!(state.unregister_conn(&room, &member, old));
+    assert!(!state.unregister_conn(&room, &member, old));
+    let senders = state.member_senders(&room, &member);
+    assert_eq!(senders.len(), 1);
+    assert!(senders[0].1.same_channel(&new_tx));
+    assert!(state.is_online(&room, &member));
+
+    assert!(state.unregister_conn(&room, &member, new));
+    assert!(!state.is_online(&room, &member));
+    assert!(state.member_routes.is_empty());
+    assert!(!state.unregister_conn(&room, &member, new));
+}
+
+#[tokio::test]
+async fn concurrent_sockets_of_a_member_are_all_routed_and_none_is_evicted() {
+    let (state, room, _, member) = paired_room();
+    let (daemon_tx, _daemon_rx) = mpsc::channel(1);
+    let (command_tx, _command_rx) = mpsc::channel(1);
+    let daemon = state.register_conn(&room, &member, daemon_tx).unwrap();
+    let command = state.register_conn(&room, &member, command_tx).unwrap();
+
+    assert!(state.owns_route(&room, &member, daemon.id));
+    assert!(state.owns_route(&room, &member, command.id));
+    for registration in [&daemon, &command] {
+        assert!(
+            tokio::time::timeout(EVICTION_DEADLINE, registration.evicted.notified())
+                .await
+                .is_err(),
+            "a concurrent socket of the same member must not be evicted"
+        );
+    }
+}
+
+#[tokio::test]
+async fn registering_past_the_per_member_cap_evicts_only_the_oldest_socket() {
+    let (state, room, _, member) = paired_room();
+    let mut receivers = Vec::new();
+    let mut registrations = Vec::new();
+    for _ in 0..=MAX_MEMBER_SOCKETS {
+        let (tx, rx) = mpsc::channel(1);
+        receivers.push(rx);
+        registrations.push(state.register_conn(&room, &member, tx).unwrap());
+    }
+
+    let oldest = registrations.remove(0);
+    assert!(!state.owns_route(&room, &member, oldest.id));
+    tokio::time::timeout(EVICTION_DEADLINE, oldest.evicted.notified())
+        .await
+        .expect("the oldest socket past the cap was not evicted");
+    assert_eq!(
+        routed(&state, &room, &member),
+        registrations.iter().map(|r| r.id).collect::<Vec<_>>()
+    );
+    for registration in &registrations {
+        assert!(
+            tokio::time::timeout(EVICTION_DEADLINE, registration.evicted.notified())
+                .await
+                .is_err(),
+            "only the oldest socket may be evicted"
+        );
+    }
+    // The evicted socket's own cleanup later finds nothing to remove.
+    assert!(!state.unregister_conn(&room, &member, oldest.id));
+    assert_eq!(routed(&state, &room, &member).len(), MAX_MEMBER_SOCKETS);
+}
+
+#[test]
+fn member_routes_require_a_live_membership_and_are_scoped_per_room() {
+    let (state, room, owner, member) = paired_room();
+    let (tx, _rx) = mpsc::channel(1);
+    assert_eq!(
+        state
+            .register_conn(&RoomId::new().to_string(), &member, tx.clone())
+            .err(),
+        Some("unknown room")
+    );
+    assert_eq!(
+        state
+            .register_conn(&room, &DeviceId::new().to_string(), tx.clone())
+            .err(),
+        Some("unknown device")
+    );
+    assert!(state.member_routes.is_empty());
+
+    state.register_conn(&room, &member, tx.clone()).unwrap();
+    assert!(state.is_online(&room, &member));
+    assert!(!state.is_online(&RoomId::new().to_string(), &member));
+    assert!(!state.is_online(&room, &owner));
+}
+
+#[tokio::test]
+async fn revocation_drops_every_route_evicts_every_socket_and_blocks_reregistration() {
+    let (state, room, owner, member) = paired_room();
+    let (tx, _rx) = mpsc::channel(1);
+    let registrations: Vec<_> = (0..MAX_MEMBER_SOCKETS)
+        .map(|_| state.register_conn(&room, &member, tx.clone()).unwrap())
+        .collect();
+    let owner_registration = state.register_conn(&room, &owner, tx.clone()).unwrap();
+
+    assert!(state.revoke(&room, &member));
+    assert!(!state.is_online(&room, &member));
+    for registration in &registrations {
+        assert!(!state.owns_route(&room, &member, registration.id));
+        tokio::time::timeout(EVICTION_DEADLINE, registration.evicted.notified())
+            .await
+            .expect("a revoked member's socket was not evicted");
+    }
+    assert!(state.owns_route(&room, &owner, owner_registration.id));
+    assert_eq!(
+        state.register_conn(&room, &member, tx).err(),
+        Some("device revoked")
+    );
+    assert!(!state.revoke(&room, &DeviceId::new().to_string()));
+    assert!(!state.revoke(&RoomId::new().to_string(), &member));
+}
+
+#[test]
+fn queued_text_retention_is_capped_whatever_expiry_the_sender_chose() {
+    let (state, room, _, member) = paired_room();
+    let sent_at = Utc::now();
+    // Far beyond the relay's retention cap, as a misbehaving sender may claim.
+    let claimed_expiry = sent_at + chrono::Duration::days(SENDER_CLAIMED_EXPIRY_DAYS);
+    assert!(state.queue_text(
+        &room,
+        &member,
+        queued_envelope(&room, &member),
+        claimed_expiry,
+        SENDER,
+    ));
+    let retained_until = state
+        .queue
+        .get(&member_key(&room, &member))
+        .map(|entry| entry.expires_at)
+        .unwrap();
+    let cap = chrono::Duration::seconds(QUEUE_TTL_SECS as i64);
+    assert!(retained_until <= Utc::now() + cap);
+    assert!(retained_until >= sent_at + cap);
+}
+
+// Evictions are signalled synchronously, so an absent one is decided quickly.
+const EVICTION_DEADLINE: std::time::Duration = std::time::Duration::from_millis(50);
+// Any claim well past the relay's retention cap exercises the clamp.
+const SENDER_CLAIMED_EXPIRY_DAYS: i64 = 30;
+
+fn queued_envelope(room: &str, sender: &str) -> QueuedEnvelope {
+    let now = Utc::now();
+    QueuedEnvelope {
+        routing: RoutingHeader {
+            version: clipsync_protocol::PROTOCOL_VERSION,
+            message_id: MessageId::new(),
+            transfer_id: TransferId::new(),
+            room_id: RoomId::from(room),
+            sender_device_id: DeviceId::from(sender),
+            recipient: Recipient::Broadcast,
+            sent_at: now,
+            expires_at: now,
+            item_kind: ItemKind::Text,
+            seq: 1,
+        },
+        nonce: "opaque".into(),
+        ciphertext: "opaque".into(),
+    }
+}
+
+/// The room the queue-cap tests queue into; the caps are relay-wide.
+const QUEUE_ROOM: &str = "queue-room";
+
 #[test]
 fn the_offline_queue_is_capped_and_never_outlives_the_queue_ttl() {
     let (state, _, _, _) = fixture();
@@ -729,19 +941,42 @@ fn the_offline_queue_is_capped_and_never_outlives_the_queue_ttl() {
     // Spread over enough senders that no one reaches its own share.
     let sender = |n: usize| client(n / MAX_CLIENT_QUEUED_TEXT_ENVELOPES);
     for n in 0..MAX_QUEUED_TEXT_ENVELOPES {
-        assert!(state.queue_text(&format!("device-{n}"), envelope("m"), far_future, sender(n)));
+        assert!(state.queue_text(
+            QUEUE_ROOM,
+            &format!("device-{n}"),
+            envelope("m"),
+            far_future,
+            sender(n)
+        ));
     }
     let fresh = client(MAX_QUEUED_TEXT_ENVELOPES);
-    assert!(!state.queue_text("one-too-many", envelope("m"), far_future, fresh));
+    assert!(!state.queue_text(QUEUE_ROOM, "one-too-many", envelope("m"), far_future, fresh));
     assert_eq!(state.queue_full.load(Ordering::Relaxed), 1);
     assert_eq!(state.queue.len(), MAX_QUEUED_TEXT_ENVELOPES);
     // Replacing a recipient's envelope does not grow the queue.
-    assert!(state.queue_text("device-0", envelope("newer"), far_future, sender(0)));
+    assert!(state.queue_text(
+        QUEUE_ROOM,
+        "device-0",
+        envelope("newer"),
+        far_future,
+        sender(0)
+    ));
     let retention = Utc::now() + chrono::Duration::seconds(QUEUE_TTL_SECS as i64);
-    assert!(state.queue.get("device-0").unwrap().expires_at <= retention);
+    assert!(
+        state
+            .queue
+            .get(&member_key(QUEUE_ROOM, "device-0"))
+            .unwrap()
+            .expires_at
+            <= retention
+    );
     // An expired envelope frees its slot without waiting for GC.
-    state.queue.get_mut("device-1").unwrap().expires_at = Utc::now() - chrono::Duration::seconds(1);
-    assert!(state.queue_text("one-too-many", envelope("m"), far_future, fresh));
+    state
+        .queue
+        .get_mut(&member_key(QUEUE_ROOM, "device-1"))
+        .unwrap()
+        .expires_at = Utc::now() - chrono::Duration::seconds(1);
+    assert!(state.queue_text(QUEUE_ROOM, "one-too-many", envelope("m"), far_future, fresh));
     assert_eq!(state.queue.len(), MAX_QUEUED_TEXT_ENVELOPES);
     let charged: usize = state.queue_senders.iter().map(|held| *held).sum();
     assert_eq!(charged, state.queue.len(), "every envelope is charged once");
@@ -764,6 +999,7 @@ fn regression_one_client_cannot_fill_the_relay_wide_offline_queue() {
             };
             octets[15] = *n as u8;
             state.queue_text(
+                QUEUE_ROOM,
                 &format!("attacker-peer-{n}"),
                 envelope("m"),
                 far_future,
@@ -772,18 +1008,45 @@ fn regression_one_client_cannot_fill_the_relay_wide_offline_queue() {
         })
         .count();
     assert_eq!(queued, MAX_CLIENT_QUEUED_TEXT_ENVELOPES);
-    assert!(state.queue_text("attacker-peer-0", envelope("newer"), far_future, attacker));
+    assert!(state.queue_text(
+        QUEUE_ROOM,
+        "attacker-peer-0",
+        envelope("newer"),
+        far_future,
+        attacker
+    ));
     let victim: IpAddr = "203.0.113.91".parse().unwrap();
-    assert!(state.queue_text("victim-peer", envelope("m"), far_future, victim));
+    assert!(state.queue_text(QUEUE_ROOM, "victim-peer", envelope("m"), far_future, victim));
     // A delivered envelope returns its sender's share.
-    assert!(state.take_queue("attacker-peer-0").is_some());
-    assert!(state.queue_text("attacker-peer-next", envelope("m"), far_future, attacker));
-    assert!(!state.queue_text("attacker-peer-over", envelope("m"), far_future, attacker));
+    assert!(state.take_queue(QUEUE_ROOM, "attacker-peer-0").is_some());
+    assert!(state.queue_text(
+        QUEUE_ROOM,
+        "attacker-peer-next",
+        envelope("m"),
+        far_future,
+        attacker
+    ));
+    assert!(!state.queue_text(
+        QUEUE_ROOM,
+        "attacker-peer-over",
+        envelope("m"),
+        far_future,
+        attacker
+    ));
     // So does an envelope that expires.
-    state.queue.get_mut("attacker-peer-1").unwrap().expires_at =
-        Utc::now() - chrono::Duration::seconds(1);
+    state
+        .queue
+        .get_mut(&member_key(QUEUE_ROOM, "attacker-peer-1"))
+        .unwrap()
+        .expires_at = Utc::now() - chrono::Duration::seconds(1);
     state.gc();
-    assert!(state.queue_text("attacker-peer-over", envelope("m"), far_future, attacker));
+    assert!(state.queue_text(
+        QUEUE_ROOM,
+        "attacker-peer-over",
+        envelope("m"),
+        far_future,
+        attacker
+    ));
 }
 
 /// A state with `limits` applied without validation, for room caps far below
@@ -807,7 +1070,7 @@ fn small_room_state(max_rooms: usize) -> Arc<RelayState> {
 }
 
 /// Pair two fresh devices into a new room; returns its ID and one device.
-fn paired_room(state: &RelayState) -> (String, String) {
+fn pair_room_in(state: &RelayState) -> (String, String) {
     reset_create_budget(state);
     let request = create_request();
     let sid = request.pairing_session_id.clone();
@@ -827,10 +1090,11 @@ fn paired_room(state: &RelayState) -> (String, String) {
 fn rooms_with_a_device_online_are_never_evicted() {
     const MAX_ROOMS: usize = 3;
     let state = small_room_state(MAX_ROOMS);
-    let rooms: Vec<_> = (0..MAX_ROOMS).map(|_| paired_room(&state)).collect();
-    let mut online: Vec<_> = rooms
+    let rooms: Vec<_> = (0..MAX_ROOMS).map(|_| pair_room_in(&state)).collect();
+    let (tx, _rx) = mpsc::channel(1);
+    let online: Vec<_> = rooms
         .iter()
-        .map(|(room, device)| Some(state.attach_member(room, device).unwrap()))
+        .map(|(room, device)| state.register_conn(room, device, tx.clone()).unwrap())
         .collect();
     reset_create_budget(&state);
     assert!(matches!(
@@ -841,12 +1105,12 @@ fn rooms_with_a_device_online_are_never_evicted() {
     state.gc();
     assert_eq!(state.rooms.len(), MAX_ROOMS, "GC keeps online rooms");
 
-    online[1] = None;
+    let (left, left_device) = &rooms[1];
+    assert!(state.unregister_conn(left, left_device, online[1].id));
     reset_create_budget(&state);
     state
         .create_pairing(create_request(), Ipv4Addr::LOCALHOST.into())
         .unwrap();
-    let (left, left_device) = &rooms[1];
     assert!(state.room(left).is_none());
     assert!(state.room(&rooms[0].0).is_some() && state.room(&rooms[2].0).is_some());
     assert_eq!(state.rooms_evicted.load(Ordering::Relaxed), 1);
@@ -855,10 +1119,43 @@ fn rooms_with_a_device_online_are_never_evicted() {
         .lines()
         .any(|line| line == "clipsync_rooms_evicted 1"));
     assert_eq!(
-        state.attach_member(left, left_device).err(),
+        state.register_conn(left, left_device, tx).err(),
         Some("unknown room")
     );
-    drop(online);
+}
+
+/// A member may hold several routed sockets (daemon, CLI commands, reconnect
+/// overlap). Its room stays online, and so is never evicted, until the last
+/// of them has closed.
+#[test]
+fn a_room_stays_unevictable_until_its_members_last_socket_closes() {
+    const MAX_ROOMS: usize = 1;
+    let state = small_room_state(MAX_ROOMS);
+    let (room, device) = pair_room_in(&state);
+    let (tx, _rx) = mpsc::channel(1);
+    let sockets: Vec<_> = (0..MAX_MEMBER_SOCKETS)
+        .map(|_| state.register_conn(&room, &device, tx.clone()).unwrap())
+        .collect();
+    let (newest, older) = sockets.split_last().unwrap();
+    for socket in older {
+        assert!(state.unregister_conn(&room, &device, socket.id));
+        reset_create_budget(&state);
+        assert!(matches!(
+            state.create_pairing(create_request(), Ipv4Addr::LOCALHOST.into()),
+            Err(CreateError::Full)
+        ));
+        assert!(
+            state.room(&room).is_some(),
+            "a routed socket keeps its room"
+        );
+    }
+    assert!(state.unregister_conn(&room, &device, newest.id));
+    reset_create_budget(&state);
+    state
+        .create_pairing(create_request(), Ipv4Addr::LOCALHOST.into())
+        .unwrap();
+    assert!(state.room(&room).is_none());
+    assert_eq!(state.rooms_evicted.load(Ordering::Relaxed), 1);
 }
 
 /// At the room cap the least recently used idle room goes first: activity
@@ -869,13 +1166,16 @@ fn room_eviction_follows_least_recent_use() {
     let state = small_room_state(MAX_ROOMS);
     let [(oldest, oldest_device), (middle, _), (newest, _)]: [(String, String); MAX_ROOMS] = (0
         ..MAX_ROOMS)
-        .map(|_| paired_room(&state))
+        .map(|_| pair_room_in(&state))
         .collect::<Vec<_>>()
         .try_into()
         .unwrap();
-    // The oldest room is used again: a device attaches, sends and leaves.
-    let presence = state.attach_member(&oldest, &oldest_device).unwrap();
+    // The oldest room is used again: a device registers, sends and leaves.
+    let (tx, _rx) = mpsc::channel(1);
+    let registration = state.register_conn(&oldest, &oldest_device, tx).unwrap();
+    let presence = RoomPresence::new(&state, &oldest);
     presence.touch();
+    assert!(state.unregister_conn(&oldest, &oldest_device, registration.id));
     drop(presence);
 
     let evicted_in_order: Vec<_> = (0..MAX_ROOMS)
@@ -885,7 +1185,7 @@ fn room_eviction_follows_least_recent_use() {
                 .filter(|room| state.room(room).is_some())
                 .cloned()
                 .collect();
-            paired_room(&state);
+            pair_room_in(&state);
             before
                 .into_iter()
                 .find(|room| state.room(room).is_none())

@@ -97,11 +97,13 @@ not printed. Clipboard write failures in `pull --copy` are currently best effort
 | `RoomRecord` | `room_id`: string; `epoch`: unsigned integer; `role`: `owner` or `member`; `created_at`: time; `device_token`: secret string; `peers`: array of `PeerRecord`. |
 | Status without daemon | `daemon: false`, `paused`, `connected: false`, `peer_online: false`: booleans; `room_id`, `device_id`: nullable strings; `relay_url`: string. Optional `pairing` contains `status` (`waiting`, `paired`, `failed`), `pairing_code`, `room_id`, `expires_at`: strings; `pid`: integer; optional `error`: string. |
 | Status with daemon | `daemon: true`, `paused`, `connected`, `peer_online`: booleans; `room_id`, `device_id`, `device_name`, `relay_url`: nullable strings; `last_item_kind`: nullable `text`/`image`/`files`; `last_sync_at`: nullable string (currently always `null`). |
-| Doctor | `identity`, `daemon_socket`, `login_service`: booleans; `device_id`, `fingerprint`, `room`: nullable strings; `relay_url`: string; `clipboard`: nullable `{name, source: string, text, image, files: boolean, fallback: string\|null}`; `tools`: array of `[tool_name, found_boolean]`; `relay`: `{ok: boolean, status: integer}` or `{ok: false, error: string}`; `tls`: `{verifier: "platform", ca_file: string\|null}`; `paths`: `{config_dir, data_dir, log_file: string}`. |
+| Doctor | `identity`, `daemon_socket`, `login_service`: booleans; `device_id`, `fingerprint`, `room`: nullable strings; `relay_url`: string; `clipboard`: nullable `{name, source: string, text, image, files: boolean, fallback: string\|null}`; `tools`: array of `[tool_name, found_boolean]`; `relay`: `{ok: boolean, status: integer}` or `{ok: false, error: string}` (a URL refused by the relay URL policy reports its error without contacting the relay); `tls`: `{verifier: "platform", ca_file: string\|null}`; `paths`: `{config_dir, data_dir, log_file: string}`. |
 
 The full configuration has `relay_url: string`, `sync: {enabled, auto_start:
 boolean, direction: "both"|"send_only"|"receive_only", types: string[],
-debounce_ms, ttl_secs: unsigned integer}`, `notify: {enabled, preview: boolean}`,
+debounce_ms, ttl_secs: unsigned integer, legacy_envelopes, strict_envelopes:
+boolean}`, `notify:
+{enabled, preview: boolean}`,
 and `webhook: null|{url: string, secret: string}`.
 [Configuration source](../crates/clipsync-storage/src/config.rs) defines these
 records and defaults; [stored records](../crates/clipsync-storage/src/store.rs)
@@ -109,11 +111,13 @@ define room/peer output.
 
 | `config get` / `set` key | Values accepted by `set`; default |
 | --- | --- |
-| `relay_url` | String; default `CLIPSYNC_RELAY_URL` or `https://clipsync.develicit.dev`. |
+| `relay_url` | `https://` or `wss://` URL; plaintext `http://`/`ws://` only for a loopback host (`127.0.0.0/8`, `::1`, `localhost`) or with `CLIPSYNC_ALLOW_INSECURE_RELAY=1`. A URL without a scheme is rejected, as is a host not written in the canonical form the client dials (for example `0x7f.1` or `[0:0:0:0:0:0:0:1]`). The parsed, normalized URL is saved. Default `CLIPSYNC_RELAY_URL` or `https://clipsync.develicit.dev`. Relay HTTP requests do not follow redirects; plaintext relays are contacted directly, ignoring `HTTP_PROXY`/`ALL_PROXY` and system proxies, while `https://` relays honor them. |
 | `sync.enabled`, `sync.auto_start`, `notify.enabled` | `1`, `true`, `yes`, `on` mean true; all other strings mean false. Default true. |
 | `notify.preview` | Same boolean syntax; default false. |
 | `sync.direction` | `both`, `send-only`/`send_only`, `receive-only`/`receive_only`; default `both`. Single-key `get` currently returns `sendonly`/`receiveonly`, while full JSON uses underscores. |
 | `sync.ttl_secs` | Unsigned seconds, clamped to 10–300; default 60. Current sending code uses 60 regardless of this setting. |
+| `sync.legacy_envelopes` | Same boolean syntax; default false. By default the envelope version is negotiated per peer (v1 until the peer proves it opens v2). True makes this device always send legacy v1 envelopes; receiving is unaffected. See [transition from v1](protocol.md#transition-from-v1). |
+| `sync.strict_envelopes` | Same boolean syntax; default false. True makes this device always send v2 and reject every v1 envelope, so devices that are not updated stop syncing with it. Overrides `sync.legacy_envelopes`. |
 
 `sync.types` (default text/image/files), `sync.debounce_ms` (default 200), and
 `webhook` appear in the full config but have no `config set` key. An unknown key
@@ -128,7 +132,8 @@ Restart a running daemon after changing configuration to reload its snapshot.
 | `CLIPSYNC_HOME` | Root containing `config/`, `data/`, `logs/`, `inbox/`, `run/`; takes precedence over the individual path variables below. |
 | `CLIPSYNC_CONFIG_DIR`, `CLIPSYNC_DATA_DIR` | Override OS-specific configuration/data directories when no `CLIPSYNC_HOME` is set. |
 | `XDG_RUNTIME_DIR` | Runtime socket/PID directory when no `CLIPSYNC_HOME`; otherwise defaults to the data directory. |
-| `CLIPSYNC_RELAY_URL` | Default relay when creating a configuration; does not replace an already saved `relay_url`. Use `init --relay-url` or `config set relay_url` to change it. |
+| `CLIPSYNC_RELAY_URL` | Default relay when creating a configuration; does not replace an already saved `relay_url`. Use `init --relay-url` or `config set relay_url` to change it. The relay URL policy is checked when it is saved and again before every relay HTTP request or WebSocket connection, so a saved or environment URL that violates it fails at use. |
+| `CLIPSYNC_ALLOW_INSECURE_RELAY` | Exactly `1` allows a plaintext `http://`/`ws://` relay on a non-loopback host; each use logs a warning. Pairing codes, pairing tokens and device tokens are then sent unencrypted. The variable must also be set for the daemon, which checks it at connect time. |
 | `CLIPSYNC_CA_FILE` | Additional PEM CA certificates for TLS; invalid/unreadable bundles fail TLS configuration. |
 | `CLIPSYNC_NO_DAEMON` | Exactly `1` skips automatic daemon installation/start after pairing or resume. |
 | `CLIPSYNC_OS` | Device OS override: `ios`, `android`, `macos`, `linux`, `windows` (case-insensitive); otherwise native OS. |
@@ -143,7 +148,7 @@ Client exit codes currently returned by the dispatcher are:
 | --- | --- |
 | 0 | Success, including help/version. |
 | 1 | General error, I/O, serialization, transfer, or unclassified storage/daemon failure. |
-| 2 | Clap command/argument usage error. |
+| 2 | Clap command/argument usage error, or a relay URL refused by the transport policy (plaintext non-loopback or missing scheme). |
 | 3 | Pairing failure. |
 | 4 | Not initialized or not paired. |
 | 5 | Transport or HTTP error reaching the dispatcher as that error type. |
@@ -189,7 +194,7 @@ limit is 393,216 bytes (384 KiB).
 | Endpoint | Request | Success response |
 | --- | --- | --- |
 | `GET /healthz` | No body or authentication. | `200`, JSON `{ok: true, service: "clipsync-relay"}`. |
-| `GET /metrics` | No body or authentication. | `200`, plain text metric lines: `clipsync_ws_connections`, `clipsync_frames_forwarded`, `clipsync_pairing_ok`, `clipsync_pairing_fail`, `clipsync_pairing_throttled` (joins refused because a failed-join budget was spent), `clipsync_expired`, `clipsync_ws_sockets` (open WebSocket connections, authenticated or not), `clipsync_ws_refused` (upgrades refused by a connection cap), `clipsync_pairing_sessions` (pairing sessions held), `clipsync_pairing_create_throttled` (creations refused by a creation budget), `clipsync_pairing_create_full` (creations refused by the session cap, or by a room cap where every room has a device online), `clipsync_rooms`, `clipsync_queue_full` (offline text envelopes not queued because the queue, or the sender's share of it, was full), `clipsync_rooms_evicted` (idle rooms evicted at the room cap), each followed by a numeric value and newline. |
+| `GET /metrics` | No body or authentication. | `200`, plain text metric lines: `clipsync_ws_connections` (sockets past a valid `hello`, pairing or room member), `clipsync_frames_forwarded`, `clipsync_pairing_ok`, `clipsync_pairing_fail`, `clipsync_pairing_throttled` (joins refused because a failed-join budget was spent), `clipsync_expired`, `clipsync_ws_sockets` (open WebSocket connections holding a connection slot, authenticated or not), `clipsync_ws_refused` (upgrades refused by a connection cap), `clipsync_pairing_sessions` (pairing sessions held), `clipsync_pairing_create_throttled` (creations refused by a creation budget), `clipsync_pairing_create_full` (creations refused by the session cap, or by a room cap where every room has a device online), `clipsync_rooms`, `clipsync_queue_full` (offline text envelopes not queued because the queue, or the sender's share of it, was full), `clipsync_rooms_evicted` (idle rooms evicted at the room cap), each followed by a numeric value and newline. |
 | `POST /v1/pairing/create` | `{pairing_session_id, device_id, device_name, os: string, protocol_version: u16, ttl_secs?: u64\|null}`. Version must be `1`. | `{room_id, pairing_code, pairing_token: string, expires_at: time, ws_path: "/v1/ws"}`. Pairing code is a six-character decimal string, valid for 120 seconds. `ttl_secs` defaults to 60 and is clamped to 10–300 as the room's stored default TTL. `pairing_session_id`, `device_id`, `device_name` and `os` are at most 256 bytes each (the same limit applies to join fields). |
 | `POST /v1/pairing/join` | `{pairing_code, device_id, device_name, os: string, protocol_version: u16}`. Version must be `1`; joiner must be a different device. | `{pairing_session_id, room_id, pairing_token: string, peer: PeerInfo, expires_at: time, ws_path: "/v1/ws"}`. `peer` describes the creator. One joiner per session. |
 | `GET /v1/ws[?token=TOKEN]` | Standard WebSocket upgrade; optional query token. Authentication occurs in the `hello` text frame after upgrade. | `101 Switching Protocols`, then the messages below. Refused before the upgrade when a connection cap is reached (see the error table). The relay closes a socket that sends no valid `hello` within 10 seconds, or that is silent for 60 seconds after `hello`. Before `hello`, a socket may also be closed to admit a newer one once unauthenticated sockets hold their share of the connection slots, or the relay holds its maximum of connections. |
@@ -250,7 +255,7 @@ as `null` when unset.
 | `key_confirm` | `pairing_session_id`, `mac: string`. | Client ↔ peer: pairing key confirmation. |
 | `device_bind` | `pairing_session_id`, `nonce`, `ciphertext: string`. | Client ↔ peer: encrypted device binding. |
 | `pairing_complete` | `room_id`, `device_token: string`, `epoch: u64`, `role: DeviceRole`. | Relay → each paired client: persist room and token; initial epoch is 1. |
-| `noise_handshake` | `message: string`. | Client ↔ peer: reconnect handshake. |
+| `noise_handshake` | `message: string`. | Client ↔ peer: reconnect handshake; carries the envelope capability payload ([protocol](protocol.md#reconnect)). |
 | `text_envelope` | `routing: RoutingHeader`, `nonce`, `ciphertext: string`. | Client → relay → peers; offline peers retain the latest unexpired envelope. |
 | `manifest` | `routing: RoutingHeader`, `nonce`, `ciphertext: string`, `chunk_count: u32`, `total_bytes: u64`. | Client → online peers: encrypted binary-transfer metadata. |
 | `ack` | `message_id: string`, `transfer_id?: string`, `status: AckStatus`, `detail?: string`. | Relay or peer → sender: transfer status. |
@@ -271,7 +276,7 @@ null transfer ID. Peers can emit further acknowledgements.
 | Nested record | Fields / representation |
 | --- | --- |
 | `PeerInfo` | `device_id`, `device_name`, `os: string`; `role: DeviceRole`; `online: boolean`. |
-| `RoutingHeader` | `version: u16`; `message_id`, `transfer_id`, `room_id`, `sender_device_id: string`; `recipient`: `"broadcast"` or `{"device":"DEVICE_ID"}`; `sent_at`, `expires_at: time`; `item_kind`: `text`/`image`/`files`; `seq: u64`. |
+| `RoutingHeader` | `version: u16` (envelope version: 1 legacy, 2 authenticated; see [protocol](protocol.md#envelope-versions)); `message_id`, `transfer_id`, `room_id`, `sender_device_id: string`; `recipient`: `"broadcast"` or `{"device":"DEVICE_ID"}`; `sent_at`, `expires_at: time`; `item_kind`: `text`/`image`/`files`; `seq: u64`. |
 | `QueuedEnvelope` | `routing: RoutingHeader`, `nonce`, `ciphertext: string`. |
 | `EpochWrap` | `device_id`, `eph_public`, `nonce`, `ciphertext: string`. |
 
@@ -331,7 +336,7 @@ runtime, or thread-start failures and are not stable machine error codes.
 
 | Method | Inputs | Result and behavior |
 | --- | --- | --- |
-| `ClipSyncClient::new` | `data_dir`, `relay_url`, `os`, `device_name`: strings. | Shared client object. Creates app directories and a runtime; attempts identity/config initialization with the supplied relay. `data_dir` is the root layout described under `CLIPSYNC_HOME`. Empty OS/name leave existing overrides alone. The initialization attempt's error is currently not propagated; use `status()` to confirm the stored identity/config. |
+| `ClipSyncClient::new` | `data_dir`, `relay_url`, `os`, `device_name`: strings. | Shared client object. Creates app directories and a runtime; attempts identity/config initialization with the supplied relay. `data_dir` is the root layout described under `CLIPSYNC_HOME`. Empty OS/name leave existing overrides alone. Fails if initialization fails, including a `relay_url` refused by the relay URL policy described under `relay_url`. |
 | `status()` | None. | `MobileStatus {device_id, fingerprint, relay_url, os: string, room_id: string?}`. Creates/reuses identity; an unpaired client has a null room ID. |
 | `create_room()` | None. | `PairingOffer {pairing_code, room_id, expires_at: string}`; expiry is RFC 3339. Returns after the offer is available and waits for the joiner in a background task. The offer alone does not mean pairing completed; poll until `status().room_id` equals the offered room ID. Later pairing failures are logged rather than returned from this completed call. |
 | `join_room(code)` | Six-digit code string, preserving leading zeros. | Room ID string after the pairing handshake completes and state is saved. |
