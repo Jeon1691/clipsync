@@ -193,7 +193,18 @@ Users must actually compare the codes. Typing the code shown on the other
 device is the most reliable comparison, and the only one the CLI accepts
 without a terminal: `clipsync room confirm CODE` and a piped `room join`
 answer must be the other device's digits, which are checked against the local
-code. Answering "yes" is accepted only at an interactive prompt that has just
+code. Every one of these paths prints this device's protection line (fixed
+local text, apart from the peer's name) before the answer counts; `room
+confirm CODE`, which shows no code, prints it once `CODE` has been read. Under
+`protection: REDUCED` a match is trustworthy only on a relay the user trusts,
+so an answer that no person gave right after seeing the REDUCED line (`room
+confirm CODE`, or a prompt answer read from a pipe or file) is refused before
+comparing unless the command was given `--accept-reduced-protection`.
+Otherwise a relay that downgraded the creator could have a scripted
+confirmation approve a code it searched for without the warning reaching
+anyone. With `pairing.require_commitment` set, the pairing is refused before
+any code is shown, and the flag does not change that. Answering "yes" is
+accepted only at an interactive prompt that has just
 displayed the local code, and relies on the user having looked. Before that
 prompt the CLI discards everything already typed at the terminal, so a "yes"
 typed while `room confirm` or `room join` was still waiting cannot approve a
@@ -267,7 +278,9 @@ Therefore:
   forged acknowledgement. The setting is off by default so that devices and
   relays without the round still pair.
 
-The CLI and the desktop app show the mode next to the code. The mobile
+The CLI and the desktop app show the mode next to the code, and every CLI
+confirmation path states it (see [the comparison](#verification-code-sas) above
+for when the CLI also requires `--accept-reduced-protection`). The mobile
 `SasVerifier.confirm_sas` callback receives it as `full_protection`, and the
 mobile library also logs a warning for a reduced-protection pairing.
 

@@ -60,6 +60,28 @@ pub struct SasMode {
     pub non_interactive: bool,
     /// `--insecure-skip-sas`: accept without comparing.
     pub skip: bool,
+    /// `--accept-reduced-protection`: accept a matching code under
+    /// [`SasProtection::Uncommitted`] even though no person at a terminal
+    /// was shown the REDUCED line right before answering.
+    pub accept_reduced: bool,
+}
+
+/// Why a code may not be accepted under reduced protection, or `None` when
+/// it may. A match is trustworthy only if both devices show full protection,
+/// so without the commitment round the user has to know before a match
+/// counts: either a person answers at a terminal that has just shown the
+/// REDUCED line, or the command was given `--accept-reduced-protection`.
+/// `pairing.require_commitment` never gets this far: the pairing is refused
+/// before any code exists.
+fn unacknowledged_reduced_protection(
+    protection: SasProtection,
+    mode: SasMode,
+    answered_at_terminal: bool,
+) -> Option<&'static str> {
+    let acknowledged = mode.accept_reduced || answered_at_terminal;
+    (protection == SasProtection::Uncommitted && !acknowledged).then_some(
+        "protection is REDUCED on this device, so a malicious relay can search for matching codes; nothing was confirmed. Answer at an interactive terminal, or, only on a relay you trust, pass --accept-reduced-protection",
+    )
 }
 
 /// Confirm on this terminal: show the SAS and read one answer line from
@@ -75,6 +97,12 @@ pub fn terminal_confirmer(mode: SasMode) -> SasConfirm {
                 eprintln!(
                     "error: the verification code must be confirmed; rerun without --non-interactive, or pass --insecure-skip-sas"
                 );
+                return SasDecision::Rejected;
+            }
+            if let Some(refusal) =
+                unacknowledged_reduced_protection(check.protection, mode, io::stdin().is_terminal())
+            {
+                eprintln!("error: {refusal}; pairing aborted and nothing was stored");
                 return SasDecision::Rejected;
             }
             ask(mode, check.sas).await
@@ -143,6 +171,7 @@ pub fn background_confirmer(store: LocalStore, skip: bool) -> SasConfirm {
         Box::pin(async move {
             if skip {
                 eprintln!("warning: background pairing accepted without comparing verification codes (--insecure-skip-sas)");
+                eprintln!("{}", protection_notice(check.protection));
                 return SasDecision::Confirmed;
             }
             let worker = std::process::id();
@@ -270,6 +299,14 @@ where
     let peer = wait.peer_device_name.clone().unwrap_or_default();
     let protection = parse_protection(wait.sas_protection.as_deref());
     let decision = if let Some(entered) = entered {
+        // The argument was typed before anything was shown, so state the
+        // mode now, and under reduced protection refuse before comparing
+        // unless the user acknowledged it. Nothing is recorded, so the
+        // request can still be confirmed with the acknowledgement or rejected.
+        state_protection(mode, protection);
+        if let Some(refusal) = unacknowledged_reduced_protection(protection, mode, false) {
+            return Err(CoreError::Pairing(refusal.into()));
+        }
         if entered == sas {
             SasDecision::Confirmed
         } else {
@@ -281,6 +318,11 @@ where
             return Err(CoreError::Message(
                 "pass the code shown on the other device: clipsync room confirm <code>".into(),
             ));
+        }
+        if let Some(refusal) =
+            unacknowledged_reduced_protection(protection, mode, io::stdin().is_terminal())
+        {
+            return Err(CoreError::Pairing(refusal.into()));
         }
         // The worker keeps running while the user compares. If the pairing
         // ends meanwhile (the other device rejected, it expired, `room
@@ -531,6 +573,22 @@ fn not_answerable(wait: &PairingWait) -> CoreError {
     }
 }
 
+/// State this device's protection on a path that shows no code: the same
+/// fixed local line as [`announcement`], or a JSON event without the code.
+fn state_protection(mode: SasMode, protection: SasProtection) {
+    emit(
+        mode.json,
+        serde_json::json!({
+            "event": "sas_protection",
+            "protection": protection_name(protection),
+        }),
+    );
+    if !mode.json {
+        println!("{}", protection_notice(protection));
+    }
+    let _ = io::stdout().flush();
+}
+
 fn announce(mode: SasMode, sas: &str, peer_device_name: &str, protection: SasProtection) {
     emit(
         mode.json,
@@ -589,6 +647,9 @@ fn skipped(
     eprintln!(
         "warning: verification code not compared (--insecure-skip-sas); a malicious relay or a guessed code would go unnoticed"
     );
+    if !mode.json {
+        eprintln!("{}", protection_notice(protection));
+    }
     emit(
         mode.json,
         serde_json::json!({
@@ -687,11 +748,13 @@ mod tests {
         json: false,
         non_interactive: true,
         skip: false,
+        accept_reduced: false,
     };
     const JSON: SasMode = SasMode {
         json: true,
         non_interactive: true,
         skip: false,
+        accept_reduced: false,
     };
 
     fn fixture() -> (tempfile::TempDir, App) {
@@ -738,7 +801,11 @@ mod tests {
             sas: (status == STATUS_CONFIRM_SAS).then(|| SAS.into()),
             peer_device_name: (status == STATUS_CONFIRM_SAS).then(|| "Laptop".into()),
             sas_decision: None,
-            sas_protection: None,
+            // The worker publishes the mode with the code. Full protection
+            // here keeps these tests about the request itself; the reduced
+            // case has its own tests.
+            sas_protection: (status == STATUS_CONFIRM_SAS)
+                .then(|| protection_name(SasProtection::Committed).into()),
         }
     }
 
@@ -1222,6 +1289,73 @@ mod tests {
                 let error = result.unwrap_err().to_string();
                 assert!(error.contains("completed before the rejection"), "{error}");
             }
+        }
+    }
+
+    #[test]
+    fn reduced_protection_counts_only_when_acknowledged() {
+        let acknowledged = SasMode {
+            accept_reduced: true,
+            ..TEXT
+        };
+        for (protection, mode, at_terminal, refused) in [
+            // Scripts and positional answers: the flag is the acknowledgement.
+            (SasProtection::Uncommitted, TEXT, false, true),
+            (SasProtection::Uncommitted, JSON, false, true),
+            (SasProtection::Uncommitted, acknowledged, false, false),
+            // A person answering right after the REDUCED line was shown.
+            (SasProtection::Uncommitted, TEXT, true, false),
+            // Full protection needs no acknowledgement anywhere.
+            (SasProtection::Committed, TEXT, false, false),
+            (SasProtection::Committed, JSON, true, false),
+        ] {
+            let refusal = unacknowledged_reduced_protection(protection, mode, at_terminal);
+            assert_eq!(
+                refusal.is_some(),
+                refused,
+                "{protection:?} {mode:?} at_terminal={at_terminal}"
+            );
+            if let Some(refusal) = refusal {
+                assert!(refusal.contains("--accept-reduced-protection"), "{refusal}");
+                assert!(refusal.contains("REDUCED"), "{refusal}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn positional_confirm_under_reduced_protection_records_nothing() {
+        for mode in [TEXT, JSON] {
+            let (_root, app) = fixture();
+            app.store
+                .save_pairing_wait(&PairingWait {
+                    sas_protection: Some(protection_name(SasProtection::Uncommitted).into()),
+                    ..request(STATUS_CONFIRM_SAS, live())
+                })
+                .unwrap();
+            // Refused before comparing: a wrong code is not reported as a
+            // mismatch either, and the request stays answerable.
+            for code in [SAS, OTHER_SAS] {
+                let error = within(answer_background(&app, Some(code), false, mode))
+                    .await
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("--accept-reduced-protection"), "{error}");
+                let wait = app.store.load_pairing_wait().unwrap().unwrap();
+                assert_eq!(wait.sas_decision, None);
+                assert_eq!(wait.status, STATUS_CONFIRM_SAS);
+            }
+            // A missing mode (an older worker's file) reads as reduced.
+            app.store
+                .save_pairing_wait(&PairingWait {
+                    sas_protection: None,
+                    ..request(STATUS_CONFIRM_SAS, live())
+                })
+                .unwrap();
+            let error = within(answer_background(&app, Some(SAS), false, mode))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("--accept-reduced-protection"), "{error}");
         }
     }
 

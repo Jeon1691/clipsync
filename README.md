@@ -130,7 +130,9 @@ For scripts, `clipsync room confirm <CODE>` takes the 6 digits shown on the
 other device and checks them against this device's code; `yes` is refused
 there, because that command has shown nothing to compare. Likewise, when
 `room join` reads its answer from a pipe instead of a terminal, only the
-digits confirm. `--insecure-skip-sas` on `room create` / `room join` skips the
+digits confirm. Both print this device's protection line, and under
+`protection: REDUCED` they refuse unless you also pass
+`--accept-reduced-protection` (use it only with a relay you trust). `--insecure-skip-sas` on `room create` / `room join` skips the
 comparison and removes that protection; use it only for test setups on a relay
 you trust. Devices on a version without verification codes still pair, but
 cannot show a code to compare. Each code is shown with its protection:
