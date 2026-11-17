@@ -8,6 +8,7 @@
 //! during pairing, so clients require `https://`/`wss://` except for loopback
 //! relays on this machine or an explicit, logged opt-in.
 
+use tokio_tungstenite::tungstenite::http::Uri;
 use url::{Host, Url};
 
 /// Setting this to [`ALLOW_INSECURE_RELAY_ENABLED`] permits plaintext
@@ -80,19 +81,36 @@ pub fn relay_url_security(url: &str, allow_insecure: bool) -> Result<RelaySecuri
         }
     };
     let host = parsed.host().ok_or(RelayUrlError::MissingHost)?;
-    if !plaintext {
-        return Ok(RelaySecurity::Tls);
+    let security = if !plaintext {
+        RelaySecurity::Tls
+    } else if is_loopback(&host) {
+        RelaySecurity::Loopback
+    } else if allow_insecure {
+        RelaySecurity::InsecureOptIn
+    } else {
+        return Err(RelayUrlError::Plaintext {
+            scheme: parsed.scheme().into(),
+            host: host.to_string(),
+        });
+    };
+    // Text the WebSocket request builder cannot parse never reaches a socket,
+    // so only a parseable host can differ from the one classified above.
+    if let Ok(uri) = url.parse::<Uri>() {
+        require_canonical_host(url, uri.host())?;
     }
-    if is_loopback(&host) {
-        return Ok(RelaySecurity::Loopback);
+    Ok(security)
+}
+
+/// The parsed form of a relay URL that is saved to configuration, so the
+/// stored text is exactly what the policy classified. A bare trailing `/` is
+/// dropped because request paths are appended to the base.
+pub fn normalize_relay_url(url: &str) -> Result<String, RelayUrlError> {
+    let parsed = Url::parse(url).map_err(RelayUrlError::Invalid)?;
+    let mut normalized = parsed.to_string();
+    if parsed.path() == "/" && parsed.query().is_none() && parsed.fragment().is_none() {
+        normalized.pop();
     }
-    if allow_insecure {
-        return Ok(RelaySecurity::InsecureOptIn);
-    }
-    Err(RelayUrlError::Plaintext {
-        scheme: parsed.scheme().into(),
-        host: host.to_string(),
-    })
+    Ok(normalized)
 }
 
 /// Enforce the relay transport policy, honoring [`ALLOW_INSECURE_RELAY_ENV`]
@@ -115,7 +133,9 @@ pub fn check_relay_url(url: &str) -> Result<RelaySecurity, RelayUrlError> {
 }
 
 /// Require the host the WebSocket client will dial (`connect_host`, taken from
-/// the raw URL) to equal the host the policy classified. `url` normalizes
+/// the raw URL) to equal the host the policy classified. IPv6 hosts compare
+/// as text too, so long forms such as `[0:0:0:0:0:0:0:1]` must be written in
+/// the compressed form `url` produces. `url` normalizes
 /// forms such as `127.0.0.1.` or `0x7f.1` to `127.0.0.1`, while the socket
 /// layer may resolve the raw text through DNS, which an on-path attacker can
 /// answer.

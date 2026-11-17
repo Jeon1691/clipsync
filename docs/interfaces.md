@@ -109,7 +109,7 @@ define room/peer output.
 
 | `config get` / `set` key | Values accepted by `set`; default |
 | --- | --- |
-| `relay_url` | `https://` or `wss://` URL; plaintext `http://`/`ws://` only for a loopback host (`127.0.0.0/8`, `::1`, `localhost`) or with `CLIPSYNC_ALLOW_INSECURE_RELAY=1`. A URL without a scheme is rejected. Default `CLIPSYNC_RELAY_URL` or `https://clipsync.develicit.dev`. |
+| `relay_url` | `https://` or `wss://` URL; plaintext `http://`/`ws://` only for a loopback host (`127.0.0.0/8`, `::1`, `localhost`) or with `CLIPSYNC_ALLOW_INSECURE_RELAY=1`. A URL without a scheme is rejected, as is a host not written in the canonical form the client dials (for example `0x7f.1` or `[0:0:0:0:0:0:0:1]`). The parsed, normalized URL is saved. Default `CLIPSYNC_RELAY_URL` or `https://clipsync.develicit.dev`. Relay HTTP requests do not follow redirects; plaintext relays are contacted directly, ignoring `HTTP_PROXY`/`ALL_PROXY` and system proxies, while `https://` relays honor them. |
 | `sync.enabled`, `sync.auto_start`, `notify.enabled` | `1`, `true`, `yes`, `on` mean true; all other strings mean false. Default true. |
 | `notify.preview` | Same boolean syntax; default false. |
 | `sync.direction` | `both`, `send-only`/`send_only`, `receive-only`/`receive_only`; default `both`. Single-key `get` currently returns `sendonly`/`receiveonly`, while full JSON uses underscores. |

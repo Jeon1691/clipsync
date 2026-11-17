@@ -137,6 +137,43 @@ fn scheme_less_and_unsupported_relay_urls_are_rejected_even_for_loopback() {
 }
 
 #[test]
+fn non_canonical_hosts_are_rejected_when_the_url_is_checked() {
+    // `url` normalizes these to the canonical host, but the WebSocket client
+    // dials the raw text; refusing them up front keeps `config set` from
+    // saving a URL that every later connect would reject.
+    for (url, written, canonical) in [
+        ("http://0x7f.1:7600", "0x7f.1", "127.0.0.1"),
+        ("http://127.0.0.1.:7600", "127.0.0.1.", "127.0.0.1"),
+        ("http://2130706433", "2130706433", "127.0.0.1"),
+        (
+            "http://[0:0:0:0:0:0:0:1]:7600",
+            "[0:0:0:0:0:0:0:1]",
+            "[::1]",
+        ),
+        ("ws://[0::1]/v1/ws", "[0::1]", "[::1]"),
+        ("https://0x7f.1", "0x7f.1", "127.0.0.1"),
+        (
+            "wss://[2001:0db8::1]/v1/ws",
+            "[2001:0db8::1]",
+            "[2001:db8::1]",
+        ),
+    ] {
+        for allow_insecure in [false, true] {
+            let err = relay_url_security(url, allow_insecure).unwrap_err();
+            assert_eq!(
+                err,
+                RelayUrlError::NonCanonicalHost {
+                    written: written.into(),
+                    canonical: canonical.into(),
+                },
+                "{url}"
+            );
+            assert!(err.to_string().contains(canonical), "{err}");
+        }
+    }
+}
+
+#[test]
 fn the_opt_in_is_only_enabled_by_its_documented_value() {
     assert_eq!(ALLOW_INSECURE_RELAY_ENV, "CLIPSYNC_ALLOW_INSECURE_RELAY");
     assert!(clipsync_transport::insecure_relay_opt_in(Some("1")));

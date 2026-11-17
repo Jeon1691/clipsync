@@ -23,8 +23,8 @@ use tokio_tungstenite::{
 };
 
 pub use relay_policy::{
-    check_relay_url, insecure_relay_opt_in, relay_url_security, RelaySecurity, RelayUrlError,
-    ALLOW_INSECURE_RELAY_ENV,
+    check_relay_url, insecure_relay_opt_in, normalize_relay_url, relay_url_security, RelaySecurity,
+    RelayUrlError, ALLOW_INSECURE_RELAY_ENV,
 };
 pub use tls::{ca_file_path, configure_reqwest, CA_FILE_ENV};
 use tracing::{debug, warn};

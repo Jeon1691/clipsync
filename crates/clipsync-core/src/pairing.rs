@@ -18,7 +18,7 @@ use clipsync_protocol::{
 use clipsync_storage::{AppConfig, LocalStore, PeerRecord, RoomRecord};
 use clipsync_transport::{join_ws, Incoming, RelayConnection};
 
-use crate::{current_os, device_name, http_client, CoreError};
+use crate::{current_os, device_name, http_client, relay_redirect_error, CoreError};
 
 pub struct RoomOffer {
     pub pairing_code: String,
@@ -77,9 +77,9 @@ pub async fn begin_create_room(
         protocol_version: PROTOCOL_VERSION,
         ttl_secs: Some(ttl_secs),
     };
-    clipsync_transport::check_relay_url(&cfg.relay_url)?;
+    let security = clipsync_transport::check_relay_url(&cfg.relay_url)?;
     let url = format!("{}/v1/pairing/create", cfg.relay_url.trim_end_matches('/'));
-    let resp = http_client()
+    let resp = http_client(security)
         .post(&url)
         .json(&req)
         .send()
@@ -90,6 +90,9 @@ pub async fn begin_create_room(
                 crate::error::format_error(&e)
             ))
         })?;
+    if let Some(error) = relay_redirect_error(&resp) {
+        return Err(CoreError::Pairing(format!("relay create {url}: {error}")));
+    }
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(CoreError::Pairing(format!("create failed: {body}")));
@@ -158,9 +161,9 @@ pub async fn join_room(
         os: current_os().into(),
         protocol_version: PROTOCOL_VERSION,
     };
-    clipsync_transport::check_relay_url(&cfg.relay_url)?;
+    let security = clipsync_transport::check_relay_url(&cfg.relay_url)?;
     let url = format!("{}/v1/pairing/join", cfg.relay_url.trim_end_matches('/'));
-    let resp = http_client()
+    let resp = http_client(security)
         .post(&url)
         .json(&req)
         .send()
@@ -171,6 +174,9 @@ pub async fn join_room(
                 crate::error::format_error(&e)
             ))
         })?;
+    if let Some(error) = relay_redirect_error(&resp) {
+        return Err(CoreError::Pairing(format!("relay join {url}: {error}")));
+    }
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
         if body.contains("code_invalid") || body.contains("code_expired") {
@@ -645,6 +651,9 @@ mod tests {
         // immediately, well inside this bound, while a real request to the
         // non-routable documentation address would hang until its timeout.
         const POLICY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+        // Clear an ambient opt-in so the result does not depend on the shell
+        // that runs the suite.
+        std::env::remove_var(clipsync_transport::ALLOW_INSECURE_RELAY_ENV);
         let directory = tempfile::TempDir::new().unwrap();
         let store =
             LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
@@ -680,6 +689,89 @@ mod tests {
         .err()
         .unwrap();
         assert!(matches!(ws, CoreError::RelayUrl(_)), "{ws}");
+    }
+
+    #[tokio::test]
+    async fn pairing_never_follows_relay_redirects() {
+        use axum::{
+            http::{header::LOCATION, StatusCode},
+            routing::post,
+            Router,
+        };
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        // A followed redirect re-POSTs the pairing code to a host the relay
+        // policy never checked. Refusing it returns at once, well inside this
+        // bound, while a hop to the non-routable documentation address would
+        // hang until the HTTP client's own timeout.
+        const POLICY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+        let captured = Arc::new(AtomicUsize::new(0));
+        let capture = {
+            let captured = captured.clone();
+            crate::test_relay::Server::http(Router::new().route(
+                "/steal",
+                post(move || async move {
+                    captured.fetch_add(1, Ordering::SeqCst);
+                    "{}"
+                }),
+            ))
+            .await
+        };
+        let directory = tempfile::TempDir::new().unwrap();
+        let store =
+            LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+        let identity = DeviceIdentity::from_bytes("redirecting-relay".into(), [43; 32]);
+        for target in [
+            format!("{}/steal", capture.url),
+            "http://192.0.2.1:7600/steal".to_string(),
+        ] {
+            for status in [
+                StatusCode::TEMPORARY_REDIRECT,
+                StatusCode::PERMANENT_REDIRECT,
+            ] {
+                let location = target.clone();
+                let redirect = move || {
+                    let location = location.clone();
+                    async move { (status, [(LOCATION, location)]) }
+                };
+                let relay = crate::test_relay::Server::http(
+                    Router::new()
+                        .route("/v1/pairing/create", post(redirect.clone()))
+                        .route("/v1/pairing/join", post(redirect)),
+                )
+                .await;
+                let cfg = AppConfig {
+                    relay_url: relay.url.clone(),
+                    ..Default::default()
+                };
+                let create =
+                    tokio::time::timeout(POLICY_DEADLINE, begin_create_room(&identity, &cfg, 60))
+                        .await
+                        .expect("create followed the redirect")
+                        .err()
+                        .unwrap();
+                let join = tokio::time::timeout(
+                    POLICY_DEADLINE,
+                    join_room(&store, &identity, &cfg, "123456"),
+                )
+                .await
+                .expect("join followed the redirect")
+                .unwrap_err();
+                for err in [create, join] {
+                    let message = err.to_string();
+                    assert!(message.contains("redirect"), "{target} {status}: {message}");
+                    assert!(message.contains(&target), "{target} {status}: {message}");
+                }
+            }
+        }
+        assert_eq!(
+            captured.load(Ordering::SeqCst),
+            0,
+            "the redirect target received the pairing request"
+        );
+        assert!(store.load_state().unwrap().rooms.is_empty());
     }
 
     #[tokio::test]
