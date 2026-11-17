@@ -199,18 +199,19 @@ confirm CODE`, which shows no code, prints it once `CODE` has been read. Under
 `protection: REDUCED` a match is trustworthy only on a relay the user trusts,
 so an answer that no person gave right after seeing the REDUCED line (`room
 confirm CODE`, a prompt answer read from a pipe or file, or a prompt whose
-output is redirected or in `--json`) is refused before comparing unless the command was given `--accept-reduced-protection`.
-Otherwise a relay that downgraded the creator could have a scripted
-confirmation approve a code it searched for without the warning reaching
-anyone. With `pairing.require_commitment` set, the pairing is refused before
-any code is shown, and the flag does not change that. Answering "yes" is
-accepted only at an interactive prompt that has just
-displayed the local code, and relies on the user having looked. Before that
-prompt the CLI discards everything already typed at the terminal, so a "yes"
-typed while `room confirm` or `room join` was still waiting cannot approve a
-code that appears later. If the terminal's pending input cannot be discarded
-(for example an MSYS terminal on Windows, whose stdin is a pipe rather than a
-console), only the other device's digits are accepted.
+output is redirected or in `--json`) is refused before comparing unless the
+command was given `--accept-reduced-protection`. Otherwise a relay that
+downgraded the creator could have a scripted confirmation approve a code it
+searched for without the warning reaching anyone. With
+`pairing.require_commitment` set, the pairing is refused before any code is
+shown, and the flag does not change that. Answering "yes" is accepted only at
+an interactive prompt that has just displayed the local code, and relies on
+the user having looked. Before that prompt the CLI discards everything already
+typed at the terminal, so a "yes" typed while `room confirm` or `room join`
+was still waiting cannot approve a code that appears later. If the terminal's
+pending input cannot be discarded (for example an MSYS terminal on Windows,
+whose stdin is a pipe rather than a console), only the other device's digits
+are accepted.
 
 #### Commitment round
 
@@ -227,17 +228,18 @@ session ID, both device IDs and its role. The creator sends its own message
 only after it holds that commitment, and checks that the joiner's message,
 revealed afterwards, opens it; a mismatch aborts before key confirmation with
 nothing stored. The joiner reveals its message only after the creator's
-arrived. When both devices run the round this way, a relay in the middle has to fix its message toward the
-creator (by committing to it) before it learns the creator's message, and its
-message toward the joiner before it learns the joiner's. When it learns each
-device's message it can no longer change anything that device's code depends
-on, so the two codes are independent: they match with probability 10^-6
-(about 2^-20) per pairing attempt. A failed attempt shows the users two
-different codes and stores nothing. This is the commit-then-reveal order of
-ZRTP (RFC 6189) and of the Bluetooth LE Secure Connections numeric
-comparison. Binding rests on SHA-256 collision resistance; the committed
-message is a fresh random group element, so it hides itself without a
-separate nonce. See [protocol](protocol.md#commitment-round) for the frames.
+arrived. When both devices run the round this way, a relay in the middle has
+to fix its message toward the creator (by committing to it) before it learns
+the creator's message, and its message toward the joiner before it learns the
+joiner's. When it learns each device's message it can no longer change
+anything that device's code depends on, so the two codes are independent: they
+match with probability 10^-6 (about 2^-20) per pairing attempt. A failed
+attempt shows the users two different codes and stores nothing. This is the
+commit-then-reveal order of ZRTP (RFC 6189) and of the Bluetooth LE Secure
+Connections numeric comparison. Binding rests on SHA-256 collision resistance;
+the committed message is a fresh random group element, so it hides itself
+without a separate nonce. See [protocol](protocol.md#commitment-round) for the
+frames.
 
 **Reduced protection.** A device that predates the round, and a relay that
 predates it (it drops the unknown frame), still pair. The creator waits 5
@@ -285,16 +287,16 @@ for when the CLI also requires `--accept-reduced-protection`). The mobile
 mobile library also logs a warning for a reduced-protection pairing.
 
 **Older peers.** An updated device still pairs with an older one. With a
-device that shows a code but predates the commitment round, both show the
-same code and the updated device states `protection: REDUCED` when its peer
-is honest. Through a malicious relay it may show `full` (see above), but the
-older device shows no protection line, so such a match is never protected.
-A device that predates the code shows none, so the comparison cannot be made. Treat such a pairing as unverified, or
-update both devices first. An older device writes its room key to local
-storage right after key confirmation, before the comparison. If the updated
-device rejects, the older one stores no room record or device token, but
-keeps that room-key secret. No room refers to it, so it is never used; removing
-it would need a change on the older device.
+device that shows a code but predates the commitment round, both show the same
+code and the updated device states `protection: REDUCED` when its peer is
+honest. Through a malicious relay it may show `full` (see above), but the
+older device shows no protection line, so such a match is never protected. A
+device that predates the code shows none, so the comparison cannot be made.
+Treat such a pairing as unverified, or update both devices first. An older
+device writes its room key to local storage right after key confirmation,
+before the comparison. If the updated device rejects, the older one stores no
+room record or device token, but keeps that room-key secret. No room refers to
+it, so it is never used; removing it would need a change on the older device.
 
 **Skipping the comparison.** `clipsync room create|join --insecure-skip-sas`
 and the mobile `create_room()` / `join_room()` calls, kept for existing apps,
