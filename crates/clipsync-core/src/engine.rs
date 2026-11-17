@@ -21,7 +21,7 @@ use clipsync_protocol::{
     decode_chunk_frame, envelope_aad, AckStatus, ClientRole, ControlMessage, DeviceId,
     EnvelopeFrame, FileManifest, HandshakeCapabilities, ImageManifest, ItemKind, ManifestPlain,
     MessageId, PeerInfo, Recipient, RoutingHeader, TransferId, ENVELOPE_VERSION_AUTHENTICATED,
-    PROTOCOL_VERSION,
+    ENVELOPE_VERSION_LEGACY, PROTOCOL_VERSION,
 };
 use clipsync_storage::{LocalStore, RoomRecord};
 use clipsync_transfer::{
@@ -31,8 +31,8 @@ use clipsync_transfer::{
 use clipsync_transport::{backoff_delay, http_to_ws, join_ws, Incoming, RelayConnection};
 
 use crate::envelope::{
-    check_header, check_version, commit_sequence, sending_version, sequence_floor, EnvelopePolicy,
-    EnvelopeRejection,
+    check_header, check_version, commit_sequence, sequence_floor, version_for_room_state,
+    EnvelopePolicy, EnvelopeRejection,
 };
 use crate::handshake::{HandshakeOutcome, HandshakeTracker};
 use crate::loop_guard::LoopGuard;
@@ -621,7 +621,9 @@ struct EnvelopeStamp {
 
 impl EnvelopeStamp {
     /// Pick the version `policy` allows for `room`'s peers and reserve a
-    /// persisted, strictly increasing `seq`.
+    /// persisted, strictly increasing `seq`. Both happen under the replay-state
+    /// lock, so a one-shot process that switches the room to v2 concurrently
+    /// is either seen here or ordered after this stamp.
     #[expect(
         clippy::result_large_err,
         reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
@@ -632,15 +634,17 @@ impl EnvelopeStamp {
         local: &DeviceId,
         policy: EnvelopePolicy,
     ) -> Result<Self, CoreError> {
-        let version = sending_version(store, room, local, policy)?;
-        Ok(Self {
-            version,
-            seq: store.reserve_send(
-                &room.room_id,
-                sequence_floor(Utc::now()),
-                version == ENVELOPE_VERSION_AUTHENTICATED,
-            )?,
-        })
+        let (seq, authenticated) =
+            store.reserve_send_as(&room.room_id, sequence_floor(Utc::now()), |state| {
+                version_for_room_state(Some(state), room, local, policy)
+                    == ENVELOPE_VERSION_AUTHENTICATED
+            })?;
+        let version = if authenticated {
+            ENVELOPE_VERSION_AUTHENTICATED
+        } else {
+            ENVELOPE_VERSION_LEGACY
+        };
+        Ok(Self { version, seq })
     }
 }
 

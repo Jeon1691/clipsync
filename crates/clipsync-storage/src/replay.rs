@@ -209,12 +209,29 @@ impl LocalStore {
     /// [`Self::next_send_seq`] for an envelope of the given kind; an
     /// authenticated one also records `sent_authenticated` in the same write.
     pub fn reserve_send(&self, room_id: &RoomId, floor: u64, authenticated: bool) -> Result<u64> {
+        self.reserve_send_as(room_id, floor, |_| authenticated)
+            .map(|(seq, _)| seq)
+    }
+
+    /// [`Self::reserve_send`] where `authenticated` chooses the envelope kind
+    /// from the room's current state, read under the same lock as the
+    /// reservation. Deciding from an earlier read could miss another process
+    /// switching the room to authenticated envelopes in between, and send a
+    /// legacy envelope that peers already refuse. Returns the reserved `seq`
+    /// and the choice.
+    pub fn reserve_send_as(
+        &self,
+        room_id: &RoomId,
+        floor: u64,
+        authenticated: impl FnOnce(&RoomReplayState) -> bool,
+    ) -> Result<(u64, bool)> {
         self.update_replay_state(|state| {
             let room = state.rooms.entry(room_id.to_string()).or_default();
+            let authenticated = authenticated(room);
             let seq = room.last_sent_seq.saturating_add(1).max(floor);
             room.last_sent_seq = seq;
             room.sent_authenticated |= authenticated;
-            (seq, true)
+            ((seq, authenticated), true)
         })
     }
 

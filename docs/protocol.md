@@ -145,8 +145,10 @@ same directory (`flock` on Unix including Android, `LockFileEx` on Windows;
 created `0600`). One process therefore cannot overwrite another's update;
 without the lock, a concurrent save could roll back a `highest_seq` and let a
 replay through, or clear a sender's v2 flag and re-open the v1 downgrade. The OS
-releases the lock if a process dies. Readers take no lock, because every save
-atomically replaces the whole file.
+releases the lock if a process dies. A sender decides the envelope version in
+the same locked update that reserves the `seq`, so once one process has sent v2
+into a room, every envelope with a later `seq` from this device is v2 too.
+Readers take no lock, because every save atomically replaces the whole file.
 If the lock cannot be taken, the change fails with an error, as for an
 unreadable file; there is no unlocked fallback.
 

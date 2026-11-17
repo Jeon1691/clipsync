@@ -892,3 +892,56 @@ fn broadcasts_follow_the_least_capable_peer_and_advertising_alone_never_refuses_
         ENVELOPE_VERSION_LEGACY
     );
 }
+
+/// A daemon and a one-shot `push` stamp envelopes for one room from separate
+/// stores on the same data directory. Once either has sent v2 into the room,
+/// the peers refuse this device's v1, so no envelope with a later `seq` may be
+/// stamped v1. That holds only if the version is decided under the same lock
+/// that reserves the `seq`; a decision from an earlier unlocked read can miss
+/// the other process's switch and send one v1 that peers drop as a downgrade.
+#[test]
+fn concurrent_stamps_never_send_v1_after_v2_went_into_the_room() {
+    // Rooms switched from v1 to v2 while the daemon keeps stamping; each
+    // switch is one chance for a stale decision. Enough that an unlocked
+    // decision loses the race on every run.
+    const SWITCHES: usize = 30;
+    // Daemon stamps per room, spanning the one-shot's switch.
+    const DAEMON_STAMPS: usize = 30;
+    let peer = scripted_peer("http://127.0.0.1:1", RoomId::new());
+    let daemon_store = &peer.app.store;
+    let one_shot = LocalStore::open_from(daemon_store.paths.clone()).unwrap();
+    let local = &peer.identity.device_id;
+    let template = daemon_store.current_room().unwrap();
+    let mut stale = 0;
+    for _ in 0..SWITCHES {
+        let mut room = template.clone();
+        room.room_id = RoomId::new();
+        let remote = room.peers[0].device_id.clone();
+        let start = std::sync::Barrier::new(2);
+        let stamp = |store: &LocalStore| {
+            EnvelopeStamp::next(store, &room, local, EnvelopePolicy::Negotiate).unwrap()
+        };
+        let (daemon, switched) = std::thread::scope(|scope| {
+            let daemon = scope.spawn(|| {
+                start.wait();
+                (0..DAEMON_STAMPS)
+                    .map(|_| stamp(daemon_store))
+                    .collect::<Vec<_>>()
+            });
+            start.wait();
+            // The one-shot's handshake proves the peer opens v2; it sends v2.
+            one_shot
+                .mark_peer_advertised_authenticated(&room.room_id, &remote)
+                .unwrap();
+            let switched = stamp(&one_shot);
+            (daemon.join().unwrap(), switched)
+        });
+        assert_eq!(switched.version, ENVELOPE_VERSION_AUTHENTICATED);
+        stale += daemon
+            .iter()
+            .filter(|later| later.seq > switched.seq)
+            .filter(|later| later.version != ENVELOPE_VERSION_AUTHENTICATED)
+            .count();
+    }
+    assert_eq!(stale, 0, "v1 envelopes stamped after v2 went out");
+}

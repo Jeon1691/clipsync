@@ -3,7 +3,7 @@
 //! Envelope version policy and receive-side admission of envelopes:
 //! addressing, expiry, downgrade and replay.
 //!
-//! Send side ([`sending_version`]): v1 to a peer until there is positive,
+//! Send side ([`version_for_room_state`]): v1 to a peer until there is positive,
 //! authenticated evidence that it opens v2, then v2 for good. A broadcast goes
 //! out in the version of the least capable pinned peer of the room.
 //!
@@ -23,7 +23,7 @@ use clipsync_protocol::{
     DeviceId, ItemKind, Recipient, RoutingHeader, CLOCK_SKEW_SECS, ENVELOPE_VERSION_AUTHENTICATED,
     ENVELOPE_VERSION_LEGACY, HARD_MAX_TTL_SECS,
 };
-use clipsync_storage::{LocalStore, RoomRecord, SeqCheck, SyncConfig};
+use clipsync_storage::{LocalStore, RoomRecord, RoomReplayState, SeqCheck, SyncConfig};
 
 use crate::CoreError;
 
@@ -95,15 +95,11 @@ impl EnvelopePolicy {
     }
 }
 
-/// Envelope version for the next broadcast into `room`.
+/// [`version_for_room_state`] for the replay state currently on disk.
 ///
-/// Under [`EnvelopePolicy::Negotiate`] that is v2 only when every pinned peer
-/// of the room (other than `local`) has shown, through an authenticated
-/// channel, that it opens v2: it sent this device a v2 envelope, or it
-/// advertised v2 in its Noise handshake payload. Otherwise the least capable
-/// peer gets what it can read: v1. The evidence is persisted and never
-/// revoked, so a relay cannot roll a peer back to v1; and once this device has
-/// sent v2 into the room it keeps sending v2 there.
+/// Test helper: a snapshot read. Stamping an envelope decides with
+/// [`version_for_room_state`] inside the locked `seq` reservation instead.
+#[cfg(test)]
 #[expect(
     clippy::result_large_err,
     reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
@@ -114,16 +110,41 @@ pub(crate) fn sending_version(
     local: &DeviceId,
     policy: EnvelopePolicy,
 ) -> Result<u16, CoreError> {
+    let state = match policy {
+        // The fixed policies need no state; skip reading it.
+        EnvelopePolicy::Legacy | EnvelopePolicy::Strict => None,
+        EnvelopePolicy::Negotiate => Some(store.load_replay_state()?),
+    };
+    let room_state = state
+        .as_ref()
+        .and_then(|state| state.rooms.get(room.room_id.as_str()));
+    Ok(version_for_room_state(room_state, room, local, policy))
+}
+
+/// Envelope version for the next broadcast into `room`, decided from the
+/// room's replay state `room_state` (`None`: nothing recorded for it yet).
+///
+/// Under [`EnvelopePolicy::Negotiate`] that is v2 only when every pinned peer
+/// of the room (other than `local`) has shown, through an authenticated
+/// channel, that it opens v2: it sent this device a v2 envelope, or it
+/// advertised v2 in its Noise handshake payload. Otherwise the least capable
+/// peer gets what it can read: v1. The evidence is persisted and never
+/// revoked, so a relay cannot roll a peer back to v1; and once this device has
+/// sent v2 into the room it keeps sending v2 there.
+pub(crate) fn version_for_room_state(
+    room_state: Option<&RoomReplayState>,
+    room: &RoomRecord,
+    local: &DeviceId,
+    policy: EnvelopePolicy,
+) -> u16 {
     match policy {
-        EnvelopePolicy::Legacy => Ok(ENVELOPE_VERSION_LEGACY),
-        EnvelopePolicy::Strict => Ok(ENVELOPE_VERSION_AUTHENTICATED),
+        EnvelopePolicy::Legacy => ENVELOPE_VERSION_LEGACY,
+        EnvelopePolicy::Strict => ENVELOPE_VERSION_AUTHENTICATED,
         EnvelopePolicy::Negotiate => {
-            let state = store.load_replay_state()?;
-            let room_state = state.rooms.get(room.room_id.as_str());
             // Once v2 went out, peers refuse this device's v1: never fall back,
             // even if a peer without evidence is pinned later.
             if room_state.is_some_and(|state| state.sent_authenticated) {
-                return Ok(ENVELOPE_VERSION_AUTHENTICATED);
+                return ENVELOPE_VERSION_AUTHENTICATED;
             }
             let all_accept = room
                 .peers
@@ -133,11 +154,11 @@ pub(crate) fn sending_version(
                     room_state
                         .is_some_and(|state| state.peer_accepts_authenticated(&peer.device_id))
                 });
-            Ok(if all_accept {
+            if all_accept {
                 ENVELOPE_VERSION_AUTHENTICATED
             } else {
                 ENVELOPE_VERSION_LEGACY
-            })
+            }
         }
     }
 }
