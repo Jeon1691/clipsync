@@ -11,4 +11,6 @@ services:
       CLIPSYNC_RELAY_BIND: 0.0.0.0:7600
       CLIPSYNC_RELAY_PUBLIC_URL: http://127.0.0.1:7600
       CLIPSYNC_RELAY_TOKEN_SECRET: "${CLIPSYNC_RELAY_TOKEN_SECRET:-}"
+      # Empty leaves /metrics disabled; see docs/self-hosting.md#metrics.
+      CLIPSYNC_RELAY_METRICS_TOKEN: "${CLIPSYNC_RELAY_METRICS_TOKEN:-}"
     restart: unless-stopped

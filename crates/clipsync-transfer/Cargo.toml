@@ -18,6 +18,12 @@ thiserror.workspace = true
 tokio.workspace = true
 ulid.workspace = true
 
+# Advisory `flock` for the inbox publish lock. std's `File::lock` returns
+# `Unsupported` on Android before Rust 1.98, above the workspace MSRV.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.6", default-features = false, features = ["fs", "std"] }
+
+# `setxattr`/`fsetxattr` for Gatekeeper quarantine on received files.
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
 tracing.workspace = true
@@ -26,4 +32,5 @@ tracing.workspace = true
 workspace = true
 
 [dev-dependencies]
+chrono.workspace = true
 tempfile.workspace = true

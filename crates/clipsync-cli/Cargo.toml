@@ -23,7 +23,6 @@ clipsync-core.workspace = true
 clipsync-daemon.workspace = true
 clipsync-protocol.workspace = true
 clipsync-storage.workspace = true
-humantime.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

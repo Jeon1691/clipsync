@@ -134,12 +134,42 @@ pub fn mark_file(file: BorrowedFd<'_>, value: &str) -> std::io::Result<()> {
     status(rc)
 }
 
+/// Like [`mark`], but leaves an existing `com.apple.quarantine` value in
+/// place (`XATTR_CREATE`), since it may record the user's Gatekeeper
+/// approval. Use it for received files ClipSync did not write in this call,
+/// such as a published transfer it reuses or restores.
+pub fn mark_if_absent(path: &Path, value: &str) -> std::io::Result<()> {
+    let c_path = CString::new(path.as_os_str().as_bytes())?;
+    // SAFETY: as in `mark`; the options only add `XATTR_CREATE`.
+    let rc = unsafe {
+        libc::setxattr(
+            c_path.as_ptr(),
+            QUARANTINE_XATTR.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            XATTR_POSITION,
+            libc::XATTR_NOFOLLOW | libc::XATTR_CREATE,
+        )
+    };
+    match status(rc) {
+        Err(error) if error.raw_os_error() == Some(libc::EEXIST) => Ok(()),
+        result => result,
+    }
+}
+
 /// [`mark`] with the received-file failure policy: a volume without xattr
 /// support (for example some network or FAT volumes) must not make peer
 /// transfers fail outright, so the error is logged and the caller still
 /// delivers the integrity-checked file.
 pub fn mark_or_warn(path: &Path, value: &str) {
     if let Err(error) = mark(path, value) {
+        warn_unmarked(&error);
+    }
+}
+
+/// [`mark_if_absent`] with the same failure policy as [`mark_or_warn`].
+pub fn mark_if_absent_or_warn(path: &Path, value: &str) {
+    if let Err(error) = mark_if_absent(path, value) {
         warn_unmarked(&error);
     }
 }
@@ -222,6 +252,25 @@ mod tests {
         let err = mark(&dir.path().join("missing"), &quarantine_value()).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
         mark_or_warn(&dir.path().join("missing"), &quarantine_value());
+    }
+
+    #[test]
+    fn mark_if_absent_adds_a_missing_value_and_never_replaces_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        std::fs::write(&path, b"x").unwrap();
+        let first = quarantine_value();
+        mark_if_absent(&path, &first).unwrap();
+        assert_eq!(value_of(&path).unwrap().as_deref(), Some(first.as_str()));
+        mark_if_absent(&path, &quarantine_value()).unwrap();
+        assert_eq!(value_of(&path).unwrap().as_deref(), Some(first.as_str()));
+        assert_eq!(
+            mark_if_absent(&dir.path().join("missing"), &first)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        mark_if_absent_or_warn(&dir.path().join("missing"), &first);
     }
 
     #[test]

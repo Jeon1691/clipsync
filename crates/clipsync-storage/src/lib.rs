@@ -5,11 +5,13 @@
 
 mod config;
 mod paths;
+mod replay;
 mod secrets;
 mod store;
 
 pub use config::{AppConfig, NotifyConfig, SyncConfig};
-pub use paths::AppPaths;
+pub use paths::{open_private_append, AppPaths};
+pub use replay::{ReplayState, RoomReplayState, SenderReplayState, SeqCheck};
 pub use secrets::SecretStore;
 pub use store::{LocalStore, PairingWait, PeerRecord, RoomRecord, StateFile};
 
@@ -29,6 +31,8 @@ pub enum StorageError {
     NotInitialized,
     #[error("not paired with a room")]
     NotPaired,
+    #[error(transparent)]
+    InvalidId(#[from] clipsync_protocol::IdError),
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;

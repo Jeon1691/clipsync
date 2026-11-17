@@ -95,8 +95,10 @@ do not create empty commits, reviews, or releases just to alter the score.
 
 The v0.2.0 [dependency migration](dependency-migration.md) removes the six former
 RustSec maintenance-advisory packages while retaining accessibility, title text,
-clipboard formats, both renderers, and mobile bindings. Both audited lockfiles
-are clean without ignores. Eight explicit source patches now require
+clipboard formats, both renderers, and mobile bindings. The audited lockfiles
+are clean except for one time-boxed ignore of the chrono unmaintained advisory
+(RUSTSEC-2026-0543, review by 2027-02-15; see
+[security alerts](security-alerts.md#unmaintained-time-crates)). Eight explicit source patches now require
 ClipSync maintenance; their source hashes, complete diffs, licenses, review
 cadence, and retirement conditions are documented. This is an actual component
 migration with Rust 1.95 as the tested minimum. A clean local audit does not

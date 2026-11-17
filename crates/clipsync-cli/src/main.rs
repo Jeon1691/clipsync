@@ -1,6 +1,7 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
 mod cli;
+mod duration;
 mod output;
 mod pairing_bg;
 
@@ -15,6 +16,12 @@ use clipsync_storage::LocalStore;
 
 use crate::cli::{Cli, Commands, ConfigCmd, DaemonCmd, RoomCmd, SyncCmd};
 use crate::output::{emit, emit_err};
+
+/// Status the detached pairing worker writes to the log once the offer is live.
+/// It deliberately omits the pairing code, room and expiry: the log is long-lived.
+const BACKGROUND_WAITING_STATUS: &str = "background pairing: waiting for the other device to join";
+/// Status the detached pairing worker writes to the log after a successful join.
+const BACKGROUND_PAIRED_STATUS: &str = "background pairing: paired";
 
 #[tokio::main]
 async fn main() {
@@ -81,7 +88,7 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
             let _ = app.identity()?;
             let ttl_raw = ttl.clone();
             let dur = ttl
-                .map(|s| humantime::parse_duration(&s))
+                .map(|s| duration::parse_duration(&s))
                 .transpose()
                 .map_err(|e| CoreError::Message(e.to_string()))?;
             let json = cli.json;
@@ -96,7 +103,11 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
             }
             let offer = app
                 .room_create(dur, no_auto_sync, json, |offer| {
-                    if json {
+                    if background_worker {
+                        // This stdout is the shared log file. The foreground parent
+                        // shows the code from pairing.json; never persist it here.
+                        println!("{BACKGROUND_WAITING_STATUS}");
+                    } else if json {
                         println!(
                             "{}",
                             serde_json::json!({
@@ -115,6 +126,10 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
                     let _ = io::stdout().flush();
                 })
                 .await?;
+            if background_worker {
+                println!("{BACKGROUND_PAIRED_STATUS}");
+                return Ok(());
+            }
             emit(
                 json,
                 serde_json::json!({

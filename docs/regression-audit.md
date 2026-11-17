@@ -1,6 +1,6 @@
 # Six-month regression-test audit — 2026-11-16
 
-The complete ledger now registers **61 of 107 distinct corrected defects (57.01%)**,
+The complete ledger now registers **62 of 108 distinct corrected defects (57.41%)**,
 meeting the Silver requirement of at least 50%. [The machine-readable ledger](regressions.json)
 and [CI checker](../scripts/check-regressions.py) preserve the full denominator
 and derive credit from concrete test references, not a manually entered Boolean.
@@ -41,9 +41,9 @@ that an assertion reproduces a historical defect.
 
 | Scope | Registered defects | Complete defects | Fraction |
 | --- | ---: | ---: | ---: |
-| Broad ledger | 61 | 107 | 57.01% |
-| Project runtime/security | 47 | 61 | 77.05% |
-| All project-authored corrections | 61 | 94 | 64.89% |
+| Broad ledger | 62 | 108 | 57.41% |
+| Project runtime/security | 48 | 62 | 77.42% |
+| All project-authored corrections | 62 | 95 | 65.26% |
 
 The original baseline increased from **24/84 (28.57%)** to **44/84 (52.38%)** without
 removing defects or treating test variants as extra bugs. The newly covered rows
@@ -145,6 +145,19 @@ per-copy evidence and kills/reaps remaining processes on failure or timeout.
 This native timing/load case remains **uncredited** pending a deterministic
 focused regression; the complete total is **61/107 (57.01%)**. No watchdog
 threshold, existing regression reference or coverage threshold is relaxed.
+
+F108 records unbounded pairing-code guessing on `POST /v1/pairing/join`. On
+unchanged `76c63f9`, the focused HTTP sweep of 20,000 wrong codes from one
+address got only `404` responses, and the correct code then joined, because no
+failed join was ever counted. The [fix](https://github.com/Jeon1691/clipsync/commit/4512d852324b94b0a88e942b3128d33c1cad3461)
+charges every failed join to per-client and relay-wide budgets before the code
+lookup. The [sweep regression](../crates/clipsync-relay/src/http_tests.rs) and
+the [relay-wide budget check](../crates/clipsync-relay/src/state_tests.rs) are
+registered. Review of the same unmerged change also found one shared budget
+behind the Proxmox Cloudflare Tunnel and an opaque client-written
+`X-Forwarded-For` hop. Both have focused tests but are not separate defects,
+because no released code contained them. The complete total is
+**62/108 (57.41%)**.
 
 The scope table is derived from the ledger: runtime/security includes the
 `Runtime` and `Runtime-PR16` rows; project-authored corrections include every
@@ -303,6 +316,7 @@ whether the assertion meaningfully protects the stated behavior.
 
 | F106 | Build/CI | [7f6e976](https://github.com/Jeon1691/clipsync/commit/7f6e9767a28a5989c41fde1811924c2fa8058101) | Root-owned exported directories broke host cleanup after matching builds | **Registered** — [caller ownership and malformed-ID contracts](../scripts/tests/test_build_reconstruction.py), plus separate real Docker permission RED/GREEN; modes and payload hashes stay unchanged, Linux/macOS orchestration. |
 | F107 | Runtime | [bfccecc](https://github.com/Jeon1691/clipsync/commit/bfccecc794d00618efdfe877c615b61bc4613d3d) | Blocking pairing credential persistence triggered the live-connection watchdog under native keychain load | **Uncredited** — old-source concurrent e2e failure and corrected 30-test pass are retained; macOS CI runs the bounded workload, but scheduler/keychain timing is not a deterministic focused fixture. |
+| F108 | Runtime | [4512d85](https://github.com/Jeon1691/clipsync/commit/4512d852324b94b0a88e942b3128d33c1cad3461) | Uncounted failed pairing joins allowed sweeping the 6-digit SPAKE2 password space within one pairing TTL | **Registered** — [one-client sweep refusing the correct code](../crates/clipsync-relay/src/http_tests.rs) failed on unchanged `76c63f9`; [relay-wide budget across many addresses](../crates/clipsync-relay/src/state_tests.rs), all platforms. |
 
 The [official Silver criterion](https://www.bestpractices.dev/en/criteria/1#regression_tests_added50)
 defines the badge requirement. This ledger's defect taxonomy and conservative

@@ -352,7 +352,22 @@ fn daemon_commands_write_only_isolated_service_files_and_preserve_json_contracts
         &["room", "create", "--foreground", "--ttl", "not-a-duration"],
     );
     assert_eq!(invalid_ttl.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&invalid_ttl.stderr).contains("error:"));
+    // The in-house `--ttl` parser keeps humantime's rejection text.
+    assert!(String::from_utf8_lossy(&invalid_ttl.stderr).contains("error: expected number at 0"));
+    // One second of nanoseconds carried into u64::MAX seconds used to panic.
+    let overflowing_ttl = cli(
+        root.path(),
+        false,
+        &[
+            "room",
+            "create",
+            "--foreground",
+            "--ttl",
+            "18446744073709551615s 1000000000ns",
+        ],
+    );
+    assert_eq!(overflowing_ttl.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&overflowing_ttl.stderr).contains("error: number is too large"));
 }
 
 #[test]
@@ -440,4 +455,86 @@ fn commands_preserve_corrupt_config_and_state_and_report_the_responsible_failure
         assert!(String::from_utf8_lossy(&output.stderr).contains("serialize"));
         assert_eq!(std::fs::read(paths.state_file()).unwrap(), b"invalid state");
     }
+}
+
+fn saved_relay_url(root: &std::path::Path) -> serde_json::Value {
+    let readback = cli(root, true, &["config", "get", "relay_url"]);
+    assert!(
+        readback.status.success(),
+        "{}",
+        String::from_utf8_lossy(&readback.stderr)
+    );
+    serde_json::from_slice::<serde_json::Value>(&readback.stdout).unwrap()["relay_url"].clone()
+}
+
+#[test]
+fn init_and_config_set_refuse_plaintext_relays_unless_loopback_or_opted_in() {
+    let root = tempfile::tempdir().unwrap();
+    // `config set` avoids creating an identity (and an OS keychain entry).
+    let saved = cli(
+        root.path(),
+        false,
+        &["config", "set", "relay_url", "https://relay.example.test"],
+    );
+    assert!(
+        saved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
+    assert_eq!(saved_relay_url(root.path()), "https://relay.example.test");
+
+    for args in [
+        vec!["init", "--relay-url", "http://relay.example.test"],
+        vec!["config", "set", "relay_url", "http://relay.example.test"],
+        vec!["config", "set", "relay_url", "ws://192.168.1.20:7600"],
+    ] {
+        let rejected = cli(root.path(), false, &args);
+        let stderr = String::from_utf8_lossy(&rejected.stderr);
+        assert_eq!(rejected.status.code(), Some(2), "{args:?}: {stderr}");
+        for hint in ["plaintext", "https://", "CLIPSYNC_ALLOW_INSECURE_RELAY"] {
+            assert!(stderr.contains(hint), "{args:?}: {stderr} lacks {hint}");
+        }
+        assert_eq!(saved_relay_url(root.path()), "https://relay.example.test");
+    }
+    for args in [
+        vec!["init", "--relay-url", "relay.example.test"],
+        vec!["config", "set", "relay_url", "localhost:7600"],
+    ] {
+        let rejected = cli(root.path(), false, &args);
+        let stderr = String::from_utf8_lossy(&rejected.stderr);
+        assert_eq!(rejected.status.code(), Some(2), "{args:?}: {stderr}");
+        assert!(stderr.contains("no scheme"), "{args:?}: {stderr}");
+        assert_eq!(saved_relay_url(root.path()), "https://relay.example.test");
+    }
+
+    let loopback = cli(
+        root.path(),
+        false,
+        &["config", "set", "relay_url", "http://localhost:7600"],
+    );
+    assert!(
+        loopback.status.success(),
+        "{}",
+        String::from_utf8_lossy(&loopback.stderr)
+    );
+    assert_eq!(saved_relay_url(root.path()), "http://localhost:7600");
+
+    let opted_in = command(
+        root.path(),
+        false,
+        &["config", "set", "relay_url", "http://relay.example.test"],
+    )
+    .env("CLIPSYNC_ALLOW_INSECURE_RELAY", "1")
+    .env("RUST_LOG", "warn")
+    .output()
+    .unwrap();
+    let logs = format!(
+        "{}{}",
+        String::from_utf8_lossy(&opted_in.stdout),
+        String::from_utf8_lossy(&opted_in.stderr)
+    );
+    assert!(opted_in.status.success(), "{logs}");
+    assert!(logs.contains("CLIPSYNC_ALLOW_INSECURE_RELAY"), "{logs}");
+    assert!(logs.contains("plaintext"), "{logs}");
+    assert_eq!(saved_relay_url(root.path()), "http://relay.example.test");
 }
