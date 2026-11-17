@@ -456,7 +456,11 @@ impl RelayState {
             // Re-checked under the room's write lock. `register_conn` holds
             // the room's entry while it inserts a member route, so a room a
             // device just registered in is never removed. A room used since
-            // the scan but idle again is still a fair victim.
+            // the scan but idle again is still a fair victim. No test pins
+            // this re-check: losing the race needs a registration to land
+            // between the scan and the removal, which the tests cannot
+            // schedule deterministically, so it rests on the lock argument
+            // above.
             let removed = self
                 .rooms
                 .remove_if(&room_id, |id, room| !self.room_has_device_online(id, room));
