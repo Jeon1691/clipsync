@@ -29,16 +29,27 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
         os: "test".into(),
         ttl_secs: None,
     };
-    let error = create_pairing(State(state.clone()), RequestJson(request.clone()))
-        .await
-        .unwrap_err();
+    let owner_address: SocketAddr = "127.0.0.3:4000".parse().unwrap();
+    let error = create_pairing(
+        ConnectInfo(owner_address),
+        State(state.clone()),
+        HeaderMap::new(),
+        RequestJson(request.clone()),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(error.0, StatusCode::BAD_REQUEST);
     assert_eq!(error.1 .0.code, "protocol_version");
     request.protocol_version = PROTOCOL_VERSION;
-    let offer = create_pairing(State(state.clone()), RequestJson(request))
-        .await
-        .unwrap()
-        .0;
+    let offer = create_pairing(
+        ConnectInfo(owner_address),
+        State(state.clone()),
+        HeaderMap::new(),
+        RequestJson(request),
+    )
+    .await
+    .unwrap()
+    .0;
     let address: SocketAddr = "127.0.0.2:4000".parse().unwrap();
     let mut request = JoinPairingRequest {
         protocol_version: 0,
@@ -330,7 +341,9 @@ fn join_test_state() -> Arc<RelayState> {
 
 async fn create_offer(state: &Arc<RelayState>) -> CreatePairingResponse {
     create_pairing(
+        ConnectInfo("127.0.0.3:4000".parse().unwrap()),
         State(state.clone()),
+        HeaderMap::new(),
         RequestJson(CreatePairingRequest {
             protocol_version: PROTOCOL_VERSION,
             pairing_session_id: PairingSessionId::new(),
@@ -651,6 +664,344 @@ async fn invalid_join_limits_stop_the_relay_from_starting() {
         .to_string()
         .contains("CLIPSYNC_RELAY_PAIRING_RELAY_FAIL_LIMIT"));
     assert!(router_with_join_policy(config, Vec::new(), transport.join_limits).is_err());
+}
+
+#[tokio::test]
+async fn invalid_resource_limits_stop_the_relay_from_starting() {
+    let config = RelayConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        public_url: "http://127.0.0.1".into(),
+        token_secret: rand::random::<[u8; 32]>().to_vec(),
+        webhook_url: None,
+        webhook_secret: None,
+        metrics_token: None,
+    };
+    let transport = RelayTransportConfig {
+        allow_http: true,
+        resource_limits: RelayResourceLimits {
+            max_connections: 0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let error = serve_with_transport(config.clone(), transport.clone())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("CLIPSYNC_RELAY_MAX_CONNECTIONS"));
+    assert!(router_with_limits(
+        config,
+        Vec::new(),
+        PairingJoinLimits::default(),
+        transport.resource_limits
+    )
+    .is_err());
+}
+
+async fn create_status(
+    state: &Arc<RelayState>,
+    peer: SocketAddr,
+    headers: HeaderMap,
+) -> Result<CreatePairingResponse, (StatusCode, String)> {
+    create_pairing(
+        ConnectInfo(peer),
+        State(state.clone()),
+        headers,
+        RequestJson(CreatePairingRequest {
+            protocol_version: PROTOCOL_VERSION,
+            pairing_session_id: PairingSessionId::new(),
+            device_id: DeviceId::new(),
+            device_name: "owner".into(),
+            os: "test".into(),
+            ttl_secs: None,
+        }),
+    )
+    .await
+    .map(|created| created.0)
+    .map_err(|(status, body)| (status, body.0.code))
+}
+
+/// Pairing creation is limited per forwarded client (with the same client
+/// resolution as joins), and a full relay answers 503, not a pairing error.
+#[tokio::test]
+async fn pairing_create_answers_429_per_client_and_503_when_the_relay_is_full() {
+    const CLIENT_LIMIT: u32 = 2;
+    // Far below what startup accepts, so open sessions alone fill it.
+    const MAX_ROOMS: usize = 3;
+    let proxy: SocketAddr = "127.0.0.1:4000".parse().unwrap();
+    let state = Arc::new(RelayState::unvalidated(
+        RelayConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            public_url: "http://127.0.0.1".into(),
+            token_secret: rand::random::<[u8; 32]>().to_vec(),
+            webhook_url: None,
+            webhook_secret: None,
+            metrics_token: None,
+        },
+        vec![proxy.ip().into()],
+        RelayResourceLimits {
+            client_create_limit: CLIENT_LIMIT,
+            max_rooms: MAX_ROOMS,
+            ..Default::default()
+        },
+    ));
+    for _ in 0..CLIENT_LIMIT {
+        create_status(&state, proxy, forwarded_for("192.0.2.1"))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        create_status(&state, proxy, forwarded_for("192.0.2.1"))
+            .await
+            .unwrap_err(),
+        (StatusCode::TOO_MANY_REQUESTS, "too_many_pairings".into())
+    );
+    create_status(&state, proxy, forwarded_for("192.0.2.2"))
+        .await
+        .unwrap();
+    assert_eq!(
+        create_status(&state, proxy, forwarded_for("192.0.2.3"))
+            .await
+            .unwrap_err(),
+        (StatusCode::SERVICE_UNAVAILABLE, "relay_full".into())
+    );
+    let metrics = state.metrics_text();
+    for line in [
+        "clipsync_pairing_create_throttled 1",
+        "clipsync_pairing_create_full 1",
+        "clipsync_pairing_sessions 3",
+    ] {
+        assert!(metrics.lines().any(|l| l == line), "{line} in {metrics}");
+    }
+}
+
+/// Serve the relay with `limits` and every peer trusted as a proxy, so tests
+/// pick each connection's client address with `X-Forwarded-For`.
+async fn serve_limited(limits: RelayResourceLimits) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let (address, server, _) = serve_limited_state(limits).await;
+    (address, server)
+}
+
+/// [`serve_limited`], also returning the relay's state.
+async fn serve_limited_state(
+    limits: RelayResourceLimits,
+) -> (SocketAddr, tokio::task::JoinHandle<()>, Arc<RelayState>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let state = Arc::new(
+        RelayState::with_limits(
+            RelayConfig {
+                bind: address,
+                public_url: format!("http://{address}"),
+                token_secret: rand::random::<[u8; 32]>().to_vec(),
+                webhook_url: None,
+                webhook_secret: None,
+                metrics_token: Some(MetricsToken::new(METRICS_TEST_TOKEN).unwrap()),
+            },
+            vec![address.ip().into()],
+            PairingJoinLimits::default(),
+            limits,
+        )
+        .unwrap(),
+    );
+    let app = router_with_state(state.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    (address, server, state)
+}
+
+/// A device-token `hello` for the owner of a freshly paired room.
+fn member_hello(state: &RelayState) -> String {
+    use clipsync_protocol::{ClientRole, ControlMessage};
+    let owner = DeviceId::new();
+    let sid = PairingSessionId::new();
+    let client: IpAddr = "127.0.0.1".parse().unwrap();
+    let offer = state
+        .create_pairing(
+            CreatePairingRequest {
+                protocol_version: PROTOCOL_VERSION,
+                pairing_session_id: sid.clone(),
+                device_id: owner.clone(),
+                device_name: "owner".into(),
+                os: "test".into(),
+                ttl_secs: None,
+            },
+            client,
+        )
+        .unwrap();
+    state
+        .join_pairing(
+            JoinPairingRequest {
+                protocol_version: PROTOCOL_VERSION,
+                pairing_code: offer.pairing_code,
+                device_id: DeviceId::new(),
+                device_name: "member".into(),
+                os: "test".into(),
+            },
+            client,
+        )
+        .unwrap();
+    assert!(state.complete_pairing(sid.as_str()).is_none());
+    let (owner_token, _, room_id, _, _) = state.complete_pairing(sid.as_str()).unwrap();
+    ControlMessage::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        device_id: owner,
+        device_name: "owner".into(),
+        os: "test".into(),
+        role: ClientRole::Member,
+        room_id: Some(room_id),
+        token: owner_token,
+        pairing_session_id: None,
+    }
+    .encode()
+    .unwrap()
+}
+
+type WsClient =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Open a WebSocket as forwarded client `client`, or return the refusal status.
+async fn connect_as(address: SocketAddr, client: &str) -> Result<WsClient, StatusCode> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::Error as WsError;
+    let mut request = format!("ws://{address}/v1/ws")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("x-forwarded-for", client.parse().unwrap());
+    match tokio_tungstenite::connect_async(request).await {
+        Ok((socket, _)) => Ok(socket),
+        Err(WsError::Http(response)) => Err(response.status()),
+        Err(other) => panic!("unexpected WebSocket error {other}"),
+    }
+}
+
+/// Regression for unlimited WebSocket connections: the connection after a
+/// client's cap, and after the relay-wide cap, is refused before the upgrade,
+/// and a closed socket frees its slot.
+#[tokio::test]
+async fn websocket_connections_past_the_client_and_relay_caps_are_refused() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as ClientMessage;
+    const MAX_CONNECTIONS: usize = 3;
+    const MAX_CLIENT_CONNECTIONS: usize = 2;
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (address, server) = serve_limited(RelayResourceLimits {
+            max_connections: MAX_CONNECTIONS,
+            max_client_connections: MAX_CLIENT_CONNECTIONS,
+            ..Default::default()
+        })
+        .await;
+        let mut first = Vec::new();
+        for _ in 0..MAX_CLIENT_CONNECTIONS {
+            first.push(connect_as(address, "192.0.2.1").await.unwrap());
+        }
+        assert_eq!(
+            connect_as(address, "192.0.2.1").await.err(),
+            Some(StatusCode::TOO_MANY_REQUESTS)
+        );
+        first.pop().unwrap().close(None).await.unwrap();
+        let reopened = loop {
+            match connect_as(address, "192.0.2.1").await {
+                Ok(socket) => break socket,
+                Err(StatusCode::TOO_MANY_REQUESTS) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await
+                }
+                Err(other) => panic!("unexpected status {other}"),
+            }
+        };
+        drop(reopened);
+        server.abort();
+
+        // A one-slot relay held by a room member: the second connection, from
+        // anyone, gets 503 (a pre-hello socket would be evicted instead).
+        let (address, server, state) = serve_limited_state(RelayResourceLimits {
+            max_connections: 1,
+            max_client_connections: 1,
+            ..Default::default()
+        })
+        .await;
+        let mut held = connect_as(address, "192.0.2.1").await.unwrap();
+        held.send(ClientMessage::Text(member_hello(&state).into()))
+            .await
+            .unwrap();
+        match held.next().await {
+            Some(Ok(ClientMessage::Text(text))) => assert!(
+                matches!(
+                    clipsync_protocol::ControlMessage::decode(&text).unwrap(),
+                    clipsync_protocol::ControlMessage::HelloOk { .. }
+                ),
+                "{text}"
+            ),
+            other => panic!("expected hello_ok, got {other:?}"),
+        }
+        assert_eq!(
+            connect_as(address, "192.0.2.2").await.err(),
+            Some(StatusCode::SERVICE_UNAVAILABLE)
+        );
+        let metrics = reqwest::Client::new()
+            .get(format!("http://{address}/metrics"))
+            .bearer_auth(METRICS_TEST_TOKEN)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let refused = metrics
+            .lines()
+            .find_map(|line| line.strip_prefix("clipsync_ws_refused "))
+            .unwrap();
+        assert!(refused.parse::<u64>().unwrap() >= 1, "{metrics}");
+        server.abort();
+    })
+    .await
+    .unwrap();
+}
+
+/// Regression for pre-hello sockets holding every connection slot: once
+/// unauthenticated sockets fill their share, a newcomer is admitted and the
+/// oldest of them is closed, instead of the newcomer being refused.
+#[tokio::test]
+async fn a_newcomer_evicts_the_oldest_unauthenticated_socket_instead_of_being_refused() {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message as ClientMessage;
+    const MAX_CONNECTIONS: usize = 4;
+    // 75% of four slots.
+    const MAX_UNAUTHENTICATED: usize = 3;
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (address, server) = serve_limited(RelayResourceLimits {
+            max_connections: MAX_CONNECTIONS,
+            max_client_connections: 1,
+            ..Default::default()
+        })
+        .await;
+        let mut flood = Vec::new();
+        for n in 0..MAX_UNAUTHENTICATED {
+            flood.push(connect_as(address, &format!("192.0.2.{n}")).await.unwrap());
+        }
+        let _newcomer = connect_as(address, "203.0.113.1")
+            .await
+            .expect("a newcomer must not be refused while pre-hello sockets hold the slots");
+        // The oldest flood socket is closed by the relay.
+        loop {
+            match flood[0].next().await {
+                None | Some(Err(_)) | Some(Ok(ClientMessage::Close(_))) => break,
+                Some(Ok(_)) => {}
+            }
+        }
+        server.abort();
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

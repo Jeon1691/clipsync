@@ -42,6 +42,32 @@ Operators can change these budgets, but startup rejects a relay-wide limit above
 50 per pairing TTL, which keeps the chance of guessing one session at or below
 10^-4. `/metrics` reports refused joins as `clipsync_pairing_throttled`.
 
+Creating a pairing needs no credentials, so creation is limited the same way.
+By default each client address (IPv6 by /64 prefix) may create 20 pairings per
+15 minutes, each IPv6 /48 three times that, and the whole relay 100 per pairing
+TTL, answered with `429 too_many_pairings` once spent. Independently, the relay
+holds at most 1,000 open pairing sessions, 0.1% of the code space, so a fresh
+code can always be allocated. A full session cap answers `503 relay_full` and
+clears within one pairing TTL.
+
+Pairing needs no credentials, so anyone can create rooms by pairing their own
+devices, and those rooms hold valid one-year device tokens. The room count
+therefore never blocks pairing. The relay holds at most 10,000 rooms by
+default, counting open sessions that could still complete. At that cap, a new
+pairing evicts the least recently used room that has no device online. A room
+is used when one of its devices authenticates, sends anything, or disconnects.
+A room with a device online is never evicted. Each online room holds at least
+one WebSocket connection, and startup requires the room cap to exceed the
+connection cap plus the 1,000 sessions, so an evictable room always exists. An
+evicted room's devices get `unknown room` on their next `hello` and must pair
+again, the same outcome as a relay restart, which loses every room. Someone
+creating rooms as fast as the creation budget allows can therefore evict rooms
+whose devices are all offline, oldest first, at the relay-wide creation rate.
+As with joins, anyone who can
+spend the relay-wide creation budget can block new pairings for a while, but
+cannot take over existing rooms. Watch `clipsync_rooms`,
+`clipsync_rooms_evicted` and `clipsync_pairing_create_full` on `/metrics`.
+
 The relay generates this password. Pair through a trusted relay: an actively
 malicious operator who knows the password is outside the honest-but-curious
 model and may impersonate a pairing participant. HTTPS/WSS authenticates the
@@ -138,8 +164,14 @@ protocol changes; the current v1 format is retained for existing clients.
 
 The relay routes opaque ciphertext. It stores at most one latest encrypted text
 envelope per recipient device in each room, in memory until the sender's
-expiry and never longer than 60 seconds. Image and file frames are forwarded
-only while the peer is online and are never assembled or written to disk.
+expiry and never longer than 60 seconds. It holds about 256 recipients'
+envelopes at once, at most 16 of them sent from one client address (IPv6 by /64
+prefix), so one user with many rooms cannot fill the queue for everyone.
+Concurrent senders can pass the checks together, so either cap can briefly be
+exceeded by the number of senders. When the queue, or the sender's share of
+it, is full, a text for an offline recipient is acknowledged as
+`peer_offline`. Image and file frames are forwarded only while the peer is
+online and are never assembled or written to disk.
 
 Room traffic and presence reach only sockets authenticated with a device token
 for a current, non-revoked room member, and routes are keyed by room and device
@@ -167,6 +199,38 @@ frames one at a time. After that none of its sockets can send room traffic.
 Pairing requests that name a device ID already connected to a room are not
 rejected: such a check would reveal presence to unauthenticated callers and stop
 a device from pairing into another room, while routing no longer depends on it.
+
+All relay state is in memory and bounded. Pairing sessions are removed from
+every index when they are aborted, and within seconds of completing or
+expiring. A room is removed once every device in it is revoked, or once its
+device tokens have expired (one year after pairing; tokens are not renewed)
+and none of its devices still has a routed socket. At the room cap, the least
+recently used room with no device online (no routed member socket) is also
+evicted to make way for a new pairing (see [Pairing](#pairing)).
+
+By default the relay accepts at most 512 WebSocket connections at once, 32 from
+one client address (IPv6 by /64 prefix) and 96 from one IPv6 /48. It refuses
+further upgrades with `503` or `429`. Sockets that are not room members may
+hold at most 75% of the relay-wide slots: sockets that have not sent a valid
+`hello` yet, and pairing-token sockets, because pairing tokens are issued
+without authentication. Past that share, or at the relay-wide cap while any
+such socket is open, a new socket evicts the oldest of them instead of being
+refused, so a flood of such sockets cannot lock out clients that send `hello`
+right away. An evicted socket keeps its slot for the fraction of a second it
+takes to close, so sockets closing after an eviction at the cap may exceed it
+by 5% (at least one). Every socket holds its own slot, so each of a member's
+up to four routed sockets counts against these caps. A closing pairing socket
+sends its room no leave notice, so it never waits for a peer that stopped
+reading. A pairing-token socket is also closed when its pairing session
+expires. A socket that has not sent a valid `hello` within 10 seconds of the
+upgrade is closed, even while it keeps sending other messages or stops reading
+the relay's replies; no message extends that deadline. A room member's socket
+is closed after 60 seconds of silence, as above. The caps still count
+sockets during those deadlines, so a client that keeps reopening idle sockets can deny
+connections to others sharing its address. Clients with enough addresses can
+hold the authenticated share by authenticating into rooms of their own. The
+IPv6 /48 caps assume one site per /48; where an ISP puts many customers in one
+/48, they share these caps, and one of them can spend them for the rest.
 
 Webhooks carry metadata only: opaque IDs, item kind, encrypted size, timestamp,
 status. Destination checks must include DNS results, IPv4/IPv6 special ranges,

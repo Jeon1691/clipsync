@@ -5,8 +5,11 @@
 
 mod auth;
 mod client_ip;
+mod connection_limits;
 mod join_limits;
 mod metrics;
+mod rate_limit;
+mod resource_limits;
 mod state;
 mod transport;
 mod webhook;
@@ -35,6 +38,7 @@ pub use join_limits::PairingJoinLimits;
 #[cfg(test)]
 use join_limits::IP_FAILED_JOIN_LIMIT;
 pub use metrics::{MetricsToken, MIN_METRICS_TOKEN_BYTES};
+pub use resource_limits::RelayResourceLimits;
 pub use state::{RelayState, MAX_MEMBER_SOCKETS};
 pub use transport::RelayTransportConfig;
 
@@ -118,6 +122,7 @@ pub async fn serve_with_transport(
 ) -> anyhow::Result<()> {
     let tls = transport.tls_config(&config.public_url)?;
     transport.join_limits.validate()?;
+    transport.resource_limits.validate()?;
     let listener = std::net::TcpListener::bind(config.bind)?;
     let addr = listener.local_addr()?;
     if !transport.trusted_proxies.is_empty() {
@@ -137,10 +142,14 @@ pub async fn serve_with_transport(
     if transport.join_limits != PairingJoinLimits::default() {
         info!(limits = ?transport.join_limits, "using configured pairing-join limits");
     }
-    let app = router_with_join_policy(
+    if transport.resource_limits != RelayResourceLimits::default() {
+        info!(limits = ?transport.resource_limits, "using configured resource limits");
+    }
+    let app = router_with_limits(
         config,
         transport.trusted_proxies.clone(),
         transport.join_limits,
+        transport.resource_limits,
     )?
     .into_make_service_with_connect_info::<SocketAddr>();
     let server = axum_server::from_tcp(listener)?.first_request_timeout(Duration::from_secs(10));
@@ -169,10 +178,28 @@ pub fn router_with_join_policy(
     trusted_proxies: Vec<ipnet::IpNet>,
     join_limits: PairingJoinLimits,
 ) -> anyhow::Result<Router> {
-    Ok(router_with_state(Arc::new(RelayState::with_join_policy(
+    router_with_limits(
         config,
         trusted_proxies,
         join_limits,
+        RelayResourceLimits::default(),
+    )
+}
+
+/// Like [`router_with_join_policy`], also applying `resource_limits` to
+/// pairing creation, held state and WebSocket connections. Fails if either set
+/// of limits does not validate.
+pub fn router_with_limits(
+    config: RelayConfig,
+    trusted_proxies: Vec<ipnet::IpNet>,
+    join_limits: PairingJoinLimits,
+    resource_limits: RelayResourceLimits,
+) -> anyhow::Result<Router> {
+    Ok(router_with_state(Arc::new(RelayState::with_limits(
+        config,
+        trusted_proxies,
+        join_limits,
+        resource_limits,
     )?)))
 }
 
@@ -200,8 +227,13 @@ async fn healthz() -> Json<serde_json::Value> {
     Json(serde_json::json!({"ok": true, "service": "clipsync-relay"}))
 }
 
+/// Creations that fail to decode ([`RequestJson`]), name another protocol
+/// version or are otherwise invalid create nothing and are not charged to the
+/// creation budget; [`RelayState::create_pairing`] charges accepted ones.
 async fn create_pairing(
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
     State(state): State<Arc<RelayState>>,
+    headers: HeaderMap,
     RequestJson(req): RequestJson<CreatePairingRequest>,
 ) -> Result<Json<CreatePairingResponse>, (StatusCode, Json<ErrorBody>)> {
     if req.protocol_version != clipsync_protocol::PROTOCOL_VERSION {
@@ -211,10 +243,21 @@ async fn create_pairing(
             "unsupported protocol version",
         ));
     }
-    let created = state
-        .create_pairing(req)
-        .map_err(|e| err(StatusCode::BAD_REQUEST, "pairing_create", &e))?;
-    Ok(Json(created))
+    let client = state.client_ip(addr.ip(), &headers);
+    match state.create_pairing(req, client) {
+        Ok(created) => Ok(Json(created)),
+        Err(CreateError::Throttled) => Err(err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_pairings",
+            "pairing creation limit reached; wait a few minutes and try again",
+        )),
+        Err(CreateError::Full) => Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "relay_full",
+            "the relay cannot hold more pairing sessions or rooms right now; try again later",
+        )),
+        Err(CreateError::Invalid(m)) => Err(err(StatusCode::BAD_REQUEST, "pairing_create", &m)),
+    }
 }
 
 /// Joins that fail to decode ([`RequestJson`]) or name another protocol
@@ -304,6 +347,15 @@ fn err(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<Error
             message: message.into(),
         }),
     )
+}
+
+#[derive(Debug)]
+pub enum CreateError {
+    /// A pairing-creation budget is spent.
+    Throttled,
+    /// The open-session or room cap is reached.
+    Full,
+    Invalid(String),
 }
 
 #[derive(Debug)]

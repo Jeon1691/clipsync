@@ -198,10 +198,10 @@ limit is 393,216 bytes (384 KiB).
 | Endpoint | Request | Success response |
 | --- | --- | --- |
 | `GET /healthz` | No body or authentication. | `200`, JSON `{ok: true, service: "clipsync-relay"}`. |
-| `GET /metrics` | Disabled unless the operator sets `CLIPSYNC_RELAY_METRICS_TOKEN` or `CLIPSYNC_RELAY_METRICS_TOKEN_FILE`; disabled returns `404`. When enabled, requires `Authorization: Bearer <token>`; a missing, malformed, or wrong token returns `401` with `WWW-Authenticate: Bearer`. | `200`, plain text metric lines: `clipsync_ws_connections`, `clipsync_frames_forwarded`, `clipsync_pairing_ok`, `clipsync_pairing_fail`, `clipsync_pairing_throttled` (joins refused because a failed-join budget was spent), `clipsync_expired`, each followed by a numeric value and newline. |
-| `POST /v1/pairing/create` | `{pairing_session_id, device_id, device_name, os: string, protocol_version: u16, ttl_secs?: u64\|null}`. Version must be `1`. | `{room_id, pairing_code, pairing_token: string, expires_at: time, ws_path: "/v1/ws"}`. Pairing code is a six-character decimal string, valid for 120 seconds. `ttl_secs` defaults to 60 and is clamped to 10–300 as the room's stored default TTL. |
+| `GET /metrics` | Disabled unless the operator sets `CLIPSYNC_RELAY_METRICS_TOKEN` or `CLIPSYNC_RELAY_METRICS_TOKEN_FILE`; disabled returns `404`. When enabled, requires `Authorization: Bearer <token>`; a missing, malformed, or wrong token returns `401` with `WWW-Authenticate: Bearer`. | `200`, plain text metric lines: `clipsync_ws_connections` (sockets past a valid `hello`, pairing or room member), `clipsync_frames_forwarded`, `clipsync_pairing_ok`, `clipsync_pairing_fail`, `clipsync_pairing_throttled` (joins refused because a failed-join budget was spent), `clipsync_expired`, `clipsync_ws_sockets` (open WebSocket connections holding a connection slot, authenticated or not), `clipsync_ws_refused` (upgrades refused by a connection cap), `clipsync_pairing_sessions` (pairing sessions held), `clipsync_pairing_create_throttled` (creations refused by a creation budget), `clipsync_pairing_create_full` (creations refused by the session cap, or by a room cap where every room has a device online), `clipsync_rooms`, `clipsync_queue_full` (offline text envelopes not queued because the queue, or the sender's share of it, was full), `clipsync_rooms_evicted` (idle rooms evicted at the room cap), each followed by a numeric value and newline. |
+| `POST /v1/pairing/create` | `{pairing_session_id, device_id, device_name, os: string, protocol_version: u16, ttl_secs?: u64\|null}`. Version must be `1`. | `{room_id, pairing_code, pairing_token: string, expires_at: time, ws_path: "/v1/ws"}`. Pairing code is a six-character decimal string, valid for 120 seconds. `ttl_secs` defaults to 60 and is clamped to 10–300 as the room's stored default TTL. `device_name` and `os` are at most 256 bytes each (the same limit applies to join fields); `pairing_session_id` and `device_id` follow the ID rule above. |
 | `POST /v1/pairing/join` | `{pairing_code, device_id, device_name, os: string, protocol_version: u16}`. Version must be `1`; joiner must be a different device. | `{pairing_session_id, room_id, pairing_token: string, peer: PeerInfo, expires_at: time, ws_path: "/v1/ws"}`. `peer` describes the creator. One joiner per session. |
-| `GET /v1/ws[?token=TOKEN]` | Standard WebSocket upgrade; optional query token. Authentication occurs in the `hello` text frame after upgrade. | `101 Switching Protocols`, then the messages below. |
+| `GET /v1/ws[?token=TOKEN]` | Standard WebSocket upgrade; optional query token. Authentication occurs in the `hello` text frame after upgrade. | `101 Switching Protocols`, then the messages below. Refused before the upgrade when a connection cap is reached (see the error table). The relay closes a socket that sends no valid `hello` within 10 seconds, or that is silent for 60 seconds after `hello`. Before `hello`, a socket may also be closed to admit a newer one once unauthenticated sockets hold their share of the connection slots, or the relay holds its maximum of connections. |
 
 Handler-generated HTTP failures have the JSON shape
 `{"code":"code_invalid","message":"unknown pairing code"}`:
@@ -210,7 +210,11 @@ Handler-generated HTTP failures have the JSON shape
 | --- | --- | --- |
 | create or join / 400 | `protocol_version` | Unsupported protocol version. |
 | create or join / 400 | `invalid_request` | Body is not valid JSON or does not match the request type, including an ID that fails the rule above. The message is fixed and does not quote the input. |
-| create / 400 | `pairing_create` | Pairing creation failed, for example code allocation failure. |
+| create / 400 | `pairing_create` | Invalid creation request, for example a `device_name` or `os` longer than 256 bytes. |
+| create / 429 | `too_many_pairings` | The client's or the relay-wide pairing-creation budget is spent. |
+| create / 503 | `relay_full` | The relay holds its maximum of open pairing sessions, or every room at the room cap has a device online. |
+| ws / 429 | `too_many_connections` | The client address, or its IPv6 /48, holds its maximum of WebSocket connections. |
+| ws / 503 | `relay_full` | The relay holds its maximum of WebSocket connections. |
 | join / 404 | `code_invalid` | Unknown code, including expired sessions already removed by cleanup. |
 | join / 410 | `code_expired` | Session exists but has expired. |
 | join / 429 | `too_many_attempts` | Pairing attempt limit reached: the session's attempts, the client's failed joins, or the relay-wide failed-join budget. Returned even for a correct code once a failure budget is spent. |
@@ -267,7 +271,8 @@ as `null` when unset.
 
 `AckStatus` values are `accepted`, `streaming`, `delivered`, `expired`,
 `rejected`, `too_large`, `peer_offline`. For text, relay `accepted` means queued
-for offline peers, and `delivered` means forwarded to at least one online
+for offline peers, `peer_offline` with a `detail` means no peer was online and
+the relay's offline queue, or the sender's share of it, was full, and `delivered` means forwarded to at least one online
 connection; neither proves a clipboard write. A binary manifest gets
 `streaming` when an online peer exists, otherwise `peer_offline`. Binary
 frames with no peer receive `peer_offline` with `message_id: "chunk"` and a
