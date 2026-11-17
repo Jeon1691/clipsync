@@ -52,7 +52,6 @@ hex = "0.4"
 hkdf = "0.13"
 hmac = "0.13"
 hostname = "0.4"
-humantime = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
 infer = "0.19"
 ipnet = "2"

@@ -1,11 +1,333 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
-//! Temporary shim: characterization tests run against humantime first.
+//! `room create --ttl` duration parsing.
+//!
+//! This replaces `humantime::parse_duration` 2.4.0, which RUSTSEC-2026-0542
+//! marks unmaintained. It accepts the same grammar and prints the same error
+//! text, so existing scripts and documented values keep working:
+//!
+//! * a duration is one or more `<number><unit>` spans, e.g. `1m30s` or `1h 5min`;
+//! * a number is decimal digits with an optional `.` fraction; whitespace is
+//!   skipped inside a number and between a number and its unit;
+//! * a unit is a run of ASCII letters or `µ` from [`Unit::from_name`];
+//! * the bare string `0` is zero.
+//!
+//! Values are exact: a fraction that cannot be represented in whole
+//! nanoseconds (or whole seconds for hours and longer) is rejected, as is
+//! anything that overflows `u64` seconds.
 
+use std::fmt;
+use std::str::Chars;
 use std::time::Duration;
 
-pub(crate) fn parse_duration(input: &str) -> Result<Duration, humantime::DurationError> {
-    humantime::parse_duration(input)
+/// Radix of the accepted decimal numbers.
+const DECIMAL_RADIX: u64 = 10;
+const NANOS_PER_MICRO: u64 = 1_000;
+const NANOS_PER_MILLI: u64 = 1_000_000;
+const NANOS_PER_SEC: u64 = 1_000_000_000;
+const SECS_PER_MIN: u64 = 60;
+const NANOS_PER_MIN: u64 = SECS_PER_MIN * NANOS_PER_SEC;
+const MINS_PER_HOUR: u64 = 60;
+const SECS_PER_HOUR: u64 = MINS_PER_HOUR * SECS_PER_MIN;
+const HOURS_PER_DAY: u64 = 24;
+const SECS_PER_DAY: u64 = HOURS_PER_DAY * SECS_PER_HOUR;
+const DAYS_PER_WEEK: u64 = 7;
+const SECS_PER_WEEK: u64 = DAYS_PER_WEEK * SECS_PER_DAY;
+/// humantime's month: 30.44 days (mean Gregorian month, rounded).
+const SECS_PER_MONTH: u64 = 2_630_016;
+/// Julian year: 365.25 days.
+const SECS_PER_YEAR: u64 = 31_557_600;
+
+/// Why a duration was rejected. `Display` matches humantime 2.4.0 verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DurationError {
+    /// A character that is not a digit, letter, `µ`, `.` or whitespace, at this byte offset.
+    InvalidCharacter(usize),
+    /// A number was required at this byte offset.
+    NumberExpected(usize),
+    /// The unit is missing or not recognized; `value` is the span's integer part.
+    UnknownUnit { unit: String, value: u64 },
+    /// The value overflows or needs sub-nanosecond (or, for hours and longer,
+    /// sub-second) precision.
+    NumberOverflow,
+    /// The input was empty or only whitespace.
+    Empty,
+}
+
+impl std::error::Error for DurationError {}
+
+impl fmt::Display for DurationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidCharacter(offset) => write!(f, "invalid character at {offset}"),
+            Self::NumberExpected(offset) => write!(f, "expected number at {offset}"),
+            Self::UnknownUnit { unit, value } if unit.is_empty() => {
+                write!(f, "time unit needed, for example {value}sec or {value}ms")
+            }
+            Self::UnknownUnit { unit, .. } => write!(
+                f,
+                "unknown time unit {unit:?}, supported units: ns, us/µs, ms, sec, min, \
+                 hours, days, weeks, months, years (and few variations)"
+            ),
+            Self::NumberOverflow => f.write_str(
+                "number is too large or cannot be represented without a lack of precision \
+                 (values below 1ns are not supported)",
+            ),
+            Self::Empty => f.write_str("value was empty"),
+        }
+    }
+}
+
+/// Parse a human-friendly duration such as `2m`, `45s` or `1m 30s`.
+pub(crate) fn parse_duration(input: &str) -> Result<Duration, DurationError> {
+    if input == "0" {
+        return Ok(Duration::ZERO);
+    }
+    Parser {
+        src: input,
+        chars: input.chars(),
+    }
+    .parse()
+}
+
+/// Amount added per unit of a span's integer or fractional part.
+#[derive(Clone, Copy)]
+enum Scale {
+    Nanos(u64),
+    Secs(u64),
+}
+
+#[derive(Clone, Copy)]
+enum Unit {
+    Nanosecond,
+    Microsecond,
+    Millisecond,
+    Second,
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+    Year,
+}
+
+impl Unit {
+    fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "nanos" | "nsec" | "ns" => Self::Nanosecond,
+            "usec" | "us" | "µs" => Self::Microsecond,
+            "millis" | "msec" | "ms" => Self::Millisecond,
+            "seconds" | "second" | "secs" | "sec" | "s" => Self::Second,
+            "minutes" | "minute" | "min" | "mins" | "m" => Self::Minute,
+            "hours" | "hour" | "hr" | "hrs" | "h" => Self::Hour,
+            "days" | "day" | "d" => Self::Day,
+            "weeks" | "week" | "wk" | "wks" | "w" => Self::Week,
+            "months" | "month" | "M" => Self::Month,
+            "years" | "year" | "yr" | "yrs" | "y" => Self::Year,
+            _ => return None,
+        })
+    }
+
+    /// Scale of the integer part.
+    fn whole(self) -> Scale {
+        match self {
+            Self::Nanosecond => Scale::Nanos(1),
+            Self::Microsecond => Scale::Nanos(NANOS_PER_MICRO),
+            Self::Millisecond => Scale::Nanos(NANOS_PER_MILLI),
+            Self::Second => Scale::Secs(1),
+            Self::Minute => Scale::Secs(SECS_PER_MIN),
+            Self::Hour => Scale::Secs(SECS_PER_HOUR),
+            Self::Day => Scale::Secs(SECS_PER_DAY),
+            Self::Week => Scale::Secs(SECS_PER_WEEK),
+            Self::Month => Scale::Secs(SECS_PER_MONTH),
+            Self::Year => Scale::Secs(SECS_PER_YEAR),
+        }
+    }
+
+    /// Scale of the fractional part; `None` when no fraction is representable.
+    /// Up to minutes a fraction resolves to whole nanoseconds, from hours on to
+    /// whole seconds (humantime's precision rule).
+    fn fraction(self) -> Option<Scale> {
+        match self {
+            Self::Nanosecond => None,
+            Self::Microsecond => Some(Scale::Nanos(NANOS_PER_MICRO)),
+            Self::Millisecond => Some(Scale::Nanos(NANOS_PER_MILLI)),
+            Self::Second => Some(Scale::Nanos(NANOS_PER_SEC)),
+            Self::Minute => Some(Scale::Nanos(NANOS_PER_MIN)),
+            Self::Hour | Self::Day | Self::Week | Self::Month | Self::Year => Some(self.whole()),
+        }
+    }
+}
+
+/// Digits after a `.`: `numerator / denominator`, with `denominator` a power of ten.
+#[derive(Clone, Copy)]
+struct Fraction {
+    numerator: u64,
+    denominator: u64,
+}
+
+fn checked_mul(a: u64, b: u64) -> Result<u64, DurationError> {
+    a.checked_mul(b).ok_or(DurationError::NumberOverflow)
+}
+
+fn checked_add(a: u64, b: u64) -> Result<u64, DurationError> {
+    a.checked_add(b).ok_or(DurationError::NumberOverflow)
+}
+
+/// Exact division; a remainder would lose precision.
+fn exact_div(a: u64, b: u64) -> Result<u64, DurationError> {
+    if a.is_multiple_of(b) {
+        Ok(a / b)
+    } else {
+        Err(DurationError::NumberOverflow)
+    }
+}
+
+/// `value * 10 + digit`, failing on `u64` overflow.
+fn push_digit(value: u64, digit: char) -> Result<u64, DurationError> {
+    checked_add(checked_mul(value, DECIMAL_RADIX)?, digit_value(digit))
+}
+
+fn digit_value(digit: char) -> u64 {
+    u64::from(digit) - u64::from('0')
+}
+
+fn is_unit_char(c: char) -> bool {
+    c.is_ascii_alphabetic() || c == 'µ'
+}
+
+struct Parser<'a> {
+    src: &'a str,
+    chars: Chars<'a>,
+}
+
+impl Parser<'_> {
+    /// Byte offset of the next unread character.
+    fn offset(&self) -> usize {
+        self.src.len() - self.chars.as_str().len()
+    }
+
+    fn parse(mut self) -> Result<Duration, DurationError> {
+        let mut total = Duration::ZERO;
+        let mut value = self.first_digit()?.ok_or(DurationError::Empty)?;
+        'span: loop {
+            // Rest of the number, up to and including the unit's first letter.
+            let mut fraction = None;
+            let mut offset = self.offset();
+            while let Some(c) = self.chars.next() {
+                match c {
+                    '0'..='9' => value = push_digit(value, c)?,
+                    c if c.is_whitespace() => {}
+                    c if is_unit_char(c) => break,
+                    '.' => {
+                        fraction = Some(self.fraction(&mut offset)?);
+                        break;
+                    }
+                    _ => return Err(DurationError::InvalidCharacter(offset)),
+                }
+                offset = self.offset();
+            }
+            // Rest of the unit; a digit starts the next span directly (`1m30s`).
+            let unit_start = offset;
+            let mut unit_end = self.offset();
+            while let Some(c) = self.chars.next() {
+                match c {
+                    '0'..='9' => {
+                        self.add_span(value, fraction, unit_start, unit_end, &mut total)?;
+                        value = digit_value(c);
+                        continue 'span;
+                    }
+                    c if c.is_whitespace() => break,
+                    c if is_unit_char(c) => {}
+                    _ => return Err(DurationError::InvalidCharacter(unit_end)),
+                }
+                unit_end = self.offset();
+            }
+            self.add_span(value, fraction, unit_start, unit_end, &mut total)?;
+            match self.first_digit()? {
+                Some(digit) => value = digit,
+                None => return Ok(total),
+            }
+        }
+    }
+
+    /// Skip whitespace and read the first digit of the next span, if any.
+    fn first_digit(&mut self) -> Result<Option<u64>, DurationError> {
+        let offset = self.offset();
+        for c in self.chars.by_ref() {
+            match c {
+                '0'..='9' => return Ok(Some(digit_value(c))),
+                c if c.is_whitespace() => {}
+                _ => return Err(DurationError::NumberExpected(offset)),
+            }
+        }
+        Ok(None)
+    }
+
+    /// Read digits after a `.`, up to and including the unit's first letter.
+    fn fraction(&mut self, offset: &mut usize) -> Result<Fraction, DurationError> {
+        let mut numerator = 0;
+        let mut denominator: u64 = 1;
+        while let Some(c) = self.chars.next() {
+            match c {
+                '0'..='9' => {
+                    denominator = checked_mul(denominator, DECIMAL_RADIX)?;
+                    numerator = push_digit(numerator, c)?;
+                }
+                c if c.is_whitespace() => {}
+                c if is_unit_char(c) => break,
+                _ => return Err(DurationError::InvalidCharacter(*offset)),
+            }
+            *offset = self.offset();
+        }
+        if denominator == 1 {
+            // No digit after the separator, e.g. `1.` or `1.s`.
+            return Err(DurationError::InvalidCharacter(*offset));
+        }
+        Ok(Fraction {
+            numerator,
+            denominator,
+        })
+    }
+
+    fn add_span(
+        &self,
+        value: u64,
+        fraction: Option<Fraction>,
+        unit_start: usize,
+        unit_end: usize,
+        total: &mut Duration,
+    ) -> Result<(), DurationError> {
+        let name = &self.src[unit_start..unit_end];
+        let unit = Unit::from_name(name).ok_or_else(|| DurationError::UnknownUnit {
+            unit: name.to_owned(),
+            value,
+        })?;
+        *total = match unit.whole() {
+            Scale::Nanos(factor) => add(*total, 0, checked_mul(value, factor)?)?,
+            Scale::Secs(factor) => add(*total, checked_mul(value, factor)?, 0)?,
+        };
+        if let Some(Fraction {
+            numerator,
+            denominator,
+        }) = fraction
+        {
+            let scaled = |factor| exact_div(checked_mul(numerator, factor)?, denominator);
+            *total = match unit.fraction().ok_or(DurationError::NumberOverflow)? {
+                Scale::Nanos(factor) => add(*total, 0, scaled(factor)?)?,
+                Scale::Secs(factor) => add(*total, scaled(factor)?, 0)?,
+            };
+        }
+        Ok(())
+    }
+}
+
+/// `total + secs + nanos`, failing instead of panicking on overflow.
+fn add(total: Duration, secs: u64, nanos: u64) -> Result<Duration, DurationError> {
+    let nanos = checked_add(u64::from(total.subsec_nanos()), nanos)?;
+    let secs = checked_add(checked_add(total.as_secs(), secs)?, nanos / NANOS_PER_SEC)?;
+    // Below one second, so this sum cannot carry into (and overflow) `secs`.
+    Ok(Duration::from_secs(secs) + Duration::from_nanos(nanos % NANOS_PER_SEC))
 }
 
 #[cfg(test)]
@@ -181,5 +503,24 @@ mod tests {
             parse_duration("18446744073709551615s").unwrap(),
             Duration::from_secs(u64::MAX)
         );
+    }
+
+    #[test]
+    fn ttl_duration_nanosecond_carry_overflow_is_an_error_not_a_panic() {
+        // humantime 2.4.0 panicked in `Duration::new` when exactly one second of
+        // nanoseconds carried into `u64::MAX` seconds, aborting `room create`.
+        for input in [
+            "18446744073709551615s 1000000000ns",
+            "18446744073709551615s1000ms",
+            "18446744073709551615s 0.5s 0.5s",
+        ] {
+            assert!(
+                matches!(
+                    parse_duration(input),
+                    Err(super::DurationError::NumberOverflow)
+                ),
+                "{input:?}"
+            );
+        }
     }
 }
