@@ -147,6 +147,13 @@ fn commit_blocking(
     payload: &[u8],
 ) -> Result<Vec<PathBuf>> {
     let names = validated_names(files, payload)?;
+    // Reclaim abandoned staging before writing anything new, so leftovers
+    // that filled the disk cannot make every later commit fail before its
+    // cleanup runs. Best effort: if even the lock cannot be taken, staging
+    // below reports the real error. The lock is released while staging.
+    if let Ok(_lock) = publish_lock(root) {
+        sweep_stale_staging(root, SystemTime::now(), STALE_STAGING_AGE);
+    }
     let dest_dir = root.join(id);
     let staged = OwnedDir {
         path: root.join(scratch_name(id, PARTIAL_SUFFIX)),
@@ -164,22 +171,29 @@ fn commit_blocking(
         offset = end;
     }
     let retired = {
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(root.join(PUBLISH_LOCK_NAME))?;
-        restrict(&root.join(PUBLISH_LOCK_NAME), PRIVATE_FILE_MODE);
-        // Released when `lock` is closed at the end of this block, before
+        // Released when `_lock` is closed at the end of this block, before
         // the retired directory is removed outside the critical section.
-        lock.lock()?;
-        // Under the lock, so no live publisher is between its two renames
-        // while the sweep decides whether a retired commit is orphaned.
-        sweep_stale_staging(root, SystemTime::now(), STALE_STAGING_AGE);
+        let _lock = publish_lock(root)?;
         publish(root, id, &staged.path, &dest_dir, &names, files)?
     };
     drop(retired);
     Ok(names.into_iter().map(|name| dest_dir.join(name)).collect())
+}
+
+/// Open and exclusively lock the inbox publish lock; closing the returned
+/// file releases it. Every inspection or rename of a published transfer or
+/// retired directory happens while holding it, so the sweep never sees a
+/// live publisher between its two renames.
+fn publish_lock(root: &Path) -> std::io::Result<std::fs::File> {
+    let path = root.join(PUBLISH_LOCK_NAME);
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)?;
+    restrict(&path, PRIVATE_FILE_MODE);
+    lock.lock()?;
+    Ok(lock)
 }
 
 /// Check every name and hash before anything touches the filesystem.
@@ -284,7 +298,9 @@ fn file_hash(path: &Path) -> std::io::Result<String> {
 
 /// Clean up after receivers that stopped mid-commit, handling at most
 /// `STALE_STAGING_REMOVALS_PER_COMMIT` directories. The caller holds the
-/// publish lock, so no live publisher is between its two renames.
+/// publish lock, so no live publisher is between its two renames. Commits
+/// run this before staging, so leftovers that fill the disk are reclaimed
+/// before the next commit needs the space.
 ///
 /// - A partial directory last modified more than `max_age` before `now` is
 ///   removed; a fresher one may belong to a receiver still writing it.
@@ -726,6 +742,52 @@ mod tests {
             std::fs::read(staging.inbox().join(finished.as_str()).join("a.txt")).unwrap(),
             b"payload"
         );
+    }
+
+    /// Cleanup must come before a commit writes its own staging: when
+    /// abandoned staging has filled the disk, a sweep that only ran after
+    /// staging would never be reached. The commit therefore sweeps under the
+    /// publish lock before it creates its partial directory.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn abandoned_staging_is_reclaimed_before_a_commit_writes_its_own() {
+        let root = tempfile::tempdir().unwrap();
+        let inbox = root.path().join("inbox");
+        let staging = StagingArea::new(inbox.clone()).unwrap();
+        let orphaned = TransferId::new();
+        let orphan = inbox.join(scratch_name(orphaned.as_str(), RETIRED_SUFFIX));
+        std::fs::create_dir(&orphan).unwrap();
+        std::fs::write(orphan.join("kept.txt"), b"kept").unwrap();
+        let held = publish_lock(&inbox).unwrap();
+        let id = TransferId::new();
+        let commit = tokio::spawn({
+            let id = id.clone();
+            async move {
+                let manifest = clipsync_protocol::FileManifest {
+                    name: "report.txt".into(),
+                    size: 7,
+                    mime: None,
+                    hash: blake3_hex(b"payload"),
+                };
+                staging.commit_files(&id, &[manifest], b"payload").await
+            }
+        });
+        tokio::time::sleep(BLOCKED_PUBLISH_WINDOW).await;
+        let own_partials = std::fs::read_dir(&inbox)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(&format!(".{id}.")))
+            .count();
+        assert_eq!(
+            own_partials, 0,
+            "staged before reclaiming abandoned staging"
+        );
+        drop(held);
+        commit.await.unwrap().unwrap();
+        assert_eq!(
+            std::fs::read(inbox.join(orphaned.as_str()).join("kept.txt")).unwrap(),
+            b"kept"
+        );
+        assert!(!orphan.exists());
     }
 
     #[test]
