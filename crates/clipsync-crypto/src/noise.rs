@@ -7,6 +7,9 @@ use crate::{CryptoError, Result};
 
 pub const NOISE_PATTERN: &str = "Noise_KK_25519_AESGCM_SHA256";
 
+/// Maximum Noise message length (Noise specification, section 3).
+const NOISE_MAX_MESSAGE_LEN: usize = 65_535;
+
 pub struct NoiseSession {
     transport: TransportState,
 }
@@ -45,16 +48,31 @@ impl NoiseHandshake {
         Ok(Self { inner })
     }
 
+    /// Next handshake message with an empty payload, as released clients send.
     pub fn write_message(&mut self) -> Result<Vec<u8>> {
-        let mut buf = vec![0u8; 1024];
-        let len = self.inner.write_message(&[], &mut buf).map_err(noise_err)?;
-        Ok(buf[..len].to_vec())
+        self.write_message_with_payload(&[])
     }
 
-    pub fn read_message(&mut self, msg: &[u8]) -> Result<()> {
-        let mut buf = vec![0u8; 1024];
-        self.inner.read_message(msg, &mut buf).map_err(noise_err)?;
-        Ok(())
+    /// Next handshake message carrying `payload`. In `KK` both messages are
+    /// encrypted and authenticated under the static keys of both devices.
+    pub fn write_message_with_payload(&mut self, payload: &[u8]) -> Result<Vec<u8>> {
+        let mut buf = vec![0u8; NOISE_MAX_MESSAGE_LEN];
+        let len = self
+            .inner
+            .write_message(payload, &mut buf)
+            .map_err(noise_err)?;
+        buf.truncate(len);
+        Ok(buf)
+    }
+
+    /// Read the peer's next handshake message and return its decrypted payload.
+    /// On failure the handshake state is left as it was before the call.
+    pub fn read_message(&mut self, msg: &[u8]) -> Result<Vec<u8>> {
+        // The payload is never longer than the message that carries it.
+        let mut buf = vec![0u8; msg.len().min(NOISE_MAX_MESSAGE_LEN)];
+        let len = self.inner.read_message(msg, &mut buf).map_err(noise_err)?;
+        buf.truncate(len);
+        Ok(buf)
     }
 
     pub fn is_finished(&self) -> bool {
@@ -91,6 +109,98 @@ impl NoiseSession {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    /// The read path of released clients (v0.1.0 through v0.2.0): the payload
+    /// is decrypted into a fixed 1024-byte buffer and then discarded.
+    fn legacy_read(state: &mut snow::HandshakeState, msg: &[u8]) -> bool {
+        let mut buf = vec![0u8; clipsync_protocol::LEGACY_HANDSHAKE_PAYLOAD_MAX_BYTES];
+        state.read_message(msg, &mut buf).is_ok()
+    }
+
+    fn legacy_state(
+        local: &StaticSecret,
+        remote: &PublicKey,
+        initiator: bool,
+    ) -> snow::HandshakeState {
+        let local = local.to_bytes();
+        let builder = Builder::new(NOISE_PATTERN.parse().unwrap())
+            .local_private_key(&local)
+            .unwrap()
+            .remote_public_key(remote.as_bytes())
+            .unwrap();
+        if initiator {
+            builder.build_initiator().unwrap()
+        } else {
+            builder.build_responder().unwrap()
+        }
+    }
+
+    #[test]
+    fn released_clients_complete_handshakes_that_carry_a_payload_up_to_their_limit() {
+        let new = StaticSecret::from([61u8; 32]);
+        let old = StaticSecret::from([62u8; 32]);
+        let limit = clipsync_protocol::LEGACY_HANDSHAKE_PAYLOAD_MAX_BYTES;
+        let capabilities = clipsync_protocol::HandshakeCapabilities::accepting(&[1, 2])
+            .encode()
+            .unwrap();
+        for payload in [capabilities, vec![b'x'; limit]] {
+            // New initiator, released responder.
+            let mut init = NoiseHandshake::initiator(&new, &PublicKey::from(&old)).unwrap();
+            let mut resp = legacy_state(&old, &PublicKey::from(&new), false);
+            assert!(legacy_read(
+                &mut resp,
+                &init.write_message_with_payload(&payload).unwrap()
+            ));
+            let mut reply = vec![0u8; NOISE_MAX_MESSAGE_LEN];
+            let len = resp.write_message(&[], &mut reply).unwrap();
+            assert!(init.read_message(&reply[..len]).unwrap().is_empty());
+            assert!(init.is_finished() && resp.is_handshake_finished());
+
+            // Released initiator, new responder.
+            let mut init = legacy_state(&old, &PublicKey::from(&new), true);
+            let mut resp = NoiseHandshake::responder(&new, &PublicKey::from(&old)).unwrap();
+            let mut first = vec![0u8; NOISE_MAX_MESSAGE_LEN];
+            let len = init.write_message(&[], &mut first).unwrap();
+            assert!(resp.read_message(&first[..len]).unwrap().is_empty());
+            assert!(legacy_read(
+                &mut init,
+                &resp.write_message_with_payload(&payload).unwrap()
+            ));
+            assert!(init.is_handshake_finished() && resp.is_finished());
+        }
+        // One byte more and the released client fails; encode() refuses that.
+        let mut init = NoiseHandshake::initiator(&new, &PublicKey::from(&old)).unwrap();
+        let mut resp = legacy_state(&old, &PublicKey::from(&new), false);
+        let message = init
+            .write_message_with_payload(&vec![b'x'; limit + 1])
+            .unwrap();
+        assert!(!legacy_read(&mut resp, &message));
+    }
+
+    #[test]
+    fn payloads_are_bound_to_the_pinned_static_keys() {
+        let a = StaticSecret::from([71u8; 32]);
+        let b = StaticSecret::from([72u8; 32]);
+        let impostor = StaticSecret::from([73u8; 32]);
+        let mut init = NoiseHandshake::initiator(&impostor, &PublicKey::from(&b)).unwrap();
+        let mut resp = NoiseHandshake::responder(&b, &PublicKey::from(&a)).unwrap();
+        let forged = init.write_message_with_payload(b"caps").unwrap();
+        assert!(resp.read_message(&forged).is_err(), "impostor accepted");
+        // The failed read left the responder usable for the genuine peer.
+        let mut genuine = NoiseHandshake::initiator(&a, &PublicKey::from(&b)).unwrap();
+        let first = genuine.write_message_with_payload(b"caps-a").unwrap();
+        assert_eq!(resp.read_message(&first).unwrap(), b"caps-a");
+        let second = resp.write_message_with_payload(b"caps-b").unwrap();
+        let mut tampered = second.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        assert!(
+            genuine.read_message(&tampered).is_err(),
+            "tampered reply accepted"
+        );
+        assert_eq!(genuine.read_message(&second).unwrap(), b"caps-b");
+        assert!(genuine.is_finished() && resp.is_finished());
+    }
 
     #[test]
     fn noise_kk_handshake() {

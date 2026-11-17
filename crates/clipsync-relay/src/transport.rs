@@ -32,6 +32,22 @@ pub struct RelayTransportConfig {
     /// Explicitly allow plaintext HTTP behind a TLS proxy or for local development
     #[arg(long, env = "CLIPSYNC_RELAY_ALLOW_HTTP")]
     pub allow_http: bool,
+    /// Comma-separated proxy addresses/CIDRs whose X-Forwarded-For identifies
+    /// clients for pairing limits; unset or empty uses only the TCP peer address
+    // The fully qualified `Vec` opts out of clap's one-value-per-entry
+    // handling, so the whole list goes through one parser that can skip
+    // empty entries instead of rejecting them.
+    #[arg(
+        long,
+        env = "CLIPSYNC_RELAY_TRUSTED_PROXIES",
+        action = clap::ArgAction::Set,
+        value_parser = crate::client_ip::parse_trusted_proxies,
+        default_value = "",
+        hide_default_value = true
+    )]
+    pub trusted_proxies: ::std::vec::Vec<ipnet::IpNet>,
+    #[command(flatten)]
+    pub join_limits: crate::PairingJoinLimits,
 }
 
 impl RelayTransportConfig {

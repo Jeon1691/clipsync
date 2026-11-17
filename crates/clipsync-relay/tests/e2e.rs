@@ -6,7 +6,10 @@ use std::time::Duration;
 use clipsync_clipboard::{ClipboardItem, FileRef, ImageMime, MockClipboard, SystemClipboard};
 use clipsync_core::{begin_create_room, join_room, App};
 use clipsync_crypto::blake3_hex;
-use clipsync_protocol::{FILE_MAX_COUNT, FRAME_HARD_CAP, IMAGE_MAX_BYTES, TEXT_MAX_BYTES};
+use clipsync_protocol::{
+    ClientRole, ControlMessage, CHUNK_SIZE, FILE_MAX_COUNT, FRAME_HARD_CAP, IMAGE_MAX_BYTES,
+    PROTOCOL_VERSION, TEXT_MAX_BYTES,
+};
 use clipsync_relay::{router, MetricsToken, RelayConfig};
 
 /// Scrape credential for this fixture's relay; readiness polls read `/metrics`.
@@ -330,6 +333,184 @@ async fn image_push_pull_writes_output() {
     assert_eq!(pulled.kind, "image");
     let saved = std::fs::read(out.join("clipboard.png")).unwrap();
     assert_eq!(saved, TINY_PNG);
+}
+
+type RelaySocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+// Bounds a single relay round trip on loopback; waits are condition-driven.
+const SESSION_FRAME_DEADLINE: Duration = Duration::from_secs(10);
+// Enough chunks that the push spans many relay frames, not one.
+const MULTI_CHUNK_PUSH_CHUNKS: usize = 4;
+
+/// Opens a room socket the way the sync daemon's session does (a device-token
+/// member hello for the home's current room) and waits for `HelloOk`.
+async fn daemon_session(dir: &TempDir) -> RelaySocket {
+    use futures_util::SinkExt;
+    let app = App::open_from(AppPaths::from_root(dir.path().to_path_buf())).unwrap();
+    let room = app.store.current_room().unwrap();
+    let identity = app.identity().unwrap();
+    let relay = app.store.load_config().unwrap().relay_url;
+    let (mut socket, _) =
+        tokio_tungstenite::connect_async(format!("{}/v1/ws", relay.replacen("http", "ws", 1)))
+            .await
+            .unwrap();
+    let hello = ControlMessage::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        device_id: identity.device_id.clone(),
+        device_name: "daemon session".into(),
+        os: "fixture".into(),
+        role: ClientRole::Member,
+        room_id: Some(room.room_id.clone()),
+        token: room.device_token.clone(),
+        pairing_session_id: None,
+    };
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            hello.encode().unwrap().into(),
+        ))
+        .await
+        .unwrap();
+    session_frames_until(&mut socket, |m| matches!(m, ControlMessage::HelloOk { .. }))
+        .await
+        .expect("daemon session closed before HelloOk");
+    socket
+}
+
+/// Control frames received before one matching `done`, or `None` if the relay
+/// closed the socket first.
+async fn session_frames_until(
+    socket: &mut RelaySocket,
+    done: impl Fn(&ControlMessage) -> bool,
+) -> Option<Vec<ControlMessage>> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    tokio::time::timeout(SESSION_FRAME_DEADLINE, async {
+        let mut before = Vec::new();
+        loop {
+            match socket.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    let message = ControlMessage::decode(&text).unwrap();
+                    if done(&message) {
+                        return Some(before);
+                    }
+                    before.push(message);
+                }
+                Some(Ok(Message::Ping(bytes))) => {
+                    let _ = socket.send(Message::Pong(bytes)).await;
+                }
+                Some(Ok(Message::Close(_)) | Err(_)) | None => return None,
+                Some(Ok(_)) => {}
+            }
+        }
+    })
+    .await
+    .expect("daemon session frame deadline")
+}
+
+/// Requires the daemon session to still be open and returns what it received.
+async fn daemon_still_open(socket: &mut RelaySocket, ts: i64) -> Vec<ControlMessage> {
+    use futures_util::SinkExt;
+    // A socket the relay already closed may refuse the write; the read below
+    // then reports the close.
+    let _ = socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            ControlMessage::Ping { ts }.encode().unwrap().into(),
+        ))
+        .await;
+    session_frames_until(
+        socket,
+        |m| matches!(m, ControlMessage::Pong { ts: received } if *received == ts),
+    )
+    .await
+    .expect("the relay closed the daemon session of a device running a CLI command")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn oneshot_pull_works_while_the_device_daemon_session_reconnects() {
+    let (relay, _h) = start_relay().await;
+    let (a_dir, b_dir) = pair_homes(&relay).await;
+    wait_for_connection_count(&relay, 0).await;
+    let mut daemon = daemon_session(&b_dir).await;
+    wait_for_connection_count(&relay, 1).await;
+
+    // `clipsync pull --wait` falls back to its own socket for the same device
+    // when the daemon has no item yet.
+    let store_b = store_in(&b_dir);
+    let pull = tokio::spawn(async move {
+        clipsync_core::engine_oneshot_pull(&store_b, false, true, None).await
+    });
+    wait_for_connection_count(&relay, 2).await;
+    daemon_still_open(&mut daemon, 1).await;
+
+    // The daemon's session drops and reconnects while the pull is waiting.
+    let mut reconnected = daemon_session(&b_dir).await;
+    wait_for_connection_count(&relay, 3).await;
+    daemon.close(None).await.unwrap();
+    wait_for_connection_count(&relay, 2).await;
+
+    clipsync_core::engine_oneshot_push(
+        &store_in(&a_dir),
+        ClipboardItem::Text {
+            text: "pulled beside the daemon".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let pulled = pull.await.unwrap().expect("pull beside the daemon session");
+    assert_eq!(pulled.text.as_deref(), Some("pulled beside the daemon"));
+    let daemon_frames = daemon_still_open(&mut reconnected, 2).await;
+    assert!(
+        daemon_frames
+            .iter()
+            .any(|m| matches!(m, ControlMessage::TextEnvelope { .. })),
+        "the daemon session must receive the text too: {daemon_frames:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn multi_chunk_oneshot_push_works_while_the_device_daemon_session_reconnects() {
+    let (relay, _h) = start_relay().await;
+    let (a_dir, b_dir) = pair_homes(&relay).await;
+    wait_for_connection_count(&relay, 0).await;
+    let mut daemon = daemon_session(&a_dir).await;
+    wait_for_connection_count(&relay, 1).await;
+
+    let out = b_dir.path().join("inbox");
+    let store_b = store_in(&b_dir);
+    let out_owned = out.clone();
+    let pull = tokio::spawn(async move {
+        clipsync_core::engine_oneshot_pull(&store_b, false, true, Some(out_owned)).await
+    });
+    wait_for_connection_count(&relay, 2).await;
+
+    // `clipsync push` sends files over its own socket even with a daemon up.
+    let payload: Vec<u8> = (0..CHUNK_SIZE * MULTI_CHUNK_PUSH_CHUNKS + 1)
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let item = ClipboardItem::Files {
+        files: vec![FileRef {
+            name: "beside-daemon.bin".into(),
+            bytes: payload.clone(),
+            mime: Some("application/octet-stream".into()),
+            staged_path: None,
+        }],
+    };
+    let store_a = store_in(&a_dir);
+    let push =
+        tokio::spawn(async move { clipsync_core::engine_oneshot_push(&store_a, item).await });
+    // The daemon reconnects while the push is in flight.
+    let mut reconnected = daemon_session(&a_dir).await;
+    push.await.unwrap().expect("push beside the daemon session");
+
+    let pulled = pull.await.unwrap().expect("multi-chunk pull");
+    assert_eq!(pulled.kind, "files");
+    assert_eq!(
+        std::fs::read(out.join("beside-daemon.bin")).unwrap(),
+        payload
+    );
+    daemon_still_open(&mut daemon, 1).await;
+    daemon_still_open(&mut reconnected, 2).await;
 }
 
 fn encode_image(format: image::ImageFormat) -> Vec<u8> {

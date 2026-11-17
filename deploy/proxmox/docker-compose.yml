@@ -17,6 +17,14 @@ services:
       CLIPSYNC_RELAY_ALLOW_HTTP: "true"
       CLIPSYNC_RELAY_BIND: 0.0.0.0:7600
       CLIPSYNC_RELAY_PUBLIC_URL: https://clipsync.develicit.dev
+      # cloudflared on the host reaches the loopback-published port, so every
+      # request reaches the relay from the gateway of the pinned network below.
+      # Trust only that address: the relay then reads the visitor address that
+      # Cloudflare appends as the last X-Forwarded-For hop, and gives each
+      # visitor its own pairing-join budget instead of one shared budget.
+      # Change it together with the network's gateway.
+      CLIPSYNC_RELAY_TRUSTED_PROXIES: 10.207.76.1
+    networks: [relay]
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -25,3 +33,12 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+
+networks:
+  relay:
+    # Pinned so the trusted gateway above is deterministic. Outside Docker's
+    # default address pools; pick another private /29 if it collides locally.
+    ipam:
+      config:
+        - subnet: 10.207.76.0/29
+          gateway: 10.207.76.1
