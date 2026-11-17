@@ -106,6 +106,19 @@ pub fn pairing_transcript(
     t
 }
 
+/// Bytes in a commitment field's length prefix: one big-endian `u32`.
+const COMMIT_FIELD_LEN_BYTES: usize = size_of::<u32>();
+
+/// The length prefix of a commitment field. Real fields are far shorter (an
+/// ID is at most `ID_MAX_LEN` bytes, a SPAKE2 message one group element), but
+/// the peer's message comes off the wire, so a field that does not fit is
+/// refused instead of being truncated into a prefix another split could share.
+fn length_prefix(len: usize) -> Result<[u8; COMMIT_FIELD_LEN_BYTES]> {
+    u32::try_from(len)
+        .map(u32::to_be_bytes)
+        .map_err(|_| CryptoError::Pairing("commitment field exceeds its 32-bit length prefix"))
+}
+
 /// Commitment input: the label and version, then every field with a 32-bit
 /// big-endian length prefix, so no two field splits encode alike.
 fn commitment_digest(
@@ -115,7 +128,7 @@ fn commitment_digest(
     device_b: &DeviceId,
     role: PairingRole,
     message: &[u8],
-) -> [u8; SPAKE2_COMMITMENT_LEN] {
+) -> Result<[u8; SPAKE2_COMMITMENT_LEN]> {
     let role: &[u8] = match role {
         PairingRole::A => b"A",
         PairingRole::B => b"B",
@@ -130,10 +143,10 @@ fn commitment_digest(
         role,
         message,
     ] {
-        hash.update((field.len() as u32).to_be_bytes());
+        hash.update(length_prefix(field.len())?);
         hash.update(field);
     }
-    hash.finalize().into()
+    Ok(hash.finalize().into())
 }
 
 /// Commitment to this side's SPAKE2 message, bound to the protocol version,
@@ -141,7 +154,7 @@ fn commitment_digest(
 /// message. The message itself is a fresh random group element, so it is
 /// its own hiding randomness and no separate nonce is needed (as in ZRTP's
 /// `hvi`); binding rests on SHA-256 collision resistance.
-pub fn spake2_commitment(state: &PairingState) -> [u8; SPAKE2_COMMITMENT_LEN] {
+pub fn spake2_commitment(state: &PairingState) -> Result<[u8; SPAKE2_COMMITMENT_LEN]> {
     commitment_digest(
         PROTOCOL_VERSION,
         &state.session_id,
@@ -169,7 +182,7 @@ pub fn verify_spake2_commitment(
         &state.device_b,
         peer_role,
         peer_message,
-    );
+    )?;
     use subtle::ConstantTimeEq;
     if commitment.len() != expected.len() || expected.ct_eq(commitment).unwrap_u8() != 1 {
         return Err(CryptoError::Commitment);
@@ -337,6 +350,20 @@ pub fn verify_confirm_mac(keys: &PairingKeys, role: PairingRole, mac: &[u8]) -> 
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_commitment_field_longer_than_its_length_prefix_is_refused() {
+        let widest = usize::try_from(u32::MAX).unwrap();
+        assert_eq!(length_prefix(widest).unwrap(), u32::MAX.to_be_bytes());
+        assert_eq!(length_prefix(0).unwrap(), 0u32.to_be_bytes());
+        // A longer field would wrap if cast, letting two inputs encode alike.
+        if let Some(too_long) = widest.checked_add(1) {
+            assert!(matches!(
+                length_prefix(too_long),
+                Err(CryptoError::Pairing(_))
+            ));
+        }
+    }
 
     #[test]
     fn pairing_roundtrip_same_code() {
@@ -647,7 +674,7 @@ mod tests {
         let b = DeviceId::from("dev-b");
         let sa = start_pairing_a(code, session.clone(), a.clone(), b.clone()).unwrap();
         let sb = start_pairing_b(code, session, a, b).unwrap();
-        let commitment = spake2_commitment(&sb);
+        let commitment = spake2_commitment(&sb).unwrap();
         let (msg_a, msg_b) = (sa.outbound.clone(), sb.outbound.clone());
         verify_spake2_commitment(&sa, &commitment, &msg_b).unwrap();
         (
@@ -685,7 +712,7 @@ mod tests {
         let b = DeviceId::from("dev-b");
         let code = random_code();
         let committed = seeded(PairingRole::B, 21, &code, &session, &a, &b);
-        let commitment = spake2_commitment(&committed);
+        let commitment = spake2_commitment(&committed).unwrap();
         // Only now does the creator send its message.
         let honest_a = start_pairing_a(&code, session.clone(), a.clone(), b.clone()).unwrap();
         let mut accepted = 0;
@@ -729,7 +756,8 @@ mod tests {
         let session = PairingSessionId::from("01JCLIPSYNCCOMMITVECTOR00");
         let a = DeviceId::from("dev-a");
         let b = DeviceId::from("dev-b");
-        let base = commitment_digest(PROTOCOL_VERSION, &session, &a, &b, PairingRole::B, b"msg");
+        let base =
+            commitment_digest(PROTOCOL_VERSION, &session, &a, &b, PairingRole::B, b"msg").unwrap();
         let changed = [
             commitment_digest(
                 PROTOCOL_VERSION + 1,
@@ -760,7 +788,7 @@ mod tests {
             commitment_digest(PROTOCOL_VERSION, &session, &a, &b, PairingRole::B, b"msh"),
         ];
         for other in changed {
-            assert_ne!(base, other);
+            assert_ne!(base, other.unwrap());
         }
     }
 
@@ -777,7 +805,7 @@ mod tests {
             PairingRole::B,
             b"msg",
         );
-        assert_eq!(hex::encode(digest), COMMITMENT_VECTOR);
+        assert_eq!(hex::encode(digest.unwrap()), COMMITMENT_VECTOR);
         assert_eq!(SPAKE2_COMMIT_LABEL, b"clipsync/v1/spake2-commit");
         assert_eq!(COMMITTED_SAS_LABEL, b"clipsync/v1/sas-committed");
     }

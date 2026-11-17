@@ -740,7 +740,7 @@ where
                 PairingRole::B => {
                     conn.send_control(ControlMessage::Spake2Commit {
                         pairing_session_id: session_id.clone(),
-                        commitment: b64_encode(&spake2_commitment(&st)),
+                        commitment: b64_encode(&spake2_commitment(&st)?),
                     })
                     .await?;
                     our_message = Some(st.outbound.clone());
@@ -1085,7 +1085,7 @@ pub(crate) fn sas_comparison() -> (SasPeerConfirm, SasPeerConfirm) {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use clipsync_crypto::{derive_nonce, PairingKeys};
+    use clipsync_crypto::{derive_nonce, PairingKeys, SPAKE2_COMMITMENT_LEN};
 
     /// Real-clock budget for a scripted relay that answers immediately.
     const SCRIPT_DEADLINE: Duration = Duration::from_secs(8);
@@ -1169,7 +1169,10 @@ mod tests {
 
     /// The joiner's commitment to `message` under `state`'s bindings, which
     /// lets a script commit to bytes other than its own SPAKE2 message.
-    fn commitment_for(state: &clipsync_crypto::PairingState, message: &[u8]) -> [u8; 32] {
+    fn commitment_for(
+        state: &clipsync_crypto::PairingState,
+        message: &[u8],
+    ) -> [u8; SPAKE2_COMMITMENT_LEN] {
         let mut shadow = start_pairing_b(
             &TEST_CODE,
             state.session_id.clone(),
@@ -1178,7 +1181,7 @@ mod tests {
         )
         .unwrap();
         shadow.outbound = message.to_vec();
-        spake2_commitment(&shadow)
+        spake2_commitment(&shadow).unwrap()
     }
 
     /// How the scripted joiner's SPAKE2 message reaches the client.
@@ -1328,7 +1331,7 @@ mod tests {
                             .unwrap();
                             commitment_for(&state, &other.outbound)
                         } else {
-                            spake2_commitment(&state)
+                            spake2_commitment(&state).unwrap()
                         };
                         send(
                             &mut socket,
