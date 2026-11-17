@@ -52,7 +52,8 @@ impl StagingArea {
     /// On macOS every staged file is quarantined in the private partial
     /// directory before any bytes are written, so a published file never
     /// lacks Gatekeeper's first-open check; a reused directory gets the
-    /// attribute on any file that lacks it.
+    /// attribute on any file that lacks it, as does a stale commit put back
+    /// after its replacement failed (before it is renamed back into place).
     ///
     /// The filesystem work runs to completion on the blocking pool even if
     /// this future is dropped, and the partial directory is removed on every
@@ -246,12 +247,19 @@ impl ReceiveMark {
         let _ = file;
     }
 
-    /// Quarantine the regular files in a published transfer directory this
-    /// commit did not write (one it reuses or the sweep restores) that lack
-    /// the attribute, for example because an older version wrote them. An
-    /// existing value is kept: it may record the user's approval. The caller
-    /// holds the publish lock, and symlinks are neither followed nor marked.
+    /// Quarantine the regular files in a transfer directory this commit did
+    /// not write (a published one it reuses, or a retired one that it or the
+    /// sweep is about to restore) that lack the attribute, for example
+    /// because an older version wrote them. An existing value is kept: it may
+    /// record the user's approval. The caller holds the publish lock, and
+    /// symlinks are neither followed nor marked.
     fn backfill(&self, dir: &Path) {
+        #[cfg(test)]
+        BACKFILL_OBSERVER.with_borrow_mut(|observer| {
+            if let Some(observer) = observer {
+                observer(dir);
+            }
+        });
         #[cfg(target_os = "macos")]
         {
             let entries = match std::fs::read_dir(dir) {
@@ -270,6 +278,18 @@ impl ReceiveMark {
         #[cfg(not(target_os = "macos"))]
         let _ = dir;
     }
+}
+
+#[cfg(test)]
+type BackfillObserver = Box<dyn FnMut(&Path)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only callback invoked with each directory `ReceiveMark::backfill`
+    /// is about to quarantine, so a test can see where and when backfill
+    /// runs. Thread-local: it observes only calls on the installing thread.
+    static BACKFILL_OBSERVER: std::cell::RefCell<Option<BackfillObserver>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Exclusive lock on the inbox publish lock file, released on drop. Every
@@ -434,12 +454,13 @@ fn publish(
             };
             std::fs::rename(dest_dir, &retired.path)?;
             if let Err(err) = std::fs::rename(staged, dest_dir) {
-                // Put the previous commit back rather than leave none. If
-                // even that fails, keep it: the next sweep restores it.
+                // Put the previous commit back rather than leave none. Mark
+                // it first, while it is still the private retired directory,
+                // so its files are never published unquarantined. If the
+                // rename back fails, keep it: the next sweep restores it.
+                mark.backfill(&retired.path);
                 if std::fs::rename(&retired.path, dest_dir).is_err() {
                     retired.keep();
-                } else {
-                    mark.backfill(dest_dir);
                 }
                 return Err(err.into());
             }
@@ -919,6 +940,100 @@ mod tests {
             std::fs::read(staging.inbox().join(finished.as_str()).join("a.txt")).unwrap(),
             b"payload"
         );
+    }
+
+    /// When a replacement retires a stale commit but cannot rename its own
+    /// staging into place, the stale commit is put back. Files in it may lack
+    /// quarantine (an older version wrote them), so it must be marked while
+    /// it is still the private retired directory: marking after the rename
+    /// back would leave unmarked files at the published path, if only for a
+    /// moment. The staged path here does not exist, which makes exactly that
+    /// second rename fail on every platform.
+    #[test]
+    fn a_failed_replacement_marks_the_previous_commit_before_restoring_it() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = StagingArea::new(root.path().join("inbox")).unwrap();
+        let inbox = staging.inbox().to_owned();
+        let id = TransferId::new();
+        let dest_dir = inbox.join(id.as_str());
+        std::fs::create_dir(&dest_dir).unwrap();
+        // Written without the attribute, as an older version did.
+        std::fs::write(dest_dir.join("kept.command"), b"payload").unwrap();
+        let missing_staging = inbox.join(scratch_name(id.as_str(), PARTIAL_SUFFIX));
+        let names = vec!["new.txt".to_owned()];
+        let files = vec![FileManifest {
+            name: "new.txt".into(),
+            size: b"new".len() as u64,
+            mime: None,
+            hash: blake3_hex(b"new"),
+        }];
+
+        // Each backfill target, and whether the published path existed then.
+        let backfills = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        BACKFILL_OBSERVER.set(Some(Box::new({
+            let backfills = std::rc::Rc::clone(&backfills);
+            let dest_dir = dest_dir.clone();
+            move |dir: &Path| {
+                backfills
+                    .borrow_mut()
+                    .push((dir.to_owned(), dest_dir.exists()));
+            }
+        })));
+        let result = {
+            let _lock = publish_lock(&inbox).unwrap();
+            publish(
+                &inbox,
+                id.as_str(),
+                &missing_staging,
+                &dest_dir,
+                &names,
+                &files,
+                &ReceiveMark::new(),
+            )
+        };
+        BACKFILL_OBSERVER.set(None);
+
+        assert!(
+            matches!(&result, Err(TransferError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound),
+            "unexpected result {:?}",
+            result.map(|retired| retired.map(|dir| dir.path.clone()))
+        );
+        let backfills = backfills.take();
+        assert_eq!(backfills.len(), 1, "backfill calls: {backfills:?}");
+        let (target, published_then) = &backfills[0];
+        let target_name = target.file_name().unwrap().to_str().unwrap();
+        assert_eq!(target.parent(), Some(inbox.as_path()));
+        assert!(
+            target_name.starts_with(&format!(".{id}.")) && target_name.ends_with(RETIRED_SUFFIX),
+            "backfilled {} instead of the retired directory",
+            target.display()
+        );
+        assert!(
+            !published_then,
+            "the previous commit was published again before it was marked"
+        );
+        // The previous commit is back in place and nothing else is left.
+        assert_eq!(
+            std::fs::read(dest_dir.join("kept.command")).unwrap(),
+            b"payload"
+        );
+        assert_eq!(std::fs::read_dir(&dest_dir).unwrap().count(), 1);
+        let leftovers = std::fs::read_dir(&inbox)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(&format!(".{id}.")))
+            .count();
+        assert_eq!(leftovers, 0);
+        #[cfg(target_os = "macos")]
+        {
+            let value = crate::quarantine::value_of(&dest_dir.join("kept.command"))
+                .unwrap()
+                .expect("restored file lacks com.apple.quarantine");
+            assert_eq!(
+                value.split(';').nth(2),
+                Some(crate::quarantine::QUARANTINE_AGENT)
+            );
+        }
     }
 
     /// Cleanup must come before a commit writes its own staging: when
