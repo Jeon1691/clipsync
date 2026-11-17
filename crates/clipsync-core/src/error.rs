@@ -37,6 +37,8 @@ pub enum CoreError {
     NotPaired,
     #[error("timeout")]
     Timeout,
+    #[error("envelope rejected: {0}")]
+    Envelope(#[from] crate::envelope::EnvelopeRejection),
 }
 
 impl From<ClipboardError> for CoreError {

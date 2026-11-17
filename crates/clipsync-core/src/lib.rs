@@ -4,7 +4,9 @@
 //! ClipSync client: pairing, sync engine, loop prevention, and command facade.
 
 mod engine;
+mod envelope;
 mod error;
+mod handshake;
 mod loop_guard;
 mod notify;
 mod pairing;
@@ -18,6 +20,7 @@ pub use engine::{
     oneshot_pull as engine_oneshot_pull, oneshot_push as engine_oneshot_push, run_daemon,
     SyncHandle,
 };
+pub use envelope::EnvelopeRejection;
 pub use error::{CoreError, ExitCode};
 pub use pairing::{
     begin_create_room, create_room, join_room, leave_room, PendingCreate, RoomOffer,

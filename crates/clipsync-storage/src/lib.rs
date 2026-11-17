@@ -5,11 +5,13 @@
 
 mod config;
 mod paths;
+mod replay;
 mod secrets;
 mod store;
 
 pub use config::{AppConfig, NotifyConfig, SyncConfig};
 pub use paths::AppPaths;
+pub use replay::{ReplayState, RoomReplayState, SenderReplayState, SeqCheck};
 pub use secrets::SecretStore;
 pub use store::{LocalStore, PairingWait, PeerRecord, RoomRecord, StateFile};
 

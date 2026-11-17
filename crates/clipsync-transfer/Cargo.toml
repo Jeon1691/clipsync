@@ -22,4 +22,5 @@ ulid.workspace = true
 workspace = true
 
 [dev-dependencies]
+chrono.workspace = true
 tempfile.workspace = true
