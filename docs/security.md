@@ -39,6 +39,23 @@ Operators can change these budgets, but startup rejects a relay-wide limit above
 50 per pairing TTL, which keeps the chance of guessing one session at or below
 10^-4. `/metrics` reports refused joins as `clipsync_pairing_throttled`.
 
+Creating a pairing needs no credentials, so creation is limited the same way.
+By default each client address (IPv6 by /64 prefix) may create 20 pairings per
+15 minutes, and the whole relay 100 per pairing TTL, answered with
+`429 too_many_pairings` once spent. Independently, the relay holds at most 1,000
+open pairing sessions, 0.1% of the code space, so a fresh code can always be
+allocated, and at most 10,000 rooms by default. Open sessions that could still
+complete count against the room cap. At either cap, creation is refused with
+`503 relay_full`. A full session cap clears within one pairing TTL. A full room
+cap clears only as rooms are removed (see [Relay](#relay)), which for rooms
+nobody revokes takes a year, or when the relay restarts and loses every room.
+Pairing needs no credentials, so anyone can create rooms by pairing their own
+devices. As with joins, anyone who can spend the relay-wide creation budget or
+fill the room cap can block new pairings, but cannot take over or disturb
+existing rooms. Budgets are kept per IPv4 address and per IPv6 /64, so one IPv6
+site with many /64 prefixes, such as a /56, can spend the relay-wide budget by
+itself. Watch `clipsync_rooms` and `clipsync_pairing_create_full` on `/metrics`.
+
 The relay generates this password. Pair through a trusted relay: an actively
 malicious operator who knows the password is outside the honest-but-curious
 model and may impersonate a pairing participant. HTTPS/WSS authenticates the
@@ -76,9 +93,27 @@ protocol changes; the current v1 format is retained for existing clients.
 ## Relay
 
 The relay routes opaque ciphertext. It stores at most one latest encrypted text
-envelope per recipient in memory for 60 seconds. Image and file frames are
-forwarded only while the peer is online and are never assembled or written to
-disk.
+envelope per recipient in memory until the envelope's TTL ends (60 seconds by
+default, never more than 300), for about 256 recipients at once (concurrent
+senders can pass the check together, so the queue can briefly exceed this by
+the number of senders). The cap is relay-wide, so one user with many rooms can
+fill it for everyone. When the queue is full, a text for an offline recipient
+is acknowledged as `peer_offline`. Image and file frames are forwarded only while the peer is
+online and are never assembled or written to disk.
+
+All relay state is in memory and bounded. Pairing sessions are removed from
+every index when they are aborted, and within seconds of completing or
+expiring. A room is removed once
+every device in it is revoked, or once its device tokens have expired (one
+year after pairing; tokens are not renewed) and none of its devices is still
+connected. No room with a usable device token is removed. By default the relay
+accepts at most 512 WebSocket connections at once and 32 from one client
+address (IPv6 by /64 prefix), and refuses further upgrades with `503` or `429`.
+A socket that has not sent a valid `hello` within 10 seconds of the upgrade is
+closed, as is an authenticated socket silent for 60 seconds, three client
+heartbeats. The caps still count sockets during those deadlines, so a client
+that keeps reopening idle sockets can deny connections to others sharing its
+address, and clients with enough addresses can hold the relay-wide cap.
 
 Webhooks carry metadata only: opaque IDs, item kind, encrypted size, timestamp,
 status. Destination checks must include DNS results, IPv4/IPv6 special ranges,

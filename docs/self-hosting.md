@@ -49,10 +49,11 @@ handshakes. Excess attempts close immediately, without a waiting socket queue.
 The server also limits the time to its first HTTP request to ten seconds. The
 HTTP/WebSocket router still receives the actual TCP peer address for rate
 limits. By default, proxy deployments see the immediate proxy's address, so all
-clients behind one proxy share a pairing-join budget, and forwarded-IP headers
-are ignored.
+clients behind one proxy share one client's pairing budgets and connection cap
+(32 WebSocket connections by default), and forwarded-IP headers are ignored.
 
-To give clients behind a reverse proxy separate pairing-join budgets, set
+To give clients behind a reverse proxy separate pairing budgets and connection
+caps, set
 `CLIPSYNC_RELAY_TRUSTED_PROXIES` (or `--trusted-proxies`) to a comma-separated
 list of the proxy addresses or CIDR ranges, for example `127.0.0.1` for the
 nginx example below. The relay then reads `X-Forwarded-For` only on connections
@@ -67,8 +68,9 @@ IPv6 entries such as `::ffff:127.0.0.1` match the same IPv4 peers and hops as
 `127.0.0.1`. An IPv6 range that contains all of `::ffff:0:0/96` also trusts
 every IPv4 address. Empty entries are ignored, so an empty value or a trailing
 comma leaves the setting unset. Give the whole list as one value; repeating
-`--trusted-proxies` is rejected at startup. The setting affects pairing-join limits only.
-Leave it unset when clients connect to the relay directly.
+`--trusted-proxies` is rejected at startup. The setting affects the per-client
+pairing-join and pairing-creation budgets and the per-client connection cap
+only. Leave it unset when clients connect to the relay directly.
 
 For a container, mount the certificate directory read-only and pass the paths
 at runtime. Keep private files out of the image and build context. This example
@@ -104,7 +106,8 @@ Never distribute the server private key to clients.
 `cloudflared` connects to the relay from the tunnel host, so without trusted
 proxies every visitor shares one pairing-join budget: one guesser, or a few
 mistyped codes from different users, refuses every pairing until the window
-ends. Cloudflare appends the address it received each request from to
+ends. Visitors would also share one client's creation budget and its 32
+WebSocket connections. Cloudflare appends the address it received each request from to
 `X-Forwarded-For`, keeping any value the visitor sent, and `cloudflared`
 forwards that header to the origin. Trust only the address `cloudflared`
 connects from, and the relay uses that appended visitor address:
@@ -147,6 +150,50 @@ live, so the chance of guessing one session stays at or below 10^-4. Raising the
 limits trades that margin for fewer lockouts. Lowering them does the opposite.
 Watch `clipsync_pairing_throttled` on `/metrics` to see how often joins are
 refused.
+
+## Resource limits
+
+`/v1/pairing/create` and `/v1/ws` need no credentials, so the relay bounds what
+they can allocate. The defaults suit a small self-hosted relay:
+
+| Variable | Default | Allowed values |
+| --- | ---: | --- |
+| `CLIPSYNC_RELAY_PAIRING_CLIENT_CREATE_LIMIT` | `20` | 1 to the relay-wide creation limit; pairings one client address (IPv6: one /64) may create per client creation window |
+| `CLIPSYNC_RELAY_PAIRING_CLIENT_CREATE_WINDOW_SECS` | `900` | `120` (one pairing TTL) to `86400` |
+| `CLIPSYNC_RELAY_PAIRING_RELAY_CREATE_LIMIT` | `100` | 1 to `500`; pairings all clients together may create per 120-second pairing TTL |
+| `CLIPSYNC_RELAY_MAX_ROOMS` | `10000` | at least 1; rooms held at once |
+| `CLIPSYNC_RELAY_MAX_CONNECTIONS` | `512` | at least 1; WebSocket connections at once |
+| `CLIPSYNC_RELAY_MAX_CLIENT_CONNECTIONS` | `32` | 1 to `CLIPSYNC_RELAY_MAX_CONNECTIONS`; WebSocket connections from one client address (IPv6: one /64) at once |
+
+The CLI equivalents are `--pairing-client-create-limit`,
+`--pairing-client-create-window-secs`, `--pairing-relay-create-limit`,
+`--max-rooms`, `--max-connections` and `--max-client-connections`. Values
+outside these ranges stop startup.
+
+A spent creation budget answers `429 too_many_pairings`. The relay also holds
+at most 1,000 open pairing sessions, a fixed 0.1% of the 10^6 pairing codes, so
+a new session always gets a fresh code; open sessions that could still complete
+also count against `CLIPSYNC_RELAY_MAX_ROOMS`. At either cap, creation answers
+`503 relay_full`. The relay-wide creation limit stops at 500 so that creations
+within the limit cannot fill the session cap on their own. Connections past a
+cap are refused before the WebSocket upgrade, with `429 too_many_connections`
+for one client or `503 relay_full` for the whole relay. The default connection
+cap stays below the common 1024 open-file limit; raise that limit before
+raising `CLIPSYNC_RELAY_MAX_CONNECTIONS`.
+
+Rooms persist until every device in a room has been revoked, or until its
+device tokens expire, one year after pairing, with none of its devices
+connected. So a full room cap does not clear by itself: anyone can fill it by
+pairing their own devices within the creation budgets. Size
+`CLIPSYNC_RELAY_MAX_ROOMS` for your users and watch `clipsync_rooms`; a restart
+clears the cap but also drops every room, because rooms are held in memory. A
+WebSocket that sends no valid `hello` within 10 seconds of the upgrade, or
+that goes silent for 60 seconds after authenticating, is closed and frees its
+connection slot. Offline text is queued for at most 256 recipients at once, each
+envelope until its TTL ends (at most 300 seconds). `/metrics` reports
+`clipsync_ws_sockets`, `clipsync_ws_refused`, `clipsync_pairing_sessions`,
+`clipsync_pairing_create_throttled`, `clipsync_pairing_create_full`,
+`clipsync_rooms` and `clipsync_queue_full`.
 
 ## Production (Proxmox)
 
@@ -208,10 +255,16 @@ location / {
 | `CLIPSYNC_RELAY_TLS_CERT_FILE` | PEM certificate chain for direct HTTPS/WSS |
 | `CLIPSYNC_RELAY_TLS_KEY_FILE` | Matching PEM private key; both TLS files are required |
 | `CLIPSYNC_RELAY_ALLOW_HTTP` | Explicit `true` for a local/TLS-proxy plaintext origin; default `false` |
-| `CLIPSYNC_RELAY_TRUSTED_PROXIES` | Optional comma-separated proxy addresses/CIDRs whose `X-Forwarded-For` identifies clients for pairing-join limits; unset or empty uses only the TCP peer address |
+| `CLIPSYNC_RELAY_TRUSTED_PROXIES` | Optional comma-separated proxy addresses/CIDRs whose `X-Forwarded-For` identifies clients for per-client pairing limits and connection caps; unset or empty uses only the TCP peer address |
 | `CLIPSYNC_RELAY_PAIRING_CLIENT_FAIL_LIMIT` | Failed pairing joins per client per window; default `10` (see [pairing-join limits](#pairing-join-limits)) |
 | `CLIPSYNC_RELAY_PAIRING_CLIENT_FAIL_WINDOW_SECS` | Per-client window in seconds; default `900` |
 | `CLIPSYNC_RELAY_PAIRING_RELAY_FAIL_LIMIT` | Failed pairing joins relay-wide per pairing TTL; default `20`, at most `50` |
+| `CLIPSYNC_RELAY_PAIRING_CLIENT_CREATE_LIMIT` | Pairings one client may create per window; default `20` (see [resource limits](#resource-limits)) |
+| `CLIPSYNC_RELAY_PAIRING_CLIENT_CREATE_WINDOW_SECS` | Per-client creation window in seconds; default `900` |
+| `CLIPSYNC_RELAY_PAIRING_RELAY_CREATE_LIMIT` | Pairings created relay-wide per pairing TTL; default `100`, at most `500` |
+| `CLIPSYNC_RELAY_MAX_ROOMS` | Rooms held at once; default `10000` |
+| `CLIPSYNC_RELAY_MAX_CONNECTIONS` | WebSocket connections at once; default `512` |
+| `CLIPSYNC_RELAY_MAX_CLIENT_CONNECTIONS` | WebSocket connections per client address at once; default `32` |
 | `CLIPSYNC_RELAY_TOKEN_SECRET_FILE` | Optional private file of exact HMAC key bytes; at least 32 bytes; cannot be combined with `CLIPSYNC_RELAY_TOKEN_SECRET` |
 | `CLIPSYNC_RELAY_TOKEN_SECRET` | HMAC token key; at least 32 bytes when explicitly set. Unset, empty, or whitespace-only generates a fresh random 32-byte key. |
 | `CLIPSYNC_RELAY_WEBHOOK_URL` | Optional metadata webhook |
