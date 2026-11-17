@@ -1058,7 +1058,14 @@ mod tests {
         while !committed(&verified_creator) {
             assert!(
                 std::time::Instant::now() < until,
-                "verified creator did not commit completed pairing"
+                "verified creator did not commit completed pairing: status={:?} config={:?} pairing={:?}",
+                verified_creator.status().map(|status| status.room_id),
+                verified_creator
+                    .app
+                    .store
+                    .load_config()
+                    .map(|cfg| cfg.sync.enabled),
+                verified_creator.app.store.load_pairing_wait(),
             );
             std::thread::sleep(Duration::from_millis(5));
         }
