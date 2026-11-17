@@ -189,10 +189,12 @@ webhook output described below. Without an explicit public URL, it is derived fr
 environment bind port (default `http://127.0.0.1:7600`); `--bind` alone does not
 recompute it. Current pairing responses advertise the relative `ws_path`, not
 that URL. A bind port of `0` (for example `--bind 127.0.0.1:0`) lets the
-operating system choose a free port; the startup diagnostic
+operating system choose a free port. Pass `--public-url` explicitly in that
+case, because a derived URL would carry port `0`. The startup diagnostic
 `clipsync-relay listening ... addr=ADDRESS` is written to standard output once
-the socket is bound and reports the chosen address. Pass `--public-url`
-explicitly in that case, because a derived URL would carry port `0`.
+the socket is bound and reports the chosen address. It is an info-level
+tracing event, so a `RUST_LOG` filter above `info` suppresses it, and terminal
+colour can change its formatting; set `NO_COLOR=1` when a script parses it.
 
 HTTP definitions: [router and handlers](../crates/clipsync-relay/src/lib.rs),
 [pairing behavior](../crates/clipsync-relay/src/state.rs), and

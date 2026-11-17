@@ -41,8 +41,11 @@ pub struct Relay {
 impl Relay {
     /// Spawn `command` and wait until the relay reports its bound address.
     ///
-    /// Panics with the relay's stderr if it exits first, so a configuration
-    /// regression is reported instead of a connection error.
+    /// The child is killed when its handle drops, including on a test panic.
+    /// If it exits or stays silent past [`RELAY_STARTUP_TIMEOUT`], this panics
+    /// with its stderr (when the caller piped it) and the stdout lines read so
+    /// far, so a configuration regression is reported instead of a connection
+    /// error.
     pub async fn spawn(mut command: Command) -> Self {
         // Pin the diagnostic format independently of the caller's environment:
         // an inherited RUST_LOG could filter the line out, and colour escapes
@@ -50,30 +53,47 @@ impl Relay {
         command
             .env("RUST_LOG", "info")
             .env("NO_COLOR", "1")
-            .stdout(Stdio::piped());
+            .stdout(Stdio::piped())
+            .kill_on_drop(true);
         let mut child = command.spawn().expect("spawn relay binary");
-        let mut lines = BufReader::new(child.stdout.take().expect("piped relay stdout")).lines();
+        let mut stdout = BufReader::new(child.stdout.take().expect("piped relay stdout"));
+        let mut seen = Vec::new();
         let reported = tokio::time::timeout(RELAY_STARTUP_TIMEOUT, async {
-            while let Some(line) = lines.next_line().await.expect("read relay stdout") {
-                if let Some(address) = listening_address(&line) {
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                let read = stdout
+                    .read_until(b'\n', &mut line)
+                    .await
+                    .expect("read relay stdout");
+                if read == 0 {
+                    return None;
+                }
+                let text = String::from_utf8_lossy(&line).trim_end().to_owned();
+                if let Some(address) = listening_address(&text) {
                     return Some(address);
                 }
+                seen.push(text);
             }
-            None
         })
-        .await
-        .expect("relay did not report a listening address in time");
-        let Some(address) = reported else {
-            let output = child.wait_with_output().await.expect("collect relay exit");
-            panic!(
-                "relay exited before listening ({}): {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
-            );
+        .await;
+        let address = match reported {
+            Ok(Some(address)) => address,
+            Ok(None) => startup_failure(child, "relay exited before listening", &seen).await,
+            Err(_) => {
+                child.start_kill().expect("kill silent relay");
+                startup_failure(
+                    child,
+                    "relay did not report a listening address in time",
+                    &seen,
+                )
+                .await
+            }
         };
-        // Keep draining diagnostics so a chatty relay never blocks on a full
-        // stdout pipe while the test is still talking to it.
-        tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
+        // Keep draining diagnostics as raw bytes, so neither a full stdout
+        // pipe nor a non-UTF-8 line can block the relay while the test is
+        // still talking to it.
+        tokio::spawn(async move { tokio::io::copy(&mut stdout, &mut tokio::io::sink()).await });
         Self { child, address }
     }
 
@@ -81,6 +101,17 @@ impl Relay {
         self.child.kill().await.expect("stop relay");
         self.child.wait().await.expect("reap relay");
     }
+}
+
+/// Reap `child` and panic with what it wrote before failing to listen.
+async fn startup_failure(child: Child, reason: &str, stdout_lines: &[String]) -> ! {
+    let output = child.wait_with_output().await.expect("collect relay exit");
+    panic!(
+        "{reason} ({}).\nstderr:\n{}\nstdout so far:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+        stdout_lines.join("\n")
+    );
 }
 
 fn listening_address(line: &str) -> Option<SocketAddr> {

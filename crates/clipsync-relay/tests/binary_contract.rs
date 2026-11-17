@@ -4,11 +4,21 @@ mod support;
 
 use std::net::Ipv4Addr;
 use std::process::Stdio;
+use std::time::Duration;
 
 use support::{Relay, EPHEMERAL_LOOPBACK_BIND};
 
 /// Scrape credential for the binary-level metrics contract.
 const METRICS_TEST_TOKEN: &str = "binary-metrics-scrape-token-0123456789";
+
+/// Environment bind that `--bind` must override. Its wildcard interface is
+/// distinguishable from the loopback `--bind` value, so the loopback assert
+/// fails if the relay ever lets the environment win.
+const ENVIRONMENT_BIND_THAT_MUST_LOSE: &str = "0.0.0.0:0";
+
+/// Per-request budget for plain-HTTP calls to a local relay. A healthy relay
+/// answers in milliseconds; this bounds a hang instead of pacing the test.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct RelayProcess {
     relay: Relay,
@@ -31,7 +41,7 @@ impl RelayProcess {
                 "CLIPSYNC_RELAY_TOKEN_SECRET",
                 "synthetic-relay-binary-test-secret-32bytes",
             )
-            .env("CLIPSYNC_RELAY_BIND", "127.0.0.1:0")
+            .env("CLIPSYNC_RELAY_BIND", ENVIRONMENT_BIND_THAT_MUST_LOSE)
             .env_remove("CLIPSYNC_RELAY_TLS_CERT_FILE")
             .env_remove("CLIPSYNC_RELAY_TLS_KEY_FILE")
             .env_remove("CLIPSYNC_RELAY_TOKEN_SECRET_FILE")
@@ -39,18 +49,22 @@ impl RelayProcess {
             .env_remove("CLIPSYNC_RELAY_WEBHOOK_SECRET")
             .env_remove("CLIPSYNC_RELAY_METRICS_TOKEN_FILE")
             .stdin(Stdio::null())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .stderr(Stdio::piped());
         if let Some(token) = metrics_token {
             command.env("CLIPSYNC_RELAY_METRICS_TOKEN", token);
         } else {
             command.env_remove("CLIPSYNC_RELAY_METRICS_TOKEN");
         }
         let relay = Relay::spawn(command).await;
-        // The relay binds the requested interface; the OS chooses only the port.
+        // The relay binds the `--bind` interface, not the environment's
+        // wildcard one; the OS chooses only the port.
         assert_eq!(relay.address.ip(), Ipv4Addr::LOCALHOST);
         assert_ne!(relay.address.port(), 0);
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap();
         let url = format!("http://{}", relay.address);
         let response = client.get(format!("{url}/healthz")).send().await.unwrap();
         assert!(response.status().is_success());
