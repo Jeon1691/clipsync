@@ -180,12 +180,21 @@ within the limit cannot fill the session cap on their own. Connections past a
 cap are refused before the WebSocket upgrade, with `429 too_many_connections`
 for one client or site, or `503 relay_full` for the whole relay. Sockets that
 are not room members yet (before `hello`, or while pairing) may hold 75% of
-the connection slots. Past that, a new socket evicts the oldest of them
-instead.
+the connection slots. Past that, or at the relay-wide cap while any of them is
+open, a new socket evicts the oldest of them instead. Evicted sockets close
+within a fraction of a second; until then they may take up to 5% more than
+`CLIPSYNC_RELAY_MAX_CONNECTIONS` (at least one).
+
+A /48 is not always one site. Some ISPs hand out /56s, or one /64 per mobile
+device, from a shared /48, so their customers share one /48's creation and
+connection budget, and one of them can spend it for its neighbours. If many
+of your users sit behind such a provider, raise
+`CLIPSYNC_RELAY_PAIRING_CLIENT_CREATE_LIMIT` and
+`CLIPSYNC_RELAY_MAX_CLIENT_CONNECTIONS`, which scale the /48 budgets.
 
 Each connection takes one file descriptor, so `CLIPSYNC_RELAY_MAX_CONNECTIONS`
 must fit under the relay process's open-file soft limit, with room for the
-listener, up to 128 TLS handshakes and webhooks. Linux and systemd services
+listener, up to 128 TLS handshakes, webhooks and the 5% of closing sockets. Linux and systemd services
 default to 1024, which fits the default of 512. A shell on macOS defaults to
 256, so before starting the relay from one, run `ulimit -n 1024` or lower
 `CLIPSYNC_RELAY_MAX_CONNECTIONS`. Raise the limit (for example `LimitNOFILE=`

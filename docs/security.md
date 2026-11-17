@@ -125,16 +125,22 @@ one client address (IPv6 by /64 prefix) and 96 from one IPv6 /48. It refuses
 further upgrades with `503` or `429`. Sockets that are not room members may
 hold at most 75% of the relay-wide slots: sockets that have not sent a valid
 `hello` yet, and pairing-token sockets, because pairing tokens are issued
-without authentication. Past that, a new socket evicts the oldest of them
-instead of being refused, so a flood of such sockets cannot lock out clients
-that send `hello` right away. A pairing-token socket is also closed when its
+without authentication. Past that share, or at the relay-wide cap while any
+such socket is open, a new socket evicts the oldest of them instead of being
+refused, so a flood of such sockets cannot lock out clients that send `hello`
+right away. An evicted socket keeps its slot for the fraction of a second it
+takes to close, so sockets closing after an eviction at the cap may exceed it
+by 5% (at least one). A closing pairing socket tells its room it left
+without waiting for a peer that stopped reading. A pairing-token socket is also closed when its
 pairing session expires. A socket that has not sent a valid `hello` within 10 seconds of
 the upgrade is closed, even while it keeps sending other messages or stops
 reading the relay's replies. An authenticated socket silent for 60 seconds,
 three client heartbeats, is closed too. The caps still count sockets during
 those deadlines, so a client that keeps reopening idle sockets can deny
 connections to others sharing its address. Clients with enough addresses can
-hold the authenticated share by authenticating into rooms of their own.
+hold the authenticated share by authenticating into rooms of their own. The
+IPv6 /48 caps assume one site per /48; where an ISP puts many customers in one
+/48, they share these caps, and one of them can spend them for the rest.
 
 Webhooks carry metadata only: opaque IDs, item kind, encrypted size, timestamp,
 status. Destination checks must include DNS results, IPv4/IPv6 special ranges,
