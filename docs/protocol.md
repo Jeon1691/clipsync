@@ -269,7 +269,8 @@ starts: the creator takes them from the first `peer_joined`, the joiner from
 the join response. A client that receives a later `peer_joined` with a
 different device ID or name sends `error` (`pairing_failed`) and stops with
 nothing stored. Clients also refuse a pairing code that is not six ASCII
-digits, room or device IDs outside `[A-Za-z0-9._-]` (at most 64 bytes), and a
+digits, a create or join response whose room or device ID breaks the ID rule
+in [interfaces.md](interfaces.md) (it fails to decode), and a
 `pairing_complete` naming a room other than the one the pairing announced.
 
 ## Reconnect

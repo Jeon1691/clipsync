@@ -59,8 +59,25 @@ fn malformed(what: &str) -> CoreError {
     ))
 }
 
+/// Decode a create or join response. The protocol types refuse a room or
+/// device ID that breaks the wire rule (`clipsync_protocol::validate_id`)
+/// while decoding, so that failure, like any other bad body, is reported as
+/// a malformed response instead of a bare decoding error. The decoder's own
+/// message is left out: it may quote relay-chosen text.
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
+async fn decode_pairing_response<T: serde::de::DeserializeOwned>(
+    resp: reqwest::Response,
+) -> Result<T, CoreError> {
+    let body = resp.bytes().await?;
+    serde_json::from_slice(&body).map_err(|_| malformed("pairing response"))
+}
+
 /// Check the values of a create or join response that the CLI prints and
-/// the store keeps before anything is shown or stored.
+/// the store keeps before anything is shown or stored. Decoding already
+/// enforces the ID rule; this re-check covers IDs built unchecked (`From`).
 #[expect(
     clippy::result_large_err,
     reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
@@ -244,7 +261,7 @@ pub async fn begin_create_room(
         let body = relay_text(&resp.text().await.unwrap_or_default());
         return Err(CoreError::Pairing(format!("create failed: {body}")));
     }
-    let created: CreatePairingResponse = resp.json().await?;
+    let created: CreatePairingResponse = decode_pairing_response(resp).await?;
     // The code and room ID are printed and the room ID is stored.
     if !is_pairing_code(&created.pairing_code) {
         return Err(malformed("pairing code"));
@@ -355,7 +372,7 @@ where
         let body = relay_text(&body);
         return Err(CoreError::Pairing(format!("join failed: {body}")));
     }
-    let joined: JoinPairingResponse = resp.json().await?;
+    let joined: JoinPairingResponse = decode_pairing_response(resp).await?;
     check_relay_ids(&joined.room_id, Some(&joined.peer.device_id))?;
     let ws = join_ws(&cfg.relay_url, &joined.ws_path);
     let conn = connect_relay_ws(&ws).await?;
@@ -1967,11 +1984,11 @@ mod tests {
         let identity = DeviceIdentity::from_bytes("malformed-response".into(), [32; 32]);
         assert!(matches!(
             create_room(&store, &identity, &cfg, 60, accept).await,
-            Err(CoreError::Http(_))
+            Err(CoreError::Pairing(message)) if message.contains("malformed pairing response")
         ));
         assert!(matches!(
             join_room(&store, &identity, &cfg, &TEST_CODE, accept).await,
-            Err(CoreError::Http(_))
+            Err(CoreError::Pairing(message)) if message.contains("malformed pairing response")
         ));
         assert!(store.load_state().unwrap().rooms.is_empty());
     }
@@ -1983,6 +2000,9 @@ mod tests {
         // them right after "pairing code:" or "room:".
         const OSC: &str = "\u{1b}]52;c;aGk=\u{7}";
         const CSI: &str = "\u{9b}2J";
+        // A room or device ID the wire rule refuses fails the whole response
+        // while it is decoded, before any field is looked at.
+        const PAIRING_RESPONSE: &str = "pairing response";
         let good_room = clipsync_protocol::RoomId::new();
         let creates = [
             (format!("12345{OSC}"), good_room.clone(), "pairing code"),
@@ -1996,7 +2016,7 @@ mod tests {
             (
                 TEST_CODE.clone(),
                 clipsync_protocol::RoomId::from(format!("room{CSI}")),
-                "room ID",
+                PAIRING_RESPONSE,
             ),
         ];
         let peer = |device_id: &str| clipsync_protocol::PeerInfo {
@@ -2010,14 +2030,16 @@ mod tests {
             (
                 clipsync_protocol::RoomId::from(format!("room{OSC}")),
                 peer("creator"),
-                "room ID",
+                PAIRING_RESPONSE,
             ),
             (
                 good_room.clone(),
                 peer(&format!("creator{CSI}")),
-                "device ID",
+                PAIRING_RESPONSE,
             ),
-            (good_room.clone(), peer(""), "device ID"),
+            (good_room.clone(), peer(""), PAIRING_RESPONSE),
+            // Passed the old client-only check, refused by the wire rule.
+            (good_room.clone(), peer(".."), PAIRING_RESPONSE),
         ];
         let directory = tempfile::TempDir::new().unwrap();
         let store =
@@ -2040,11 +2062,15 @@ mod tests {
                 relay_url: server.url.clone(),
                 ..Default::default()
             };
-            let error = begin_create_room(&identity, &cfg, 60).await.err().unwrap();
+            let error = create_room(&store, &identity, &cfg, 60, accept)
+                .await
+                .err()
+                .unwrap();
             assert!(
                 error.to_string().contains(&format!("malformed {what}")),
                 "{error}"
             );
+            assert_nothing_stored(&store);
         }
         for (room_id, peer, what) in joins {
             let joined = JoinPairingResponse {
@@ -2071,9 +2097,15 @@ mod tests {
                 error.to_string().contains(&format!("malformed {what}")),
                 "{error}"
             );
+            assert_nothing_stored(&store);
         }
+    }
+
+    /// No room, room key, device credential or pairing file was written.
+    fn assert_nothing_stored(store: &LocalStore) {
         assert!(store.load_state().unwrap().rooms.is_empty());
-        assert!(secret_files(&store).is_empty());
+        assert!(secret_files(store).is_empty());
+        assert!(!store.paths.pairing_file().exists());
     }
 
     #[tokio::test]

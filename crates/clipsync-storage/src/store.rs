@@ -60,6 +60,17 @@ pub struct PairingWait {
     pub sas_decision: Option<String>,
 }
 
+/// Exclusive lock on the pairing lock file, held until dropped.
+struct PairingFileLock(std::fs::File);
+
+impl Drop for PairingFileLock {
+    fn drop(&mut self) {
+        // Closing the handle releases the lock too, but Windows may do that
+        // lazily; unlock explicitly so the next writer is not delayed.
+        let _ = crate::replay::unlock(&self.0);
+    }
+}
+
 #[derive(Clone)]
 pub struct LocalStore {
     pub paths: AppPaths,
@@ -198,7 +209,7 @@ impl LocalStore {
     /// Hold an exclusive OS lock on a sidecar file until the guard drops.
     /// The lock file is never removed: deleting it would let two processes
     /// lock different files under the same name.
-    fn lock_pairing_file(&self) -> Result<std::fs::File> {
+    fn lock_pairing_file(&self) -> Result<PairingFileLock> {
         let path = self.paths.pairing_lock_file();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -212,7 +223,7 @@ impl LocalStore {
         set_private_file(&path)?;
         // `flock` on Unix (Android included), `LockFileEx` on Windows.
         crate::replay::lock_exclusive(&file)?;
-        Ok(file)
+        Ok(PairingFileLock(file))
     }
 
     fn write_pairing_wait(&self, wait: &PairingWait) -> Result<()> {

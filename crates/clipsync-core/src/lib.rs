@@ -30,8 +30,8 @@ pub use pairing::{
     PendingCreate, RoomOffer, SasCheck, SasDecision,
 };
 pub use untrusted_text::{
-    is_plain_identifier, sanitize_untrusted, shown_identifier, MAX_IDENTIFIER_LEN,
-    MAX_PEER_NAME_COLUMNS, MAX_RELAY_MESSAGE_COLUMNS,
+    is_plain_identifier, sanitize_untrusted, shown_identifier, MAX_PEER_NAME_COLUMNS,
+    MAX_RELAY_MESSAGE_COLUMNS,
 };
 
 use std::io::{IsTerminal, Read};
@@ -92,10 +92,12 @@ impl App {
 
     /// The stored identity, or a new one set up as [`Self::init`] does.
     ///
-    /// Reading a stored identity writes nothing: `status` and every command
-    /// call this while a pairing or `config set` in another process may be
-    /// changing the configuration, and writing back the configuration read
-    /// here would undo that change.
+    /// This never writes back the configuration it read: `status` and every
+    /// command call this while a pairing or `config set` in another process
+    /// may be changing the configuration, and a re-save here would undo that
+    /// change. Storage may still write on its own: `load_config` saves once
+    /// to migrate a legacy webhook secret, and `load_identity` restores a
+    /// missing identity file from the keychain.
     pub fn identity(&self) -> Result<DeviceIdentity, CoreError> {
         match self.store.secrets.load_identity() {
             Ok(identity) => {

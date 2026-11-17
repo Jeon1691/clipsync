@@ -135,7 +135,7 @@ pub(crate) fn lock_exclusive(file: &File) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-fn unlock(file: &File) -> std::io::Result<()> {
+pub(crate) fn unlock(file: &File) -> std::io::Result<()> {
     rustix::fs::flock(file, rustix::fs::FlockOperation::Unlock).map_err(std::io::Error::from)
 }
 
@@ -155,7 +155,7 @@ pub(crate) fn lock_exclusive(file: &File) -> std::io::Result<()> {
     clippy::disallowed_methods,
     reason = "Not Unix, so not Android; std's unlock is UnlockFile on Windows."
 )]
-fn unlock(file: &File) -> std::io::Result<()> {
+pub(crate) fn unlock(file: &File) -> std::io::Result<()> {
     file.unlock()
 }
 
