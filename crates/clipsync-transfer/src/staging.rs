@@ -88,10 +88,11 @@ const STALE_STAGING_IDLE_MULTIPLE: u64 = 60;
 const STALE_STAGING_AGE: Duration =
     Duration::from_secs(clipsync_protocol::TRANSFER_IDLE_SECS * STALE_STAGING_IDLE_MULTIPLE);
 
-/// Leftover directories removed per commit. Each commit can strand at most
-/// two (its partial and a retired stale commit, only if the process dies),
-/// so removing more than two per commit drains leftovers faster than they
-/// can accumulate while keeping each commit's extra work bounded.
+/// Leftover directories removed or restored per commit. Each commit can
+/// strand at most two (its partial and a retired stale commit, only if the
+/// process dies), so handling more than two per commit drains leftovers
+/// faster than they can accumulate while keeping each commit's extra work
+/// bounded.
 const STALE_STAGING_REMOVALS_PER_COMMIT: usize = 4;
 
 /// Suffix of a directory a commit is still writing.
@@ -109,8 +110,18 @@ struct OwnedDir {
     path: PathBuf,
 }
 
+impl OwnedDir {
+    /// Leave the directory in place, for the next sweep to recover.
+    fn keep(mut self) {
+        self.path = PathBuf::new();
+    }
+}
+
 impl Drop for OwnedDir {
     fn drop(&mut self) {
+        if self.path.as_os_str().is_empty() {
+            return;
+        }
         // After a successful publish the directory no longer exists here, and
         // its unique name means nothing else can have taken its place.
         let _ = std::fs::remove_dir_all(&self.path);
@@ -135,7 +146,6 @@ fn commit_blocking(
     files: &[FileManifest],
     payload: &[u8],
 ) -> Result<Vec<PathBuf>> {
-    sweep_stale_staging(root, SystemTime::now(), STALE_STAGING_AGE);
     let names = validated_names(files, payload)?;
     let dest_dir = root.join(id);
     let staged = OwnedDir {
@@ -163,6 +173,9 @@ fn commit_blocking(
         // Released when `lock` is closed at the end of this block, before
         // the retired directory is removed outside the critical section.
         lock.lock()?;
+        // Under the lock, so no live publisher is between its two renames
+        // while the sweep decides whether a retired commit is orphaned.
+        sweep_stale_staging(root, SystemTime::now(), STALE_STAGING_AGE);
         publish(root, id, &staged.path, &dest_dir, &names, files)?
     };
     drop(retired);
@@ -232,8 +245,11 @@ fn publish(
             };
             std::fs::rename(dest_dir, &retired.path)?;
             if let Err(err) = std::fs::rename(staged, dest_dir) {
-                // Put the previous commit back rather than leave none.
-                let _ = std::fs::rename(&retired.path, dest_dir);
+                // Put the previous commit back rather than leave none. If
+                // even that fails, keep it: the next sweep restores it.
+                if std::fs::rename(&retired.path, dest_dir).is_err() {
+                    retired.keep();
+                }
                 return Err(err.into());
             }
             Ok(Some(retired))
@@ -266,42 +282,71 @@ fn file_hash(path: &Path) -> std::io::Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-/// Remove up to `STALE_STAGING_REMOVALS_PER_COMMIT` partial or retired
-/// directories last modified more than `max_age` before `now`, left behind by
-/// a receiver process that exited mid-commit. Published transfers, files,
-/// symlinks and fresh partial directories are never touched. A retired
-/// directory keeps the modification time of the commit it held, so it may be
-/// removed here while its owner removes it too; both sides only delete it.
+/// Clean up after receivers that stopped mid-commit, handling at most
+/// `STALE_STAGING_REMOVALS_PER_COMMIT` directories. The caller holds the
+/// publish lock, so no live publisher is between its two renames.
+///
+/// - A partial directory last modified more than `max_age` before `now` is
+///   removed; a fresher one may belong to a receiver still writing it.
+/// - A retired directory whose transfer is published again is leftover
+///   garbage and is removed (its owner may be removing it too).
+/// - A retired directory whose transfer is missing is a replacement
+///   interrupted between its renames: it is the last committed copy, so it
+///   is restored as the published transfer instead of being deleted.
+///
+/// Published transfers, files, symlinks and other entries are never touched.
 fn sweep_stale_staging(root: &Path, now: SystemTime, max_age: Duration) -> usize {
     let Ok(entries) = std::fs::read_dir(root) else {
         return 0;
     };
-    let mut removed = 0;
+    let mut handled = 0;
     for entry in entries.flatten() {
-        if removed == STALE_STAGING_REMOVALS_PER_COMMIT {
+        if handled == STALE_STAGING_REMOVALS_PER_COMMIT {
             break;
         }
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             continue;
         };
-        if !name.starts_with('.')
-            || !(name.ends_with(PARTIAL_SUFFIX) || name.ends_with(RETIRED_SUFFIX))
-        {
+        let Some(scratch) = name.strip_prefix('.') else {
+            continue;
+        };
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_dir() {
             continue;
         }
-        let path = entry.path();
-        let is_stale_dir = std::fs::symlink_metadata(&path).is_ok_and(|meta| {
-            meta.is_dir()
-                && meta.modified().is_ok_and(|modified| {
-                    now.duration_since(modified).unwrap_or_default() > max_age
-                })
-        });
-        if is_stale_dir && std::fs::remove_dir_all(&path).is_ok() {
-            removed += 1;
+        let done = if scratch.ends_with(PARTIAL_SUFFIX) {
+            let stale = meta
+                .modified()
+                .is_ok_and(|modified| now.duration_since(modified).unwrap_or_default() > max_age);
+            stale && std::fs::remove_dir_all(&path).is_ok()
+        } else if scratch.ends_with(RETIRED_SUFFIX) {
+            let Some(id) = scratch
+                .split('.')
+                .next()
+                .and_then(|id| safe_transfer_id(id).ok())
+            else {
+                continue;
+            };
+            let dest = root.join(id);
+            match std::fs::symlink_metadata(&dest) {
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::rename(&path, &dest).is_ok()
+                }
+                Ok(_) => std::fs::remove_dir_all(&path).is_ok(),
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
+        if done {
+            handled += 1;
         }
     }
-    removed
+    handled
 }
 
 /// Owner-only permissions for staged directories and files on Unix.
@@ -629,6 +674,60 @@ mod tests {
         assert_eq!(std::fs::read(&paths[0]).unwrap(), b"payload");
     }
 
+    /// A process that dies between retiring a stale commit and renaming its
+    /// replacement in leaves the transfer only in the retired directory. The
+    /// next commit must restore it, not sweep it away, and a retired
+    /// directory whose transfer is published again is plain garbage.
+    #[tokio::test]
+    async fn an_interrupted_replacement_is_restored_and_finished_ones_are_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = StagingArea::new(root.path().join("inbox")).unwrap();
+        let manifest = |name: &str| clipsync_protocol::FileManifest {
+            name: name.into(),
+            size: 7,
+            mime: None,
+            hash: blake3_hex(b"payload"),
+        };
+        let interrupted = TransferId::new();
+        staging
+            .commit_files(&interrupted, &[manifest("kept.txt")], b"payload")
+            .await
+            .unwrap();
+        let published = staging.inbox().join(interrupted.as_str());
+        // Simulate the crash: the first rename of a replacement happened,
+        // the second never did.
+        let orphan = staging
+            .inbox()
+            .join(scratch_name(interrupted.as_str(), RETIRED_SUFFIX));
+        std::fs::rename(&published, &orphan).unwrap();
+
+        let finished = TransferId::new();
+        staging
+            .commit_files(&finished, &[manifest("a.txt")], b"payload")
+            .await
+            .unwrap();
+        let leftover = staging
+            .inbox()
+            .join(scratch_name(finished.as_str(), RETIRED_SUFFIX));
+        std::fs::create_dir(&leftover).unwrap();
+
+        // An unrelated commit runs the sweep.
+        staging
+            .commit_files(&TransferId::new(), &[manifest("b.txt")], b"payload")
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(published.join("kept.txt")).unwrap(),
+            b"payload"
+        );
+        assert!(!orphan.exists());
+        assert!(!leftover.exists());
+        assert_eq!(
+            std::fs::read(staging.inbox().join(finished.as_str()).join("a.txt")).unwrap(),
+            b"payload"
+        );
+    }
+
     #[test]
     fn owned_staging_directory_is_removed_with_its_contents_when_dropped() {
         let root = tempfile::tempdir().unwrap();
@@ -647,13 +746,8 @@ mod tests {
         let inbox = root.path();
         let id = TransferId::new();
         let leftovers: Vec<_> = (0..STALE_STAGING_REMOVALS_PER_COMMIT)
-            .map(|index| {
-                let suffix = if index % 2 == 0 {
-                    PARTIAL_SUFFIX
-                } else {
-                    RETIRED_SUFFIX
-                };
-                let path = inbox.join(scratch_name(id.as_str(), suffix));
+            .map(|_| {
+                let path = inbox.join(scratch_name(id.as_str(), PARTIAL_SUFFIX));
                 std::fs::create_dir(&path).unwrap();
                 std::fs::write(path.join("staged.txt"), b"staged").unwrap();
                 path
