@@ -39,6 +39,16 @@ impl StagingArea {
         }
     }
 
+    /// Validate `files` against `payload` and publish them under
+    /// `<inbox>/<transfer_id>/`.
+    ///
+    /// Several local receivers (for example the daemon and `clipsync pull
+    /// --wait` connected for the same device) can receive the same transfer
+    /// and commit it to the same inbox at the same time. Each call therefore
+    /// stages into its own uniquely named partial directory, never removes a
+    /// directory another receiver created, and places files so that a
+    /// transfer already committed with identical content is reused rather
+    /// than deleted and rewritten.
     pub async fn commit_files(
         &self,
         transfer_id: &TransferId,
@@ -53,52 +63,106 @@ impl StagingArea {
         if payload.len() != expected {
             return Err(TransferError::Integrity);
         }
-        let mut seen_names = std::collections::HashSet::new();
         let dest_dir = self.root.join(&id);
-        let tmp_dir = self.root.join(format!(".{id}.partial"));
-        if tmp_dir.exists() {
-            let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
-        }
-        tokio::fs::create_dir_all(&tmp_dir).await?;
+        // Unique per call: the process id names the owner for diagnostics and
+        // a fresh ULID separates concurrent calls inside one process. The
+        // transfer id is ULID-alphabet only, so this dot-prefixed name can
+        // never collide with a published `<transfer_id>` directory.
+        let tmp_dir = self.root.join(format!(
+            ".{id}.{}.{}.partial",
+            std::process::id(),
+            ulid::Ulid::generate()
+        ));
+        // `create_dir`, not `create_dir_all`: an existing entry is never
+        // adopted, so this call only ever writes into a directory it owns.
+        tokio::fs::create_dir(&tmp_dir).await?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&tmp_dir, std::fs::Permissions::from_mode(0o700));
         }
-        let mut offset = 0usize;
-        let mut written = Vec::new();
-        for file in files {
-            let name = safe_filename(&file.name)?;
-            if !seen_names.insert(name.clone()) {
-                let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
-                return Err(TransferError::UnsafeName(name));
-            }
-            let end = offset + file.size as usize;
-            if end > payload.len() {
-                let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
-                return Err(TransferError::Integrity);
-            }
-            let slice = &payload[offset..end];
-            if blake3_hex(slice) != file.hash {
-                let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
-                return Err(TransferError::Integrity);
-            }
-            let dest = tmp_dir.join(&name);
-            tokio::fs::write(&dest, slice).await?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600));
-            }
-            written.push(name);
-            offset = end;
-        }
-        if dest_dir.exists() {
-            tokio::fs::remove_dir_all(&dest_dir).await?;
-        }
-        tokio::fs::rename(&tmp_dir, &dest_dir).await?;
-        Ok(written.into_iter().map(|n| dest_dir.join(n)).collect())
+        let result = stage_and_place(&tmp_dir, &dest_dir, files, payload).await;
+        // The partial directory belongs to this call alone. After a whole
+        // directory rename it no longer exists; otherwise drop what is left.
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+        result.map(|names| names.into_iter().map(|n| dest_dir.join(n)).collect())
     }
+}
+
+/// Write every validated file into `tmp_dir`, then publish them at `dest_dir`.
+async fn stage_and_place(
+    tmp_dir: &Path,
+    dest_dir: &Path,
+    files: &[FileManifest],
+    payload: &[u8],
+) -> Result<Vec<String>> {
+    let mut seen_names = std::collections::HashSet::new();
+    let mut offset = 0usize;
+    let mut written = Vec::new();
+    for file in files {
+        let name = safe_filename(&file.name)?;
+        if !seen_names.insert(name.clone()) {
+            return Err(TransferError::UnsafeName(name));
+        }
+        let end = offset + file.size as usize;
+        if end > payload.len() {
+            return Err(TransferError::Integrity);
+        }
+        let slice = &payload[offset..end];
+        if blake3_hex(slice) != file.hash {
+            return Err(TransferError::Integrity);
+        }
+        let dest = tmp_dir.join(&name);
+        tokio::fs::write(&dest, slice).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600));
+        }
+        written.push(name);
+        offset = end;
+    }
+    // First publisher: one atomic rename makes the whole set visible at once.
+    // It fails when the destination already holds another commit of this
+    // transfer (rename never replaces a non-empty directory), or when the
+    // destination is not a directory at all.
+    let rename_error = match tokio::fs::rename(tmp_dir, dest_dir).await {
+        Ok(()) => return Ok(written),
+        Err(err) => err,
+    };
+    // Only merge into a real directory; a file or symlink at the destination
+    // is an error so placement can never be redirected outside the inbox.
+    let dest_is_dir = tokio::fs::symlink_metadata(dest_dir)
+        .await
+        .is_ok_and(|meta| meta.is_dir());
+    if !dest_is_dir {
+        return Err(rename_error.into());
+    }
+    for (name, file) in written.iter().zip(files) {
+        let target = dest_dir.join(name);
+        if holds_committed_file(&target, file).await {
+            // Another receiver already published these exact bytes, and
+            // its caller may be reading them: keep that file untouched.
+            continue;
+        }
+        // Per-file rename atomically replaces a stale or different file (a
+        // retried transfer) and never exposes a partially written file.
+        tokio::fs::rename(tmp_dir.join(name), &target).await?;
+    }
+    Ok(written)
+}
+
+/// True when `target` is a regular file whose bytes match the manifest entry.
+async fn holds_committed_file(target: &Path, file: &FileManifest) -> bool {
+    let is_matching_file = tokio::fs::symlink_metadata(target)
+        .await
+        .is_ok_and(|meta| meta.is_file() && meta.len() == file.size);
+    if !is_matching_file {
+        return false;
+    }
+    tokio::fs::read(target)
+        .await
+        .is_ok_and(|bytes| blake3_hex(&bytes) == file.hash)
 }
 
 pub struct IncomingTransfer {
@@ -279,7 +343,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retries_replace_stale_partial_and_previous_commit_only_after_hash_validation() {
+    async fn retries_ignore_foreign_partials_and_replace_previous_commit_only_after_hash_validation(
+    ) {
         let root = tempfile::tempdir().unwrap();
         let staging = StagingArea::new(root.path().join("inbox")).unwrap();
         let id = TransferId::new();
@@ -297,7 +362,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(std::fs::read(&first[0]).unwrap(), b"original");
-        assert!(!partial.exists());
+        // Another receiver may still be writing there: never remove or adopt it.
+        assert_eq!(
+            std::fs::read(partial.join("stale.txt")).unwrap(),
+            b"discard"
+        );
         assert!(!staging.inbox().join(id.as_str()).join("stale.txt").exists());
         assert!(staging
             .commit_files(&id, &[file(b"different length")], b"small")
@@ -313,7 +382,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blocked_partial_or_destination_paths_and_unsafe_names_leave_existing_data_intact() {
+    async fn foreign_partial_markers_blocked_destinations_and_unsafe_names_leave_existing_data_intact(
+    ) {
         let root = tempfile::tempdir().unwrap();
         let staging = StagingArea::new(root.path().join("inbox")).unwrap();
         let file = |name: &str| clipsync_protocol::FileManifest {
@@ -325,10 +395,11 @@ mod tests {
         let blocked_partial = TransferId::new();
         let partial = staging.inbox().join(format!(".{blocked_partial}.partial"));
         std::fs::write(&partial, b"existing partial marker").unwrap();
-        assert!(staging
+        let committed = staging
             .commit_files(&blocked_partial, &[file("report.txt")], b"payload")
             .await
-            .is_err());
+            .unwrap();
+        assert_eq!(std::fs::read(&committed[0]).unwrap(), b"payload");
         assert_eq!(std::fs::read(partial).unwrap(), b"existing partial marker");
         let blocked_destination = TransferId::new();
         let destination = staging.inbox().join(blocked_destination.as_str());
@@ -341,6 +412,14 @@ mod tests {
             std::fs::read(destination).unwrap(),
             b"existing destination marker"
         );
+        // The validated bytes staged for the blocked destination were removed
+        // with this call's own partial directory instead of lingering.
+        let leftover_partials = std::fs::read_dir(staging.inbox())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(&format!(".{blocked_destination}.")))
+            .count();
+        assert_eq!(leftover_partials, 0);
         let outside = staging.inbox().join("outside.txt");
         std::fs::write(&outside, b"must remain private").unwrap();
         assert!(matches!(
@@ -357,14 +436,11 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn read_only_inbox_keeps_validated_bytes_private_when_commit_cannot_publish() {
+    async fn read_only_inbox_fails_without_publishing_or_staging_bytes() {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let staging = StagingArea::new(root.path().join("inbox")).unwrap();
         let id = TransferId::new();
-        let partial = staging.inbox().join(format!(".{id}.partial"));
-        std::fs::create_dir(&partial).unwrap();
-        std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o500)).unwrap();
         std::fs::set_permissions(staging.inbox(), std::fs::Permissions::from_mode(0o500)).unwrap();
         let result = staging
             .commit_files(
@@ -380,12 +456,7 @@ mod tests {
             .await;
         // Restore fixture permissions before assertions or cleanup.
         std::fs::set_permissions(staging.inbox(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert!(matches!(result, Err(TransferError::Io(_))));
-        assert_eq!(
-            std::fs::read(partial.join("report.txt")).unwrap(),
-            b"payload"
-        );
-        assert!(!staging.inbox().join(id.as_str()).exists());
+        assert_eq!(std::fs::read_dir(staging.inbox()).unwrap().count(), 0);
     }
 }

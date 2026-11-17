@@ -245,3 +245,102 @@ async fn maximum_file_count_still_commits_every_file() {
         assert_eq!(std::fs::read(path).unwrap(), b"x");
     }
 }
+
+/// Rounds of two simultaneous receivers committing one transfer. A single round
+/// can interleave benignly; this many rounds reliably exposed the shared
+/// partial-directory race on unchanged code while staying well under a second.
+const CONCURRENT_RECEIVER_ROUNDS: usize = 64;
+
+/// Files per concurrent transfer: several writes widen the window in which a
+/// second receiver can remove or rename a shared partial directory.
+const CONCURRENT_RECEIVER_FILES: usize = 8;
+
+fn partial_entries(inbox: &Inbox) -> Vec<String> {
+    std::fs::read_dir(&inbox.0)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with('.'))
+        .collect()
+}
+
+/// A daemon and `pull --wait` connected for the same device both receive every
+/// file transfer and commit it to the same inbox under the same transfer id.
+/// Neither receiver may fail, and neither may delete the files the other just
+/// returned to its caller.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn regression_concurrent_receivers_of_one_transfer_keep_each_others_files() {
+    let inbox = Inbox::new();
+    let manifests: Vec<_> = (0..CONCURRENT_RECEIVER_FILES)
+        .map(|index| file(&format!("{index}.txt"), format!("body-{index}").as_bytes()))
+        .collect();
+    let payload: Vec<u8> = (0..CONCURRENT_RECEIVER_FILES)
+        .flat_map(|index| format!("body-{index}").into_bytes())
+        .collect();
+    for _ in 0..CONCURRENT_RECEIVER_ROUNDS {
+        let id = TransferId::new();
+        let receive = |staging: StagingArea| {
+            let (id, manifests, payload) = (id.clone(), manifests.clone(), payload.clone());
+            tokio::spawn(async move {
+                let paths = staging.commit_files(&id, &manifests, &payload).await?;
+                // The engine reads each staged file right after committing it.
+                let mut bodies = Vec::new();
+                for path in &paths {
+                    bodies.push(tokio::fs::read(path).await?);
+                }
+                Ok::<_, TransferError>((paths, bodies))
+            })
+        };
+        let (daemon, pull) = tokio::join!(receive(inbox.staging()), receive(inbox.staging()));
+        for (paths, bodies) in [daemon.unwrap().unwrap(), pull.unwrap().unwrap()] {
+            assert_eq!(paths.len(), CONCURRENT_RECEIVER_FILES);
+            for (index, (path, body)) in paths.iter().zip(&bodies).enumerate() {
+                let expected = format!("body-{index}").into_bytes();
+                assert_eq!(body, &expected);
+                assert_eq!(std::fs::read(path).unwrap(), expected);
+            }
+        }
+    }
+    assert!(
+        partial_entries(&inbox).is_empty(),
+        "{:?}",
+        partial_entries(&inbox)
+    );
+}
+
+/// A second receiver that finds the transfer already committed with identical
+/// content reuses those files instead of deleting and recreating them, and it
+/// never touches another receiver's in-progress partial directory.
+#[cfg(unix)]
+#[tokio::test]
+async fn regression_second_receiver_reuses_committed_files_and_spares_foreign_partials() {
+    use std::os::unix::fs::MetadataExt;
+    let inbox = Inbox::new();
+    let id = TransferId::new();
+    let manifests = [file("report.txt", b"payload")];
+    let first = inbox
+        .staging()
+        .commit_files(&id, &manifests, b"payload")
+        .await
+        .unwrap();
+    let committed_inode = std::fs::metadata(&first[0]).unwrap().ino();
+    let foreign_partial = inbox.0.join(format!(".{id}.partial"));
+    std::fs::create_dir(&foreign_partial).unwrap();
+    std::fs::write(foreign_partial.join("report.txt"), b"in progress").unwrap();
+
+    let second = inbox
+        .staging()
+        .commit_files(&id, &manifests, b"payload")
+        .await
+        .unwrap();
+    assert_eq!(first, second);
+    assert_eq!(std::fs::read(&second[0]).unwrap(), b"payload");
+    assert_eq!(
+        std::fs::metadata(&second[0]).unwrap().ino(),
+        committed_inode,
+        "the committed file was deleted and recreated"
+    );
+    assert_eq!(
+        std::fs::read(foreign_partial.join("report.txt")).unwrap(),
+        b"in progress"
+    );
+}
