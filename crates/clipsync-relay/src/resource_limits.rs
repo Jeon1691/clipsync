@@ -87,7 +87,14 @@ pub(crate) const MAX_CLIENT_CONNECTIONS: usize = 32;
 /// sockets, so a flood of sockets that never send `hello` cannot take every
 /// slot: a new socket evicts the oldest unauthenticated one instead.
 pub(crate) const UNAUTHENTICATED_CONNECTION_PERCENT: usize = 75;
-/// Percent, for [`UNAUTHENTICATED_CONNECTION_PERCENT`].
+/// Share of the relay-wide connection slots, in percent, by which sockets
+/// evicted at the relay-wide cap may exceed it while they close (at least one
+/// socket). A non-member socket gives its slot back within a fraction of a
+/// second of its eviction, so a small margin absorbs a burst of newcomers
+/// while the open-socket count stays close to the cap.
+pub(crate) const EVICTION_OVERSHOOT_PERCENT: usize = 5;
+/// Percent, for [`UNAUTHENTICATED_CONNECTION_PERCENT`] and
+/// [`EVICTION_OVERSHOOT_PERCENT`].
 const PERCENT: usize = 100;
 
 /// Time a WebSocket has to send a valid `hello` after the upgrade, however
@@ -129,6 +136,7 @@ const _: () = {
     assert!(MAX_CLIENT_CONNECTIONS <= MAX_CONNECTIONS);
     assert!(MAX_CLIENT_QUEUED_TEXT_ENVELOPES <= MAX_QUEUED_TEXT_ENVELOPES);
     assert!(UNAUTHENTICATED_CONNECTION_PERCENT > 0 && UNAUTHENTICATED_CONNECTION_PERCENT < PERCENT);
+    assert!(EVICTION_OVERSHOOT_PERCENT < PERCENT);
     assert!(MAX_ROOMS > MAX_CONNECTIONS + MAX_ACTIVE_PAIRING_SESSIONS);
 };
 
@@ -266,6 +274,8 @@ impl RelayResourceLimits {
                 .max(1),
             max_per_client: self.max_client_connections,
             max_per_site: site_limit(self.max_client_connections, self.max_connections),
+            max_eviction_overshoot: (self.max_connections * EVICTION_OVERSHOOT_PERCENT / PERCENT)
+                .max(1),
         }
     }
 }

@@ -5,12 +5,14 @@ use crate::rate_limit::IPV6_SITE_CLIENT_SHARE;
 
 const MAX_TOTAL: usize = 3;
 const MAX_PER_CLIENT: usize = 2;
-/// Caps where every slot may be unauthenticated, so nothing is evicted.
+/// Caps where every slot may be unauthenticated and nothing may go past the
+/// relay-wide cap, so nothing is evicted.
 const LIMITS: ConnectionLimits = ConnectionLimits {
     max_total: MAX_TOTAL,
     max_unauthenticated: MAX_TOTAL,
     max_per_client: MAX_PER_CLIENT,
     max_per_site: MAX_TOTAL,
+    max_eviction_overshoot: 0,
 };
 
 #[test]
@@ -81,6 +83,7 @@ fn ipv6_connections_share_a_cap_per_48_site() {
         max_unauthenticated: CLIENTS * MAX_PER_CLIENT,
         max_per_client: MAX_PER_CLIENT,
         max_per_site: crate::rate_limit::site_limit(MAX_PER_CLIENT, CLIENTS * MAX_PER_CLIENT),
+        max_eviction_overshoot: 0,
     };
     let site_cap = MAX_PER_CLIENT * IPV6_SITE_CLIENT_SHARE;
     assert_eq!(limits.max_per_site, site_cap);
@@ -135,6 +138,7 @@ fn unauthenticated_sockets_past_their_share_evict_the_oldest_one() {
         max_unauthenticated: MAX_UNAUTHENTICATED,
         max_per_client: 1,
         max_per_site: 1,
+        max_eviction_overshoot: 0,
     };
     let counts = Arc::new(ConnectionCounts::default());
     let client = |n: u8| IpAddr::from([198, 51, 100, n]);
@@ -145,7 +149,7 @@ fn unauthenticated_sockets_past_their_share_evict_the_oldest_one() {
         .collect();
     assert_eq!(counts.total(), 4);
 
-    // At the relay-wide cap nothing is evicted: there is no slot to hand over.
+    // With no room past the relay-wide cap, nothing is evicted there.
     assert_eq!(
         counts.acquire(client(9), limits).err(),
         Some(ConnectionRefused::RelayFull)
@@ -205,5 +209,74 @@ fn concurrent_acquires_never_exceed_either_cap() {
     }
     drop(slots);
     assert_eq!(counts.total(), 0);
+    assert_eq!(counts.clients(), 0);
+}
+
+/// Regression for pre-hello sockets locking out newcomers: once room members
+/// hold more than the slots kept for them, unauthenticated sockets fill the
+/// relay before reaching their own share. A newcomer must still evict the
+/// oldest of them rather than be refused while evictable sockets exist.
+#[test]
+fn regression_pre_hello_sockets_cannot_fill_the_relay_once_members_hold_the_reserve() {
+    const MAX_TOTAL: usize = 8;
+    const MEMBERS: usize = 3;
+    let limits = ConnectionLimits {
+        max_total: MAX_TOTAL,
+        max_unauthenticated: 6,
+        max_per_client: 1,
+        max_per_site: 1,
+        max_eviction_overshoot: 1,
+    };
+    let counts = Arc::new(ConnectionCounts::default());
+    let client = |n: usize| IpAddr::from([198, 51, 100, n as u8]);
+    let members: Vec<_> = (0..MEMBERS)
+        .map(|n| {
+            let slot = counts.acquire(client(n), limits).unwrap();
+            assert!(slot.authenticate());
+            slot
+        })
+        .collect();
+    // Fewer than the unauthenticated share, yet the relay is full.
+    let flood: Vec<_> = (MEMBERS..MAX_TOTAL)
+        .map(|n| counts.acquire(client(n), limits).unwrap())
+        .collect();
+    assert_eq!(counts.total(), MAX_TOTAL);
+    assert!(counts.unauthenticated() < limits.max_unauthenticated);
+
+    let newcomer = counts
+        .acquire(client(MAX_TOTAL), limits)
+        .expect("a newcomer was refused while an evictable socket was open");
+    let evicted = &flood[0];
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+        .block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(1), evicted.evicted())
+                .await
+                .expect("the oldest unauthenticated socket was not evicted");
+        });
+    assert!(!evicted.authenticate());
+    assert!(
+        newcomer.authenticate(),
+        "the newcomer can still authenticate"
+    );
+    assert_eq!(counts.unauthenticated(), MAX_TOTAL - MEMBERS - 1);
+    // Only the closing socket is past the cap, and only by the overshoot.
+    assert_eq!(counts.total(), MAX_TOTAL + limits.max_eviction_overshoot);
+    assert_eq!(
+        counts.acquire(client(MAX_TOTAL + 1), limits).err(),
+        Some(ConnectionRefused::RelayFull),
+        "evictions at the cap went past the overshoot"
+    );
+    let mut flood = flood.into_iter();
+    drop(flood.next());
+    // Once the evicted socket has closed, the next newcomer evicts again.
+    let next = counts.acquire(client(MAX_TOTAL + 1), limits).unwrap();
+    assert_eq!(counts.total(), MAX_TOTAL + limits.max_eviction_overshoot);
+    assert_eq!(counts.unauthenticated(), MAX_TOTAL - MEMBERS - 1);
+    drop((members, flood, newcomer, next));
+    assert_eq!(counts.total(), 0);
+    assert_eq!(counts.unauthenticated(), 0);
     assert_eq!(counts.clients(), 0);
 }

@@ -187,4 +187,7 @@ fn derived_limits_keep_a_reserve_for_authenticated_sockets_and_group_ipv6_sites(
         ..defaults
     };
     assert_eq!(single.connection_limits().max_unauthenticated, 1);
+    // Evictions at the relay-wide cap always have room to close.
+    assert_eq!(single.connection_limits().max_eviction_overshoot, 1);
+    assert_eq!(defaults.connection_limits().max_eviction_overshoot, 25);
 }

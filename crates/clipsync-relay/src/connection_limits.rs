@@ -4,11 +4,14 @@
 //! connections.
 //!
 //! Every socket starts unauthenticated. Unauthenticated sockets may hold at
-//! most `max_unauthenticated` of the relay-wide slots; once they do, a new
-//! socket evicts the oldest of them instead of being refused, so a flood of
-//! sockets that never send `hello` cannot lock out clients that do. The
-//! remaining slots are kept for authenticated sockets and for evicted ones
-//! that have not finished closing, so the relay-wide cap is never exceeded.
+//! most `max_unauthenticated` of the relay-wide slots; once they do, or once
+//! the relay-wide cap is reached while any of them is open, a new socket
+//! evicts the oldest of them instead of being refused, so a flood of sockets
+//! that never send `hello` cannot lock out clients that do. Authenticated and
+//! unauthenticated sockets together never hold more than `max_total` slots.
+//! Evicted sockets keep theirs until they have closed: below the cap in the
+//! slots the unauthenticated share leaves free, and at the cap in at most
+//! `max_eviction_overshoot` slots past it.
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -40,6 +43,9 @@ pub(crate) struct ConnectionLimits {
     pub(crate) max_per_client: usize,
     /// Most slots per IPv6 /48; IPv4 clients have no site.
     pub(crate) max_per_site: usize,
+    /// Most slots past `max_total` held by sockets evicted at the relay-wide
+    /// cap while they close.
+    pub(crate) max_eviction_overshoot: usize,
 }
 
 #[derive(Default)]
@@ -66,8 +72,8 @@ impl ConnectionCounts {
     /// Take a slot for a connection from `ip`, or refuse without taking one.
     /// The client's own caps are checked first, so a client retrying at its
     /// cap never inflates the relay-wide count seen by others. When the
-    /// unauthenticated share is full, the oldest unauthenticated socket is
-    /// told to close and the new one is admitted in its place.
+    /// unauthenticated share or the relay is full, the oldest unauthenticated
+    /// socket is told to close and the new one is admitted in its place.
     pub(crate) fn acquire(
         self: &Arc<Self>,
         ip: IpAddr,
@@ -90,16 +96,23 @@ impl ConnectionCounts {
             .unwrap_or_else(PoisonError::into_inner);
         // Under the same lock as the unauthenticated set, so the two stay
         // consistent: every unauthenticated socket holds a counted slot.
-        if self.total.load(Ordering::Acquire) >= limits.max_total {
+        let total = self.total.load(Ordering::Acquire);
+        let relay_full = total >= limits.max_total;
+        // At the cap a newcomer may only take an unauthenticated socket's
+        // place, so authenticated and unauthenticated sockets together stay
+        // within `max_total`; only sockets still closing go past it.
+        if relay_full
+            && (unauthenticated.is_empty()
+                || total >= limits.max_total + limits.max_eviction_overshoot)
+        {
             drop(unauthenticated);
             self.release_client(key, site);
             return Err(ConnectionRefused::RelayFull);
         }
         self.total.fetch_add(1, Ordering::AcqRel);
-        if unauthenticated.len() >= limits.max_unauthenticated {
+        if relay_full || unauthenticated.len() >= limits.max_unauthenticated {
             if let Some((_, oldest)) = unauthenticated.pop_first() {
-                // The evicted socket keeps its slot until it has closed, which
-                // the authenticated share leaves room for.
+                // The evicted socket keeps its slot until it has closed.
                 oldest.notify_one();
             }
         }

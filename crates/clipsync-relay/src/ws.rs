@@ -234,25 +234,7 @@ async fn handle_socket(
     };
 
     if let Some(c) = ctx {
-        state
-            .connections
-            .remove_if(&c.device_id, |_, sender| sender.same_channel(&tx));
-        if let (Some(sid), Some(side)) = (&c.pairing_sid, c.pairing_side) {
-            if let Some(mut session) = state.pairing_mut(sid) {
-                if session.pairing_senders[side]
-                    .as_ref()
-                    .is_some_and(|sender| sender.same_channel(&tx))
-                {
-                    session.pairing_senders[side] = None;
-                    session.pending_spake = [None, None];
-                }
-            }
-        }
-        // A replacement may already own this device's routing entry. Its
-        // peers must stay online when the superseded socket finishes closing.
-        if !state.is_online(&c.device_id) {
-            notify_peers_left(&state, &c).await;
-        }
+        forget_socket(&state, &tx, &c).await;
     }
     // A socket whose client stopped reading may have a full queue behind a
     // writer blocked on its sink, so the close is queued without waiting.
@@ -266,6 +248,30 @@ async fn handle_socket(
         let _ = writer.await;
     }
     drop(slot);
+}
+
+/// Removes a closing socket's routes and tells its room that its device left,
+/// unless a replacement socket already routes for that device.
+async fn forget_socket(state: &Arc<RelayState>, tx: &mpsc::Sender<WsOut>, c: &ConnCtx) {
+    state
+        .connections
+        .remove_if(&c.device_id, |_, sender| sender.same_channel(tx));
+    if let (Some(sid), Some(side)) = (&c.pairing_sid, c.pairing_side) {
+        if let Some(mut session) = state.pairing_mut(sid) {
+            if session.pairing_senders[side]
+                .as_ref()
+                .is_some_and(|sender| sender.same_channel(tx))
+            {
+                session.pairing_senders[side] = None;
+                session.pending_spake = [None, None];
+            }
+        }
+    }
+    // A replacement may already own this device's routing entry. Its
+    // peers must stay online when the superseded socket finishes closing.
+    if !state.is_online(&c.device_id) {
+        notify_peers_left(state, c).await;
+    }
 }
 
 /// Reads and handles the socket's messages until it closes, misses a
@@ -866,11 +872,18 @@ fn fanout_except_now(state: &RelayState, room_id: &str, except: &str, msg: &Cont
     }
 }
 
+/// Only a member's closing socket waits for its peers' queue space. A
+/// non-member's slot stays evictable and bounded by its deadlines, so a peer
+/// that stopped reading must not hold it open: that peer misses the notice.
 async fn notify_peers_left(state: &Arc<RelayState>, c: &ConnCtx) {
     let msg = ControlMessage::PeerLeft {
         device_id: DeviceId::from(c.device_id.as_str()),
     };
-    fanout_except(state, &c.room_id, &c.device_id, &msg).await;
+    if c.is_member() {
+        fanout_except(state, &c.room_id, &c.device_id, &msg).await;
+    } else {
+        fanout_except_now(state, &c.room_id, &c.device_id, &msg);
+    }
 }
 
 async fn send_msg(tx: &mpsc::Sender<WsOut>, msg: &ControlMessage) {

@@ -627,21 +627,32 @@ async fn pairing_create_answers_429_per_client_and_503_when_the_relay_is_full() 
 /// Serve the relay with `limits` and every peer trusted as a proxy, so tests
 /// pick each connection's client address with `X-Forwarded-For`.
 async fn serve_limited(limits: RelayResourceLimits) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let (address, server, _) = serve_limited_state(limits).await;
+    (address, server)
+}
+
+/// [`serve_limited`], also returning the relay's state.
+async fn serve_limited_state(
+    limits: RelayResourceLimits,
+) -> (SocketAddr, tokio::task::JoinHandle<()>, Arc<RelayState>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let app = router_with_limits(
-        RelayConfig {
-            bind: address,
-            public_url: format!("http://{address}"),
-            token_secret: rand::random::<[u8; 32]>().to_vec(),
-            webhook_url: None,
-            webhook_secret: None,
-        },
-        vec![address.ip().into()],
-        PairingJoinLimits::default(),
-        limits,
-    )
-    .unwrap();
+    let state = Arc::new(
+        RelayState::with_limits(
+            RelayConfig {
+                bind: address,
+                public_url: format!("http://{address}"),
+                token_secret: rand::random::<[u8; 32]>().to_vec(),
+                webhook_url: None,
+                webhook_secret: None,
+            },
+            vec![address.ip().into()],
+            PairingJoinLimits::default(),
+            limits,
+        )
+        .unwrap(),
+    );
+    let app = router_with_state(state.clone());
     let server = tokio::spawn(async move {
         axum::serve(
             listener,
@@ -650,7 +661,54 @@ async fn serve_limited(limits: RelayResourceLimits) -> (SocketAddr, tokio::task:
         .await
         .unwrap();
     });
-    (address, server)
+    (address, server, state)
+}
+
+/// A device-token `hello` for the owner of a freshly paired room.
+fn member_hello(state: &RelayState) -> String {
+    use clipsync_protocol::{ClientRole, ControlMessage};
+    let owner = DeviceId::new();
+    let sid = PairingSessionId::new();
+    let client: IpAddr = "127.0.0.1".parse().unwrap();
+    let offer = state
+        .create_pairing(
+            CreatePairingRequest {
+                protocol_version: PROTOCOL_VERSION,
+                pairing_session_id: sid.clone(),
+                device_id: owner.clone(),
+                device_name: "owner".into(),
+                os: "test".into(),
+                ttl_secs: None,
+            },
+            client,
+        )
+        .unwrap();
+    state
+        .join_pairing(
+            JoinPairingRequest {
+                protocol_version: PROTOCOL_VERSION,
+                pairing_code: offer.pairing_code,
+                device_id: DeviceId::new(),
+                device_name: "member".into(),
+                os: "test".into(),
+            },
+            client,
+        )
+        .unwrap();
+    assert!(state.complete_pairing(sid.as_str()).is_none());
+    let (owner_token, _, room_id, _, _) = state.complete_pairing(sid.as_str()).unwrap();
+    ControlMessage::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        device_id: owner,
+        device_name: "owner".into(),
+        os: "test".into(),
+        role: ClientRole::Member,
+        room_id: Some(room_id),
+        token: owner_token,
+        pairing_session_id: None,
+    }
+    .encode()
+    .unwrap()
 }
 
 type WsClient =
@@ -678,6 +736,8 @@ async fn connect_as(address: SocketAddr, client: &str) -> Result<WsClient, Statu
 /// and a closed socket frees its slot.
 #[tokio::test]
 async fn websocket_connections_past_the_client_and_relay_caps_are_refused() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as ClientMessage;
     const MAX_CONNECTIONS: usize = 3;
     const MAX_CLIENT_CONNECTIONS: usize = 2;
 
@@ -709,14 +769,28 @@ async fn websocket_connections_past_the_client_and_relay_caps_are_refused() {
         drop(reopened);
         server.abort();
 
-        // A one-slot relay: the second connection, from anyone, gets 503.
-        let (address, server) = serve_limited(RelayResourceLimits {
+        // A one-slot relay held by a room member: the second connection, from
+        // anyone, gets 503 (a pre-hello socket would be evicted instead).
+        let (address, server, state) = serve_limited_state(RelayResourceLimits {
             max_connections: 1,
             max_client_connections: 1,
             ..Default::default()
         })
         .await;
-        let _held = connect_as(address, "192.0.2.1").await.unwrap();
+        let mut held = connect_as(address, "192.0.2.1").await.unwrap();
+        held.send(ClientMessage::Text(member_hello(&state).into()))
+            .await
+            .unwrap();
+        match held.next().await {
+            Some(Ok(ClientMessage::Text(text))) => assert!(
+                matches!(
+                    clipsync_protocol::ControlMessage::decode(&text).unwrap(),
+                    clipsync_protocol::ControlMessage::HelloOk { .. }
+                ),
+                "{text}"
+            ),
+            other => panic!("expected hello_ok, got {other:?}"),
+        }
         assert_eq!(
             connect_as(address, "192.0.2.2").await.err(),
             Some(StatusCode::SERVICE_UNAVAILABLE)

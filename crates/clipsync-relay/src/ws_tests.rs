@@ -1631,6 +1631,7 @@ async fn an_evicted_unauthenticated_socket_stops_reading_at_once() {
         max_unauthenticated: 1,
         max_per_client: 2,
         max_per_site: 2,
+        max_eviction_overshoot: 0,
     };
     let state = state_with_hello_deadline(HELLO);
     let oldest = state
@@ -1823,6 +1824,7 @@ async fn a_pairing_socket_stays_evictable_after_its_hello() {
         max_unauthenticated: 1,
         max_per_client: 2,
         max_per_site: 2,
+        max_eviction_overshoot: 0,
     };
     let state = state_with_hello_deadline(HELLO);
     let (sid, greeting) = pairing_hello(&state);
@@ -1865,4 +1867,41 @@ async fn a_pairing_socket_stays_evictable_after_its_hello() {
         .unwrap();
     assert!(paired);
     drop(frames);
+}
+
+/// Regression for a closing pairing socket holding its connection slot: the
+/// room it paired into may have a member whose queue is full because it
+/// stopped reading. Telling that member the pairing device left must not
+/// wait for queue space, or the closed socket keeps its slot indefinitely.
+#[tokio::test]
+async fn regression_a_closing_pairing_socket_never_waits_on_a_stalled_peer() {
+    /// Far beyond a cleanup that does not wait.
+    const HANG: Duration = Duration::from_secs(5);
+    let state = state();
+    let (rid, owner, member, _, _) = room(&state);
+    // The owner is online but has stopped reading: its queue is full.
+    let (stalled, _unread) = mpsc::channel(1);
+    stalled
+        .try_send(WsOut::Text("unread".into()))
+        .expect("fill the stalled queue");
+    state.register_conn(owner.as_str(), stalled);
+    // The joiner's pairing socket closes; it is not a room member.
+    let (tx, _rx) = mpsc::channel(8);
+    state.register_conn(member.as_str(), tx.clone());
+    let pairing = ConnCtx {
+        device_id: member.to_string(),
+        room_id: rid.to_string(),
+        pairing_sid: None,
+        device_role: DeviceRole::Member,
+        pairing_side: None,
+        client: TEST_CLIENT,
+        presence: None,
+        pairing_deadline: Some(tokio::time::Instant::now() + HANG),
+    };
+    assert!(!pairing.is_member());
+    tokio::time::timeout(HANG, forget_socket(&state, &tx, &pairing))
+        .await
+        .expect("a closing pairing socket waited on a stalled peer's queue");
+    // `handle_socket` frees the slot once this returns and the writer closes.
+    assert!(!state.is_online(member.as_str()));
 }

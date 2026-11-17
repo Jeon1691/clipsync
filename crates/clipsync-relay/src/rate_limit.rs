@@ -17,9 +17,11 @@ use dashmap::DashMap;
 /// IPv6 sites are normally delegated at least a /64, so one client controls
 /// every address in it; count them as one client.
 const IPV6_CLIENT_PREFIX_LEN: u32 = 64;
-/// A /48 is the largest prefix routinely delegated to one end site (RFC 6177;
-/// ISPs often hand out a /56, which a /48 contains). One site can spread over
-/// many /64s, so per-site limits stop it from multiplying its client limits.
+/// A /48 is the largest prefix routinely delegated to one end site (RFC 6177).
+/// One site can spread over many /64s, so per-site limits stop it from
+/// multiplying its client limits. A /48 is not always one site: ISPs that hand
+/// out /56s or mobile /64s may put many customers in one /48, and they then
+/// share its budget, so one of them can spend it for its neighbours.
 const IPV6_SITE_PREFIX_LEN: u32 = 48;
 /// Clients' worth of a limit one IPv6 site may use: a few devices or
 /// households behind one site router each get their own /64.
