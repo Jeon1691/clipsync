@@ -665,7 +665,7 @@ async fn item_from_payload(
             })
         }
         ItemKind::Files => {
-            let paths = staging.commit_files(tid, &manifest.files, &payload).await?;
+            let paths = staging.commit_files(tid, &manifest.files, payload).await?;
             let mut files = Vec::new();
             for (meta, path) in manifest.files.iter().zip(paths.iter()) {
                 files.push(FileRef {

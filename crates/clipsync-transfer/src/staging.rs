@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use clipsync_crypto::blake3_hex;
 use clipsync_protocol::{FileManifest, TransferId, CHUNK_SIZE, FILE_MAX_COUNT, TRANSFER_MAX_BYTES};
@@ -16,11 +17,7 @@ pub struct StagingArea {
 impl StagingArea {
     pub fn new(root: PathBuf) -> std::io::Result<Self> {
         std::fs::create_dir_all(&root)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700));
-        }
+        restrict(&root, PRIVATE_DIR_MODE);
         Ok(Self { root })
     }
 
@@ -39,22 +36,29 @@ impl StagingArea {
         }
     }
 
-    /// Validate `files` against `payload` and publish them under
+    /// Validate `files` against `payload` and publish exactly those files as
     /// `<inbox>/<transfer_id>/`.
     ///
     /// Several local receivers (for example the daemon and `clipsync pull
     /// --wait` connected for the same device) can receive the same transfer
     /// and commit it to the same inbox at the same time. Each call therefore
-    /// stages into its own uniquely named partial directory, never removes a
-    /// directory another receiver created, and places files so that a
-    /// transfer already committed with identical content is reused rather
-    /// than deleted and rewritten.
+    /// stages into its own uniquely named partial directory and publishes it
+    /// with one directory rename, so the published directory always holds one
+    /// complete manifest and nothing else. A directory that already holds
+    /// exactly this manifest (another receiver's commit, which its caller may
+    /// be reading) is reused untouched; any other directory is a stale commit
+    /// of a retried transfer and is swapped out whole.
+    ///
+    /// The filesystem work runs to completion on the blocking pool even if
+    /// this future is dropped, and the partial directory is removed on every
+    /// exit path, so cancelling a receive never strands staged bytes.
     pub async fn commit_files(
         &self,
         transfer_id: &TransferId,
         files: &[FileManifest],
-        payload: &[u8],
+        payload: impl Into<Vec<u8>>,
     ) -> Result<Vec<PathBuf>> {
+        let payload = payload.into();
         if files.len() > FILE_MAX_COUNT || payload.len() as u64 > TRANSFER_MAX_BYTES {
             return Err(TransferError::Integrity);
         }
@@ -63,106 +67,232 @@ impl StagingArea {
         if payload.len() != expected {
             return Err(TransferError::Integrity);
         }
-        let dest_dir = self.root.join(&id);
-        // Unique per call: the process id names the owner for diagnostics and
-        // a fresh ULID separates concurrent calls inside one process. The
-        // transfer id is ULID-alphabet only, so this dot-prefixed name can
-        // never collide with a published `<transfer_id>` directory.
-        let tmp_dir = self.root.join(format!(
-            ".{id}.{}.{}.partial",
-            std::process::id(),
-            ulid::Ulid::generate()
-        ));
-        // `create_dir`, not `create_dir_all`: an existing entry is never
-        // adopted, so this call only ever writes into a directory it owns.
-        tokio::fs::create_dir(&tmp_dir).await?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&tmp_dir, std::fs::Permissions::from_mode(0o700));
-        }
-        let result = stage_and_place(&tmp_dir, &dest_dir, files, payload).await;
-        // The partial directory belongs to this call alone. After a whole
-        // directory rename it no longer exists; otherwise drop what is left.
-        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
-        result.map(|names| names.into_iter().map(|n| dest_dir.join(n)).collect())
+        let root = self.root.clone();
+        let files = files.to_vec();
+        tokio::task::spawn_blocking(move || commit_blocking(&root, &id, &files, &payload))
+            .await
+            .map_err(|err| std::io::Error::other(err.to_string()))?
     }
 }
 
-/// Write every validated file into `tmp_dir`, then publish them at `dest_dir`.
-async fn stage_and_place(
-    tmp_dir: &Path,
-    dest_dir: &Path,
+/// A partial directory may be swept once it is this much older than the
+/// transfer idle limit. A live commit keeps its partial directory only while
+/// it writes a payload it already holds in memory (at most
+/// `TRANSFER_MAX_BYTES`), which takes seconds; sixty idle periods (one hour)
+/// leaves a wide margin for slow disks, so the sweep never removes the
+/// directory of a receiver that is still running.
+const STALE_STAGING_IDLE_MULTIPLE: u64 = 60;
+const STALE_STAGING_AGE: Duration =
+    Duration::from_secs(clipsync_protocol::TRANSFER_IDLE_SECS * STALE_STAGING_IDLE_MULTIPLE);
+
+/// Leftover directories removed per commit. Each commit can strand at most
+/// two (its partial and a retired stale commit, only if the process dies),
+/// so removing more than two per commit drains leftovers faster than they
+/// can accumulate while keeping each commit's extra work bounded.
+const STALE_STAGING_REMOVALS_PER_COMMIT: usize = 4;
+
+/// Publication attempts before giving up. Each retry means another local
+/// receiver changed the destination between inspection and rename; a device
+/// runs only a few receivers at once (daemon, `pull`), so a handful of
+/// attempts always converges on one complete commit.
+const PUBLISH_ATTEMPTS: usize = 4;
+
+/// Suffix of a directory a commit is still writing.
+const PARTIAL_SUFFIX: &str = ".partial";
+/// Suffix of a stale commit that was swapped out and is being removed.
+const RETIRED_SUFFIX: &str = ".retired";
+
+/// Removes a staging directory owned by one commit when the commit ends,
+/// whether it returns early, fails, or unwinds from a panic.
+struct OwnedDir {
+    path: PathBuf,
+}
+
+impl Drop for OwnedDir {
+    fn drop(&mut self) {
+        // After a successful publish the directory no longer exists here, and
+        // its unique name means nothing else can have taken its place.
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// A fresh, unique dot-prefixed name for this commit's scratch directories.
+/// The process id names the owner for diagnostics and a fresh ULID separates
+/// concurrent calls inside one process. Transfer ids are ULID-alphabet only,
+/// so these names can never collide with a published `<transfer_id>`.
+fn scratch_name(id: &str, suffix: &str) -> String {
+    format!(
+        ".{id}.{}.{}{suffix}",
+        std::process::id(),
+        ulid::Ulid::generate()
+    )
+}
+
+fn commit_blocking(
+    root: &Path,
+    id: &str,
     files: &[FileManifest],
     payload: &[u8],
-) -> Result<Vec<String>> {
-    let mut seen_names = std::collections::HashSet::new();
+) -> Result<Vec<PathBuf>> {
+    sweep_stale_staging(root, SystemTime::now(), STALE_STAGING_AGE);
+    let names = validated_names(files, payload)?;
+    let dest_dir = root.join(id);
+    let staged = OwnedDir {
+        path: root.join(scratch_name(id, PARTIAL_SUFFIX)),
+    };
+    // `create_dir`, not `create_dir_all`: an existing entry is never
+    // adopted, so this call only ever writes into a directory it owns.
+    std::fs::create_dir(&staged.path)?;
+    restrict(&staged.path, PRIVATE_DIR_MODE);
     let mut offset = 0usize;
-    let mut written = Vec::new();
+    for (name, file) in names.iter().zip(files) {
+        let end = offset + file.size as usize;
+        let target = staged.path.join(name);
+        std::fs::write(&target, &payload[offset..end])?;
+        restrict(&target, PRIVATE_FILE_MODE);
+        offset = end;
+    }
+    publish(root, id, &staged.path, &dest_dir, &names, files)?;
+    Ok(names.into_iter().map(|name| dest_dir.join(name)).collect())
+}
+
+/// Check every name and hash before anything touches the filesystem.
+fn validated_names(files: &[FileManifest], payload: &[u8]) -> Result<Vec<String>> {
+    let mut names = Vec::with_capacity(files.len());
+    let mut seen = std::collections::HashSet::new();
+    let mut offset = 0usize;
     for file in files {
         let name = safe_filename(&file.name)?;
-        if !seen_names.insert(name.clone()) {
+        if !seen.insert(name.clone()) {
             return Err(TransferError::UnsafeName(name));
         }
         let end = offset + file.size as usize;
-        if end > payload.len() {
+        if end > payload.len() || blake3_hex(&payload[offset..end]) != file.hash {
             return Err(TransferError::Integrity);
         }
-        let slice = &payload[offset..end];
-        if blake3_hex(slice) != file.hash {
-            return Err(TransferError::Integrity);
-        }
-        let dest = tmp_dir.join(&name);
-        tokio::fs::write(&dest, slice).await?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600));
-        }
-        written.push(name);
+        names.push(name);
         offset = end;
     }
-    // First publisher: one atomic rename makes the whole set visible at once.
-    // It fails when the destination already holds another commit of this
-    // transfer (rename never replaces a non-empty directory), or when the
-    // destination is not a directory at all.
-    let rename_error = match tokio::fs::rename(tmp_dir, dest_dir).await {
-        Ok(()) => return Ok(written),
-        Err(err) => err,
-    };
-    // Only merge into a real directory; a file or symlink at the destination
-    // is an error so placement can never be redirected outside the inbox.
-    let dest_is_dir = tokio::fs::symlink_metadata(dest_dir)
-        .await
-        .is_ok_and(|meta| meta.is_dir());
-    if !dest_is_dir {
-        return Err(rename_error.into());
-    }
-    for (name, file) in written.iter().zip(files) {
-        let target = dest_dir.join(name);
-        if holds_committed_file(&target, file).await {
-            // Another receiver already published these exact bytes, and
-            // its caller may be reading them: keep that file untouched.
-            continue;
-        }
-        // Per-file rename atomically replaces a stale or different file (a
-        // retried transfer) and never exposes a partially written file.
-        tokio::fs::rename(tmp_dir.join(name), &target).await?;
-    }
-    Ok(written)
+    Ok(names)
 }
 
-/// True when `target` is a regular file whose bytes match the manifest entry.
-async fn holds_committed_file(target: &Path, file: &FileManifest) -> bool {
-    let is_matching_file = tokio::fs::symlink_metadata(target)
-        .await
-        .is_ok_and(|meta| meta.is_file() && meta.len() == file.size);
-    if !is_matching_file {
+/// Make `staged` visible as `dest_dir`, or reuse an identical commit there.
+fn publish(
+    root: &Path,
+    id: &str,
+    staged: &Path,
+    dest_dir: &Path,
+    names: &[String],
+    files: &[FileManifest],
+) -> Result<()> {
+    for _ in 0..PUBLISH_ATTEMPTS {
+        match std::fs::symlink_metadata(dest_dir) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                // A rename onto a directory another receiver published in the
+                // meantime fails; inspect the destination again.
+                if std::fs::rename(staged, dest_dir).is_ok() {
+                    return Ok(());
+                }
+            }
+            Err(err) => return Err(err.into()),
+            // Check the type explicitly instead of relying on rename: Windows
+            // lets a directory rename replace a file. A file or symlink here
+            // is an error so placement is never redirected or destroyed.
+            Ok(meta) if !meta.is_dir() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "transfer destination is not a directory",
+                )
+                .into());
+            }
+            Ok(_) if holds_exactly(dest_dir, names, files) => return Ok(()),
+            Ok(_) => {
+                // A stale commit of a retried transfer: move it aside whole
+                // so the published directory never mixes two manifests.
+                let retired = OwnedDir {
+                    path: root.join(scratch_name(id, RETIRED_SUFFIX)),
+                };
+                match std::fs::rename(dest_dir, &retired.path) {
+                    Ok(()) => {
+                        if std::fs::rename(staged, dest_dir).is_ok() {
+                            return Ok(());
+                        }
+                    }
+                    // Another receiver moved it first; inspect again.
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(err) => return Err(err.into()),
+                }
+            }
+        }
+    }
+    Err(std::io::Error::other("transfer destination kept changing during publication").into())
+}
+
+/// True when `dir` contains exactly the manifest's files, each a regular file
+/// whose size and BLAKE3 hash match.
+fn holds_exactly(dir: &Path, names: &[String], files: &[FileManifest]) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    if entries.count() != names.len() {
         return false;
     }
-    tokio::fs::read(target)
-        .await
-        .is_ok_and(|bytes| blake3_hex(&bytes) == file.hash)
+    names.iter().zip(files).all(|(name, file)| {
+        let target = dir.join(name);
+        std::fs::symlink_metadata(&target)
+            .is_ok_and(|meta| meta.is_file() && meta.len() == file.size)
+            && std::fs::read(&target).is_ok_and(|bytes| blake3_hex(&bytes) == file.hash)
+    })
+}
+
+/// Remove up to `STALE_STAGING_REMOVALS_PER_COMMIT` partial or retired
+/// directories last modified more than `max_age` before `now`, left behind by
+/// a receiver process that exited mid-commit. Published transfers, files,
+/// symlinks and fresh directories are never touched.
+fn sweep_stale_staging(root: &Path, now: SystemTime, max_age: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        if removed == STALE_STAGING_REMOVALS_PER_COMMIT {
+            break;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with('.')
+            || !(name.ends_with(PARTIAL_SUFFIX) || name.ends_with(RETIRED_SUFFIX))
+        {
+            continue;
+        }
+        let path = entry.path();
+        let is_stale_dir = std::fs::symlink_metadata(&path).is_ok_and(|meta| {
+            meta.is_dir()
+                && meta.modified().is_ok_and(|modified| {
+                    now.duration_since(modified).unwrap_or_default() > max_age
+                })
+        });
+        if is_stale_dir && std::fs::remove_dir_all(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Owner-only permissions for staged directories and files on Unix.
+const PRIVATE_DIR_MODE: u32 = 0o700;
+const PRIVATE_FILE_MODE: u32 = 0o600;
+
+fn restrict(path: &Path, mode: u32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
 }
 
 pub struct IncomingTransfer {
@@ -432,6 +562,68 @@ mod tests {
         let file_root = root.path().join("file-root");
         std::fs::write(&file_root, b"file").unwrap();
         assert!(StagingArea::new(file_root).is_err());
+    }
+
+    #[test]
+    fn owned_staging_directory_is_removed_with_its_contents_when_dropped() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root
+            .path()
+            .join(scratch_name(TransferId::new().as_str(), PARTIAL_SUFFIX));
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("staged.txt"), b"staged").unwrap();
+        drop(OwnedDir { path: path.clone() });
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn stale_staging_sweep_is_bounded_and_spares_live_and_published_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let inbox = root.path();
+        let id = TransferId::new();
+        let leftovers: Vec<_> = (0..STALE_STAGING_REMOVALS_PER_COMMIT)
+            .map(|index| {
+                let suffix = if index % 2 == 0 {
+                    PARTIAL_SUFFIX
+                } else {
+                    RETIRED_SUFFIX
+                };
+                let path = inbox.join(scratch_name(id.as_str(), suffix));
+                std::fs::create_dir(&path).unwrap();
+                std::fs::write(path.join("staged.txt"), b"staged").unwrap();
+                path
+            })
+            .collect();
+        let published = inbox.join(id.as_str());
+        std::fs::create_dir(&published).unwrap();
+        let partial_marker_file = inbox.join(format!(".{id}{PARTIAL_SUFFIX}"));
+        std::fs::write(&partial_marker_file, b"not a directory").unwrap();
+        let unrelated = inbox.join(".unrelated");
+        std::fs::create_dir(&unrelated).unwrap();
+
+        // Every entry was just written, so a sweep at the real time keeps
+        // them all: a receiver may still be writing into a fresh partial.
+        assert_eq!(
+            sweep_stale_staging(inbox, SystemTime::now(), STALE_STAGING_AGE),
+            0
+        );
+        assert!(leftovers.iter().all(|path| path.exists()));
+
+        let extra = inbox.join(scratch_name(id.as_str(), PARTIAL_SUFFIX));
+        std::fs::create_dir(&extra).unwrap();
+        let later = SystemTime::now() + STALE_STAGING_AGE * 2;
+        assert_eq!(
+            sweep_stale_staging(inbox, later, STALE_STAGING_AGE),
+            STALE_STAGING_REMOVALS_PER_COMMIT
+        );
+        assert_eq!(sweep_stale_staging(inbox, later, STALE_STAGING_AGE), 1);
+        assert!(leftovers.iter().chain([&extra]).all(|path| !path.exists()));
+        assert!(published.is_dir());
+        assert_eq!(
+            std::fs::read(&partial_marker_file).unwrap(),
+            b"not a directory"
+        );
+        assert!(unrelated.is_dir());
     }
 
     #[cfg(unix)]

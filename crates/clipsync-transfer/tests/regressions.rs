@@ -220,7 +220,7 @@ async fn regression_f39_excessive_payload_leaves_no_output() {
     ];
     assert!(matches!(
         staging
-            .commit_files(&TransferId::new(), &files, &payload)
+            .commit_files(&TransferId::new(), &files, payload.as_slice())
             .await,
         Err(TransferError::Integrity)
     ));
@@ -236,7 +236,7 @@ async fn maximum_file_count_still_commits_every_file() {
         .collect();
     let payload = vec![b'x'; FILE_MAX_COUNT];
     let paths = staging
-        .commit_files(&TransferId::new(), &manifests, &payload)
+        .commit_files(&TransferId::new(), &manifests, payload.as_slice())
         .await
         .unwrap();
     assert_eq!(paths.len(), FILE_MAX_COUNT);
@@ -281,7 +281,9 @@ async fn regression_concurrent_receivers_of_one_transfer_keep_each_others_files(
         let receive = |staging: StagingArea| {
             let (id, manifests, payload) = (id.clone(), manifests.clone(), payload.clone());
             tokio::spawn(async move {
-                let paths = staging.commit_files(&id, &manifests, &payload).await?;
+                let paths = staging
+                    .commit_files(&id, &manifests, payload.as_slice())
+                    .await?;
                 // The engine reads each staged file right after committing it.
                 let mut bodies = Vec::new();
                 for path in &paths {
@@ -343,4 +345,100 @@ async fn regression_second_receiver_reuses_committed_files_and_spares_foreign_pa
         std::fs::read(foreign_partial.join("report.txt")).unwrap(),
         b"in progress"
     );
+}
+
+fn published_names(inbox: &Inbox, id: &TransferId) -> Vec<String> {
+    let mut names: Vec<_> = std::fs::read_dir(inbox.0.join(id.as_str()))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// A retried transfer that changes its file list replaces the previous commit
+/// whole: files absent from the new manifest must not survive in the
+/// published directory next to the new ones.
+#[tokio::test]
+async fn regression_retry_with_a_different_file_list_publishes_only_the_new_manifest() {
+    let inbox = Inbox::new();
+    let id = TransferId::new();
+    inbox
+        .staging()
+        .commit_files(
+            &id,
+            &[file("draft.txt", b"draft"), file("notes.txt", b"notes")],
+            b"draftnotes",
+        )
+        .await
+        .unwrap();
+
+    let retried = inbox
+        .staging()
+        .commit_files(&id, &[file("final.txt", b"final")], b"final")
+        .await
+        .unwrap();
+    assert_eq!(published_names(&inbox, &id), ["final.txt"]);
+    assert_eq!(std::fs::read(&retried[0]).unwrap(), b"final");
+
+    // A subset of the earlier file list is also a different manifest.
+    inbox
+        .staging()
+        .commit_files(
+            &id,
+            &[file("final.txt", b"final"), file("extra.txt", b"extra")],
+            b"finalextra",
+        )
+        .await
+        .unwrap();
+    inbox
+        .staging()
+        .commit_files(&id, &[file("final.txt", b"final")], b"final")
+        .await
+        .unwrap();
+    assert_eq!(published_names(&inbox, &id), ["final.txt"]);
+    assert!(
+        partial_entries(&inbox).is_empty(),
+        "{:?}",
+        partial_entries(&inbox)
+    );
+}
+
+/// How long the cancellation regression waits for the detached commit to
+/// settle; a single small file commits in milliseconds.
+const CANCELLED_COMMIT_DEADLINE: Duration = Duration::from_secs(10);
+/// Interval between checks of the inbox while waiting for that commit.
+const CANCELLED_COMMIT_POLL: Duration = Duration::from_millis(10);
+
+/// Dropping a receive mid-commit (for example when its socket task is
+/// cancelled) must not strand the staged partial directory in the inbox.
+#[tokio::test]
+async fn regression_cancelled_commit_leaves_no_partial_directory() {
+    let inbox = Inbox::new();
+    let staging = inbox.staging();
+    let id = TransferId::new();
+    let manifests = [file("a.txt", b"alpha"), file("b.txt", b"bravo")];
+    let mut commit = Box::pin(staging.commit_files(&id, &manifests, b"alphabravo"));
+    // Start the commit, then cancel it by dropping the future.
+    std::future::poll_fn(|cx| {
+        let _ = std::future::Future::poll(commit.as_mut(), cx);
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(commit);
+
+    let deadline = Instant::now() + CANCELLED_COMMIT_DEADLINE;
+    loop {
+        let published = inbox.0.join(id.as_str()).is_dir();
+        if published && partial_entries(&inbox).is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "cancelled commit left {:?} (published: {published})",
+            partial_entries(&inbox)
+        );
+        tokio::time::sleep(CANCELLED_COMMIT_POLL).await;
+    }
+    assert_eq!(published_names(&inbox, &id), ["a.txt", "b.txt"]);
 }
