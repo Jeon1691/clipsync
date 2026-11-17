@@ -85,6 +85,14 @@ when the SAS side rejects, the pre-SAS client keeps an unused room-key secret,
 though no room record or device token. See [security](security.md#verification-code-sas) for what the
 comparison covers.
 
+The peer device ID and name shown with the SAS are fixed before SPAKE2
+starts: the creator takes them from the first `peer_joined`, the joiner from
+the join response. A client that receives a later `peer_joined` with a
+different device ID or name sends `error` (`pairing_failed`) and stops with
+nothing stored. Clients also refuse a pairing code that is not six ASCII
+digits, room or device IDs outside `[A-Za-z0-9._-]` (at most 64 bytes), and a
+`pairing_complete` naming a room other than the one the pairing announced.
+
 ## Reconnect
 
 Noise pattern `Noise_KK_25519_AESGCM_SHA256` using long-term X25519 device

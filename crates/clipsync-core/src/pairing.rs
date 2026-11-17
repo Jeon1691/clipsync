@@ -19,7 +19,9 @@ use clipsync_protocol::{
 use clipsync_storage::{AppConfig, LocalStore, PeerRecord, RoomRecord};
 use clipsync_transport::{join_ws, Incoming, RelayConnection};
 
-use crate::untrusted_text::{sanitize_untrusted, MAX_PEER_NAME_CHARS, MAX_RELAY_MESSAGE_CHARS};
+use crate::untrusted_text::{
+    is_plain_identifier, sanitize_untrusted, MAX_PEER_NAME_COLUMNS, MAX_RELAY_MESSAGE_COLUMNS,
+};
 use crate::{current_os, device_name, http_client, CoreError};
 
 /// Advisory error code sent to the relay when the local user rejects the SAS.
@@ -42,7 +44,43 @@ const SAS_ABORT_NOTICE_MAC: &str = "";
 /// Relay-supplied text made safe to print: it ends up in error messages on
 /// a terminal, possibly right after a verification code.
 pub(crate) fn relay_text(raw: &str) -> String {
-    sanitize_untrusted(raw, MAX_RELAY_MESSAGE_CHARS)
+    sanitize_untrusted(raw, MAX_RELAY_MESSAGE_COLUMNS)
+}
+
+/// Digits in a pairing code: the relay draws codes uniformly from 000000 to
+/// 999999 (`alloc_code` in the relay's state module).
+const PAIRING_CODE_DIGITS: usize = 6;
+
+/// Error for a relay-supplied value that is printed or stored but does not
+/// have the expected form, such as a room ID carrying terminal escapes.
+fn malformed(what: &str) -> CoreError {
+    CoreError::Pairing(format!(
+        "the relay sent a malformed {what}; nothing was stored"
+    ))
+}
+
+/// Check the values of a create or join response that the CLI prints and
+/// the store keeps before anything is shown or stored.
+#[expect(
+    clippy::result_large_err,
+    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
+)]
+fn check_relay_ids(
+    room_id: &clipsync_protocol::RoomId,
+    peer: Option<&DeviceId>,
+) -> Result<(), CoreError> {
+    if !is_plain_identifier(room_id.as_str()) {
+        return Err(malformed("room ID"));
+    }
+    if peer.is_some_and(|peer| !is_plain_identifier(peer.as_str())) {
+        return Err(malformed("device ID"));
+    }
+    Ok(())
+}
+
+/// A pairing code is exactly [`PAIRING_CODE_DIGITS`] ASCII digits.
+fn is_pairing_code(code: &str) -> bool {
+    code.len() == PAIRING_CODE_DIGITS && code.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// What the local user must compare with the other device before a pairing
@@ -53,10 +91,12 @@ pub struct SasCheck {
     /// they ran SPAKE2 with each other.
     pub sas: String,
     pub peer_device_id: DeviceId,
-    /// Name the relay reported for the peer. It is not authenticated and is
-    /// shown for context only; the SAS is what proves the peer's identity.
-    /// Control and bidi characters arrive escaped (see
-    /// [`crate::sanitize_untrusted`]), but show it apart from the SAS anyway.
+    /// Name the relay reported for the peer before SPAKE2 started (a later,
+    /// different announcement aborts the pairing). It is not authenticated
+    /// and is shown for context only; the SAS is what proves the peer's
+    /// identity. Control, bidi, blank and invisible characters arrive escaped
+    /// and the width is bounded (see [`crate::sanitize_untrusted`]), but show
+    /// it apart from the SAS anyway.
     pub peer_device_name: String,
 }
 
@@ -201,6 +241,11 @@ pub async fn begin_create_room(
         return Err(CoreError::Pairing(format!("create failed: {body}")));
     }
     let created: CreatePairingResponse = resp.json().await?;
+    // The code and room ID are printed and the room ID is stored.
+    if !is_pairing_code(&created.pairing_code) {
+        return Err(malformed("pairing code"));
+    }
+    check_relay_ids(&created.room_id, None)?;
     let offer = RoomOffer {
         pairing_code: created.pairing_code.clone(),
         room_id: created.room_id.clone(),
@@ -297,6 +342,7 @@ where
         return Err(CoreError::Pairing(format!("join failed: {body}")));
     }
     let joined: JoinPairingResponse = resp.json().await?;
+    check_relay_ids(&joined.room_id, Some(&joined.peer.device_id))?;
     let ws = join_ws(&cfg.relay_url, &joined.ws_path);
     let conn = connect_relay_ws(&ws).await?;
     conn.send_control(ControlMessage::Hello {
@@ -420,9 +466,35 @@ where
                 match incoming {
                     Incoming::Control(ControlMessage::HelloOk { .. }) => {}
                     Incoming::Control(ControlMessage::PeerJoined { device }) => {
-                        peer_id = Some(device.device_id.clone());
-                        // Shown next to the SAS: make relay escapes inert.
-                        peer_name = Some(sanitize_untrusted(&device.device_name, MAX_PEER_NAME_CHARS));
+                        match &peer_id {
+                            // The creator learns the joiner here, and SPAKE2
+                            // starts right after: pin the identity and name
+                            // now, while the relay cannot know any code.
+                            None => {
+                                check_relay_ids(&room_id, Some(&device.device_id))?;
+                                peer_id = Some(device.device_id);
+                                peer_name = Some(device.device_name);
+                            }
+                            // A repeated announcement changes nothing.
+                            Some(pinned)
+                                if *pinned == device.device_id
+                                    && peer_name.as_deref() == Some(device.device_name.as_str()) => {}
+                            // A relay running both SPAKE2 sessions knows both
+                            // codes by now and could pick a name that forges
+                            // a code line. The honest relay never does this.
+                            Some(_) => {
+                                let _ = conn
+                                    .send_control(ControlMessage::Error {
+                                        code: "pairing_failed".into(),
+                                        message: "peer identity changed during pairing".into(),
+                                    })
+                                    .await;
+                                conn.close().await;
+                                return Err(CoreError::Pairing(
+                                    "the relay changed the other device's identity during pairing; nothing was stored".into(),
+                                ));
+                            }
+                        }
                     }
                     Incoming::Control(ControlMessage::Spake2Msg { message, .. }) => {
                         inbound_spake = Some(b64_decode(&message)?);
@@ -534,7 +606,11 @@ where
                         peer_device_id: peer_id
                             .clone()
                             .ok_or_else(|| CoreError::Pairing("missing peer identity".into()))?,
-                        peer_device_name: peer_name.clone().unwrap_or_default(),
+                        // Shown next to the SAS: make relay escapes inert.
+                        peer_device_name: sanitize_untrusted(
+                            peer_name.as_deref().unwrap_or_default(),
+                            MAX_PEER_NAME_COLUMNS,
+                        ),
                     };
                     decision = Some(Box::pin(ask(check)));
                 }
@@ -598,6 +674,12 @@ where
                 role,
             }) = complete.clone()
             {
+                // The keys are stored under the room this pairing announced;
+                // a different room in the completion would be printed and
+                // stored without them.
+                if room_id != key_room {
+                    return Err(malformed("room ID in the pairing completion"));
+                }
                 let peer = PeerRecord {
                     device_id: bind.device_id.clone(),
                     device_name: bind.device_name.clone(),
@@ -797,6 +879,31 @@ mod tests {
         /// Wait for our binding, then refuse it the way the relay does once
         /// the session was aborted (a lost or pre-notice rejection).
         RelayRefusesUs,
+        /// After the client's key confirmation, when a relay running both
+        /// SPAKE2 sessions knows both codes, re-announce the joiner under a
+        /// name that forges a code line (and, with `new_id`, another device
+        /// ID), then confirm and bind like [`Joiner::BindsAfterUs`].
+        RenamesBeforeConfirm { new_id: bool },
+    }
+
+    /// Send without failing the script when the client already hung up.
+    async fn try_send(socket: &mut axum::extract::ws::WebSocket, message: ControlMessage) {
+        let _ = socket
+            .send(axum::extract::ws::Message::Text(
+                message.encode().unwrap().into(),
+            ))
+            .await;
+    }
+
+    /// The reviewer's forged name: ideographic spaces (two columns each)
+    /// pad an 80-column line until the forged code starts the next line.
+    fn forged_code_name(sas: &str) -> String {
+        const PADDING: usize = 33;
+        format!(
+            "{}verification code: {}",
+            "\u{3000}".repeat(PADDING),
+            display_sas(sas)
+        )
     }
 
     /// Scripted relay plus honest joiner (role B) sharing [`TEST_CODE`]. It reports
@@ -855,7 +962,26 @@ mod tests {
                     panic!("client did not confirm key")
                 };
                 verify_confirm_mac(&keys, PairingRole::A, &b64_decode(&mac).unwrap()).unwrap();
-                send(
+                if let Joiner::RenamesBeforeConfirm { new_id } = script {
+                    try_send(
+                        &mut socket,
+                        ControlMessage::PeerJoined {
+                            device: clipsync_protocol::PeerInfo {
+                                device_id: if new_id {
+                                    DeviceId::from("sas-peer-renamed")
+                                } else {
+                                    peer.clone()
+                                },
+                                device_name: forged_code_name(&short_authentication_string(&keys)),
+                                os: "android".into(),
+                                role: DeviceRole::Member,
+                                online: true,
+                            },
+                        },
+                    )
+                    .await;
+                }
+                try_send(
                     &mut socket,
                     ControlMessage::KeyConfirm {
                         pairing_session_id: sid.clone(),
@@ -931,7 +1057,7 @@ mod tests {
                 let _ = frame_tx.send(after_confirm);
                 if bound {
                     match script {
-                        Joiner::BindsAfterUs => {
+                        Joiner::BindsAfterUs | Joiner::RenamesBeforeConfirm { .. } => {
                             send(&mut socket, bind).await;
                             send(&mut socket, complete).await;
                         }
@@ -1239,6 +1365,223 @@ mod tests {
         assert!(secret_files(&store).is_empty());
     }
 
+    #[tokio::test]
+    async fn a_relay_cannot_rename_the_peer_after_spake2_started() {
+        for new_id in [false, true] {
+            let directory = tempfile::TempDir::new().unwrap();
+            let store =
+                LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+            let identity = DeviceIdentity::from_bytes("sas-rename-local".into(), [37; 32]);
+            let sid = PairingSessionId::new();
+            let room = clipsync_protocol::RoomId::new();
+            let (mut server, _peer_sas, frame, release) = honest_joiner(
+                identity.device_id.clone(),
+                sid.clone(),
+                room.clone(),
+                Joiner::RenamesBeforeConfirm { new_id },
+                SCRIPT_DEADLINE,
+            )
+            .await;
+            let connection = RelayConnection::connect(&join_ws(&server.url, "/v1/ws"))
+                .await
+                .unwrap();
+            let (shown_tx, mut shown) = tokio::sync::oneshot::channel();
+            let result = tokio::time::timeout(
+                Duration::from_secs(10),
+                run_pairing(
+                    &store,
+                    &identity,
+                    connection,
+                    PairingRole::A,
+                    &TEST_CODE,
+                    sid,
+                    identity.device_id.clone(),
+                    DeviceId::new(),
+                    None,
+                    room,
+                    DeviceRole::Owner,
+                    move |check: SasCheck| async move {
+                        let _ = shown_tx.send(check);
+                        SasDecision::Confirmed
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+            let after_confirm = frame.await.unwrap();
+            let _ = release.send(());
+            server.finish().await;
+            // The relay knew both codes when it renamed the peer, so the
+            // user must never compare against a name chosen at that point.
+            assert!(
+                shown.try_recv().is_err(),
+                "new_id={new_id}: SAS shown after a late rename"
+            );
+            let error = result.expect_err("pairing survived a late rename");
+            assert!(
+                error.to_string().contains("changed the other device"),
+                "new_id={new_id}: {error}"
+            );
+            assert!(
+                !after_confirm
+                    .iter()
+                    .any(|frame| matches!(frame, ControlMessage::DeviceBind { .. })),
+                "new_id={new_id}: bound after a late rename"
+            );
+            assert!(store.load_state().unwrap().rooms.is_empty());
+            assert!(secret_files(&store).is_empty());
+        }
+    }
+
+    /// Scripted relay plus honest creator (role A) for a client joining as
+    /// role B. With `rename`, the relay announces the creator under a forged
+    /// name after both SPAKE2 messages crossed. Reports the creator's SAS.
+    async fn honest_creator(
+        local: DeviceId,
+        creator: DeviceId,
+        sid: PairingSessionId,
+        room: clipsync_protocol::RoomId,
+        rename: bool,
+    ) -> (
+        crate::test_relay::Server,
+        tokio::sync::oneshot::Receiver<String>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        use crate::test_relay::{receive, send, Server};
+        let (sas_tx, sas_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release) = tokio::sync::oneshot::channel::<()>();
+        let server = Server::websocket(move |mut socket| async move {
+            send(
+                &mut socket,
+                ControlMessage::HelloOk {
+                    room_id: room,
+                    peer_online: false,
+                    peers: Vec::new(),
+                    queued_text: None,
+                    device_token: None,
+                },
+            )
+            .await;
+            let ControlMessage::Spake2Msg { message, .. } = receive(&mut socket).await else {
+                panic!("joiner did not send SPAKE2")
+            };
+            let state = start_pairing_a(&TEST_CODE, sid.clone(), creator.clone(), local).unwrap();
+            let outbound = state.outbound.clone();
+            let keys = finish_pairing(state, &b64_decode(&message).unwrap()).unwrap();
+            let sas = short_authentication_string(&keys);
+            send(
+                &mut socket,
+                ControlMessage::Spake2Msg {
+                    pairing_session_id: sid.clone(),
+                    message: b64_encode(&outbound),
+                },
+            )
+            .await;
+            if rename {
+                try_send(
+                    &mut socket,
+                    ControlMessage::PeerJoined {
+                        device: clipsync_protocol::PeerInfo {
+                            device_id: creator.clone(),
+                            device_name: forged_code_name(&sas),
+                            os: "macos".into(),
+                            role: DeviceRole::Owner,
+                            online: true,
+                        },
+                    },
+                )
+                .await;
+            }
+            let _ = sas_tx.send(sas);
+            if let ControlMessage::KeyConfirm { mac, .. } = receive(&mut socket).await {
+                verify_confirm_mac(&keys, PairingRole::B, &b64_decode(&mac).unwrap()).unwrap();
+            }
+            try_send(
+                &mut socket,
+                ControlMessage::KeyConfirm {
+                    pairing_session_id: sid,
+                    mac: b64_encode(&confirm_mac(&keys, PairingRole::A)),
+                },
+            )
+            .await;
+            while let Some(Ok(_)) = socket.recv().await {}
+            let _ = release.await;
+        })
+        .await;
+        (server, sas_rx, release_tx)
+    }
+
+    #[tokio::test]
+    async fn joiner_shows_the_creator_name_inert_and_refuses_a_late_rename() {
+        for rename in [false, true] {
+            let directory = tempfile::TempDir::new().unwrap();
+            let store =
+                LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+            let identity = DeviceIdentity::from_bytes("sas-joiner-local".into(), [38; 32]);
+            let creator = DeviceId::from("sas-creator-remote");
+            let sid = PairingSessionId::new();
+            let room = clipsync_protocol::RoomId::new();
+            let (mut server, creator_sas, release) = honest_creator(
+                identity.device_id.clone(),
+                creator.clone(),
+                sid.clone(),
+                room.clone(),
+                rename,
+            )
+            .await;
+            let connection = RelayConnection::connect(&join_ws(&server.url, "/v1/ws"))
+                .await
+                .unwrap();
+            let (shown_tx, mut shown) = tokio::sync::oneshot::channel();
+            // The name from the join response, as `join_room` passes it.
+            let result = tokio::time::timeout(
+                Duration::from_secs(10),
+                run_pairing(
+                    &store,
+                    &identity,
+                    connection,
+                    PairingRole::B,
+                    &TEST_CODE,
+                    sid,
+                    creator.clone(),
+                    identity.device_id.clone(),
+                    Some(HOSTILE_PEER_NAME.into()),
+                    room,
+                    DeviceRole::Member,
+                    move |check: SasCheck| async move {
+                        let _ = shown_tx.send(check);
+                        SasDecision::Rejected
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+            let creator_sas = creator_sas.await.unwrap();
+            let _ = release.send(());
+            server.finish().await;
+            let error = result.expect_err("a rejected or renamed pairing must fail");
+            if rename {
+                assert!(shown.try_recv().is_err(), "SAS shown after a late rename");
+                assert!(
+                    error.to_string().contains("changed the other device"),
+                    "{error}"
+                );
+            } else {
+                let check = shown.try_recv().expect("joiner never showed the SAS");
+                assert_eq!(check.sas, creator_sas, "honest peers agree");
+                assert_eq!(check.peer_device_id, creator);
+                assert!(
+                    !can_rewrite_display(&check.peer_device_name),
+                    "{:?}",
+                    check.peer_device_name
+                );
+                assert!(check.peer_device_name.contains("\\u{1b}"));
+            }
+            assert!(store.load_state().unwrap().rooms.is_empty());
+            assert!(secret_files(&store).is_empty());
+        }
+    }
+
     #[test]
     fn sas_check_matching_ignores_grouping_and_rejects_empty_input() {
         let check = SasCheck {
@@ -1468,6 +1811,153 @@ mod tests {
             Err(CoreError::Http(_))
         ));
         assert!(store.load_state().unwrap().rooms.is_empty());
+    }
+
+    #[tokio::test]
+    async fn relay_codes_and_ids_that_could_reach_the_terminal_are_refused() {
+        use axum::{routing::post, Json, Router};
+        // An OSC 52 clipboard write and an 8-bit CSI, as the CLI would print
+        // them right after "pairing code:" or "room:".
+        const OSC: &str = "\u{1b}]52;c;aGk=\u{7}";
+        const CSI: &str = "\u{9b}2J";
+        let good_room = clipsync_protocol::RoomId::new();
+        let creates = [
+            (format!("12345{OSC}"), good_room.clone(), "pairing code"),
+            ("12345".to_string(), good_room.clone(), "pairing code"),
+            ("1234567".to_string(), good_room.clone(), "pairing code"),
+            (
+                "12345\u{661}".to_string(),
+                good_room.clone(),
+                "pairing code",
+            ),
+            (
+                TEST_CODE.clone(),
+                clipsync_protocol::RoomId::from(format!("room{CSI}")),
+                "room ID",
+            ),
+        ];
+        let peer = |device_id: &str| clipsync_protocol::PeerInfo {
+            device_id: DeviceId::from(device_id),
+            device_name: "Laptop".into(),
+            os: "macos".into(),
+            role: DeviceRole::Owner,
+            online: true,
+        };
+        let joins = [
+            (
+                clipsync_protocol::RoomId::from(format!("room{OSC}")),
+                peer("creator"),
+                "room ID",
+            ),
+            (
+                good_room.clone(),
+                peer(&format!("creator{CSI}")),
+                "device ID",
+            ),
+            (good_room.clone(), peer(""), "device ID"),
+        ];
+        let directory = tempfile::TempDir::new().unwrap();
+        let store =
+            LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+        let identity = DeviceIdentity::from_bytes("malformed-ids".into(), [39; 32]);
+        for (pairing_code, room_id, what) in creates {
+            let created = CreatePairingResponse {
+                room_id,
+                pairing_code,
+                pairing_token: "synthetic-token".into(),
+                expires_at: Utc::now(),
+                ws_path: "/v1/ws".into(),
+            };
+            let server = crate::test_relay::Server::http(Router::new().route(
+                "/v1/pairing/create",
+                post(move || async move { Json(created) }),
+            ))
+            .await;
+            let cfg = AppConfig {
+                relay_url: server.url.clone(),
+                ..Default::default()
+            };
+            let error = begin_create_room(&identity, &cfg, 60).await.err().unwrap();
+            assert!(
+                error.to_string().contains(&format!("malformed {what}")),
+                "{error}"
+            );
+        }
+        for (room_id, peer, what) in joins {
+            let joined = JoinPairingResponse {
+                pairing_session_id: PairingSessionId::new(),
+                room_id,
+                pairing_token: "synthetic-token".into(),
+                peer,
+                expires_at: Utc::now(),
+                ws_path: "/v1/ws".into(),
+            };
+            let server = crate::test_relay::Server::http(Router::new().route(
+                "/v1/pairing/join",
+                post(move || async move { Json(joined) }),
+            ))
+            .await;
+            let cfg = AppConfig {
+                relay_url: server.url.clone(),
+                ..Default::default()
+            };
+            let error = join_room(&store, &identity, &cfg, &TEST_CODE, accept)
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains(&format!("malformed {what}")),
+                "{error}"
+            );
+        }
+        assert!(store.load_state().unwrap().rooms.is_empty());
+        assert!(secret_files(&store).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_completion_for_another_room_stores_nothing() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let store =
+            LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+        let identity = DeviceIdentity::from_bytes("sas-other-room".into(), [40; 32]);
+        let sid = PairingSessionId::new();
+        // The relay completes into a room other than the one it announced.
+        let (mut server, _peer_sas, frame, release) = honest_joiner(
+            identity.device_id.clone(),
+            sid.clone(),
+            clipsync_protocol::RoomId::from("01JC8Z3V7Q4N2M5K6P8R9S0T1W"),
+            Joiner::BindsAfterUs,
+            SCRIPT_DEADLINE,
+        )
+        .await;
+        let connection = RelayConnection::connect(&join_ws(&server.url, "/v1/ws"))
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_pairing(
+                &store,
+                &identity,
+                connection,
+                PairingRole::A,
+                &TEST_CODE,
+                sid,
+                identity.device_id.clone(),
+                DeviceId::new(),
+                None,
+                clipsync_protocol::RoomId::new(),
+                DeviceRole::Owner,
+                accept,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        let _ = frame.await;
+        let _ = release.send(());
+        server.finish().await;
+        assert!(error.to_string().contains("malformed room ID"), "{error}");
+        assert!(store.load_state().unwrap().rooms.is_empty());
+        assert!(secret_files(&store).is_empty());
     }
 
     #[tokio::test]

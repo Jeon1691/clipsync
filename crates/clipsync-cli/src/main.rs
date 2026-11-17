@@ -11,7 +11,9 @@ use std::io::{self, Write};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use clipsync_core::{run_daemon, sanitize_untrusted, App, CoreError, MAX_PEER_NAME_CHARS};
+use clipsync_core::{
+    run_daemon, sanitize_untrusted, shown_identifier, App, CoreError, MAX_PEER_NAME_COLUMNS,
+};
 use clipsync_daemon::{install_and_start, restart_service, stop_and_uninstall};
 use clipsync_storage::LocalStore;
 
@@ -125,8 +127,8 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
                                 })
                             );
                         } else {
-                            println!("pairing code: {}", offer.pairing_code);
-                            println!("room: {}", offer.room_id);
+                            println!("pairing code: {}", shown_identifier(&offer.pairing_code));
+                            println!("room: {}", shown_identifier(offer.room_id.as_str()));
                             println!("expires: {}", offer.expires_at);
                             println!("waiting for the other device to join…");
                         }
@@ -165,7 +167,7 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
                 serde_json::json!({"room_id": room.room_id, "role": room.role}),
             );
             if !cli.json {
-                println!("joined room {}", room.room_id);
+                println!("joined room {}", shown_identifier(room.room_id.as_str()));
             }
             Ok(())
         }
@@ -201,7 +203,12 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
             emit(cli.json, serde_json::to_value(&rooms)?);
             if !cli.json {
                 for r in rooms {
-                    println!("{}  epoch {}  {:?}", r.room_id, r.epoch, r.role);
+                    println!(
+                        "{}  epoch {}  {:?}",
+                        shown_identifier(r.room_id.as_str()),
+                        r.epoch,
+                        r.role
+                    );
                 }
             }
             Ok(())
@@ -283,13 +290,13 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
             emit(cli.json, serde_json::to_value(&devices)?);
             if !cli.json {
                 for d in devices {
-                    // Name and OS are chosen by each peer; keep them inert.
+                    // Every field is chosen by the peer; keep them inert.
                     println!(
                         "{}  {}  {}  {}",
-                        d.device_id,
-                        sanitize_untrusted(&d.device_name, MAX_PEER_NAME_CHARS),
-                        sanitize_untrusted(&d.os, MAX_PEER_NAME_CHARS),
-                        d.fingerprint
+                        shown_identifier(d.device_id.as_str()),
+                        sanitize_untrusted(&d.device_name, MAX_PEER_NAME_COLUMNS),
+                        sanitize_untrusted(&d.os, MAX_PEER_NAME_COLUMNS),
+                        shown_identifier(&d.fingerprint)
                     );
                 }
             }

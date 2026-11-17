@@ -62,21 +62,57 @@ The notice is unauthenticated, but a relay that forges it gains nothing it
 could not get by dropping the session. The peer name comes from the relay and
 is not authenticated; only the code is.
 
+**The peer name is fixed before SPAKE2.** The creator takes the joiner's
+device ID and name from the relay's first `peer_joined`, and SPAKE2 starts
+only after it; the joiner takes the creator's from the join response. At that
+point the relay cannot know either code. A relay running both SPAKE2 sessions
+learns both codes afterwards, so it could otherwise announce the peer again
+under a name that spells the other device's code. Any later `peer_joined`
+with a different device ID or name aborts the pairing with nothing stored;
+an identical repeat changes nothing. The honest relay sends `peer_joined`
+during pairing only once, to the creator.
+
 **Untrusted text next to the code.** The relay chooses the peer name it
 reports and the text of its error messages. Printed raw, terminal escape
 sequences, carriage returns or backspaces in that text could overwrite the
-displayed code with matching digits, and Unicode bidirectional controls could
-reorder digits in a text view, so a user could approve a split pairing. All
-front ends show such text through one sanitizer
-(`clipsync_core::sanitize_untrusted`): C0 and C1 controls (including ESC, CR
-and backspace) and bidi or other format controls (U+061C, U+200B-U+200F,
-U+2028-U+202E, U+2060-U+206F, U+FEFF) are shown as visible `\u{..}` escapes,
-and names are cut to 64 characters, relay messages to 256. The CLI prints the
-peer name before the code, which sits alone on its own line with nothing
-untrusted printed after it; the desktop app and the mobile `SasVerifier`
-receive the sanitized name and show it apart from the code. The CLI device
-list (`clipsync devices`) applies the same sanitizer to peer names and OS
-strings.
+displayed code with matching digits, Unicode bidirectional controls could
+reorder digits in a text view, and blank-looking padding could wrap a name
+into a row that looks like the code line, so a user could approve a split
+pairing. Peer names, relay error messages and the SAS prompt's peer name in
+every front end go through one sanitizer
+(`clipsync_core::sanitize_untrusted`), which shows as visible `\u{..}`
+escapes:
+
+- C0 and C1 controls (including ESC, CR and backspace);
+- bidi and other format controls (U+061C, U+200B-U+200F, U+2028-U+202E,
+  U+2060-U+206F, U+FEFF, U+FFF9-U+FFFB);
+- Unicode `White_Space` other than the ASCII space (no-break, ideographic,
+  en/em and other spaces), the remaining default-ignorable code points
+  (soft hyphen, combining grapheme joiner, Hangul fillers U+115F, U+1160,
+  U+3164 and U+FFA0, Khmer inherent vowels, Mongolian selectors, variation
+  selectors, tags), and the braille blank U+2800.
+
+It also collapses runs of spaces and bounds the rendered width in terminal
+columns, counting two for every non-ASCII character: names to 40 columns,
+relay messages to 256. The CLI prints the quoted peer name on an
+`other device:` line before the code, which sits alone on its own line with
+nothing untrusted printed after it; at 40 columns the name line cannot wrap on
+a terminal 56 columns or wider, and on a terminal at least 30 columns wide it
+cannot wrap into a row holding a whole forged code. The desktop app and the
+mobile `SasVerifier` receive the sanitized name and show it apart from the
+code.
+
+**Relay-chosen codes and IDs.** The pairing code, room ID and peer device ID
+that the CLI prints come from the relay. The client accepts a pairing code
+only as exactly six ASCII digits, and room and device IDs only as ASCII
+letters, digits, `-`, `_` and `.` (at most 64), and requires the completion
+to name the room the pairing announced; anything else aborts with nothing
+stored. The CLI prints IDs read back from local files (`room list`,
+`clipsync devices`, the background pairing file) through the same check,
+escaping any that fail it, and passes peer names, OS strings and fingerprints
+in `clipsync devices` through the sanitizer. Other output, such as
+clipboard text printed by `clipsync pull`, is not sanitized: it is the
+content being synced.
 
 **A pairing that ends during the comparison.** If the other device rejects,
 the pairing expires, or the request is removed or rejected while `clipsync

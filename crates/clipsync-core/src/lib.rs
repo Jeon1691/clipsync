@@ -26,7 +26,10 @@ pub use pairing::{
     begin_create_room, create_room, display_sas, join_room, leave_room, normalize_sas, parse_sas,
     PendingCreate, RoomOffer, SasCheck, SasDecision,
 };
-pub use untrusted_text::{sanitize_untrusted, MAX_PEER_NAME_CHARS, MAX_RELAY_MESSAGE_CHARS};
+pub use untrusted_text::{
+    is_plain_identifier, sanitize_untrusted, shown_identifier, MAX_IDENTIFIER_LEN,
+    MAX_PEER_NAME_COLUMNS, MAX_RELAY_MESSAGE_COLUMNS,
+};
 
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;

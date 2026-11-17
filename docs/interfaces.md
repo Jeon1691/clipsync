@@ -347,8 +347,9 @@ login service; native apps call `start_sync` and manage platform lifecycle.
 `SasVerifier.confirm_sas(sas, peer_device_name) -> bool` is called once per
 pairing on a background thread, after key confirmation. Show the six-digit
 `sas` (for example as `482 913`) and the relay-reported `peer_device_name`
-(control and bidi characters escaped, at most 64 characters; show it in its
-own text element, apart from the code), ask
+(fixed before SPAKE2 starts; control, bidi, blank and invisible characters
+escaped; at most 40 terminal columns; show it in its own text element, apart
+from the code), ask
 whether the other device shows the same code, block until the user answers,
 and return `true` only for a match. Returning `false` aborts the pairing and
 stores nothing. The pairing deadline is 120 seconds from the offer, not from

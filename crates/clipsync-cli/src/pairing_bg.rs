@@ -4,7 +4,7 @@ use std::fs::OpenOptions;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use clipsync_core::{App, CoreError};
+use clipsync_core::{shown_identifier, App, CoreError};
 use clipsync_storage::PairingWait;
 
 use crate::output::emit;
@@ -126,14 +126,14 @@ fn print_offer(wait: &PairingWait, pid: u32, json: bool) {
         }),
     );
     if !json {
-        println!("pairing code: {}", wait.pairing_code);
-        println!("room: {}", wait.room_id);
+        // Both came from the relay; the worker checked them, but the file
+        // they are read back from is not.
+        let code = shown_identifier(&wait.pairing_code);
+        println!("pairing code: {code}");
+        println!("room: {}", shown_identifier(wait.room_id.as_str()));
         println!("expires: {}", wait.expires_at);
         println!("waiting in background (pid {pid})");
-        println!(
-            "join from another device: clipsync room join {}",
-            wait.pairing_code
-        );
+        println!("join from another device: clipsync room join {code}");
         println!("then compare verification codes here: clipsync room confirm");
     }
 }

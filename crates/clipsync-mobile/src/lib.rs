@@ -14,7 +14,7 @@ use clipsync_clipboard::{
 };
 use clipsync_core::{
     begin_create_room, join_room, run_daemon, sanitize_untrusted, App, SasCheck, SasDecision,
-    MAX_PEER_NAME_CHARS,
+    MAX_PEER_NAME_COLUMNS,
 };
 use clipsync_storage::AppPaths;
 use tokio::runtime::Runtime;
@@ -55,10 +55,11 @@ pub trait ClipboardBridge: Send + Sync {
 /// `peer_device_name`, ask the user whether the other device shows the same
 /// code, block until they answer, and return `true` only if it matches.
 ///
-/// `peer_device_name` is chosen by the relay and not authenticated. It
-/// arrives with control and bidi characters escaped and at most
-/// `MAX_PEER_NAME_CHARS` long; still show it in its own text element, never
-/// in the same string as `sas`.
+/// `peer_device_name` is chosen by the relay and not authenticated, and is
+/// fixed before SPAKE2 starts. It arrives with control, bidi, blank and
+/// invisible characters escaped and at most `MAX_PEER_NAME_COLUMNS` terminal
+/// columns wide; still show it in its own text element, never in the same
+/// string as `sas`.
 /// Returning `false` aborts the pairing and stores nothing.
 ///
 /// If the pairing ends first (deadline, the other device rejected, relay
@@ -101,7 +102,7 @@ fn verifier_confirmer(
             };
             // The native callback blocks on UI; keep it off the runtime workers.
             let confirmed = tokio::task::spawn_blocking(move || {
-                let peer = sanitize_untrusted(&check.peer_device_name, MAX_PEER_NAME_CHARS);
+                let peer = sanitize_untrusted(&check.peer_device_name, MAX_PEER_NAME_COLUMNS);
                 let confirmed = verifier.confirm_sas(check.sas, peer);
                 answered.store(true, std::sync::atomic::Ordering::SeqCst);
                 confirmed
@@ -121,7 +122,7 @@ fn verifier_confirmer(
 /// is accepted without comparing codes.
 async fn unverified(check: SasCheck) -> SasDecision {
     warn!(
-        peer = %check.peer_device_name,
+        peer = %sanitize_untrusted(&check.peer_device_name, MAX_PEER_NAME_COLUMNS),
         "pairing accepted without SAS comparison; use the *_verified API to detect a malicious relay or a guessed code"
     );
     SasDecision::Confirmed
@@ -670,7 +671,8 @@ mod tests {
         assert_eq!(decision, SasDecision::Rejected);
         assert_eq!(
             shown.lock().unwrap().as_slice(),
-            ["Phone\\u{202e}319 284\\u{2066}\\u{1b}[2K\\u{d}"]
+            // Escaped, then cut at the width bound.
+            ["Phone\\u{202e}319 284\\u{2066}\\u{1b}[2K…"]
         );
     }
 

@@ -6,7 +6,7 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
-use clipsync_core::{sanitize_untrusted, App, SasDecision, MAX_PEER_NAME_CHARS};
+use clipsync_core::{sanitize_untrusted, App, SasDecision, MAX_PEER_NAME_COLUMNS};
 use clipsync_daemon::connect_ipc;
 use clipsync_desktop::{
     create_room, join_room_code, local_status, open_app, window_confirmer, DeskStatus, SasPrompt,
@@ -218,7 +218,12 @@ impl DesktopApp {
                 let peer = if prompt.check.peer_device_name.is_empty() {
                     "the other device".to_owned()
                 } else {
-                    sanitize_untrusted(&prompt.check.peer_device_name, MAX_PEER_NAME_CHARS)
+                    // Quoted, so the name reads as a name and not as a line
+                    // of its own.
+                    format!(
+                        "\"{}\"",
+                        sanitize_untrusted(&prompt.check.peer_device_name, MAX_PEER_NAME_COLUMNS)
+                    )
                 };
                 let mut decision = None;
                 egui::Frame::NONE
@@ -582,7 +587,8 @@ mod tests {
         assert!(text.contains("482 913"), "{text:?}");
         assert!(
             text.contains(
-                "Check that Work\\u{202e}319 284\\u{2066}\\u{200f}\\u{1b}[2K\\u{d} shows"
+                // Escaped, quoted, and cut at the width bound.
+                "Check that \"Work\\u{202e}319 284\\u{2066}\\u{200f}…\" shows"
             ),
             "{text:?}"
         );
@@ -618,7 +624,7 @@ mod tests {
             );
             let text = ui.text(&mut app);
             assert!(text.contains("VERIFICATION CODE") && text.contains("482 913"));
-            assert!(text.contains("Check that Work laptop shows the same code."));
+            assert!(text.contains("Check that \"Work laptop\" shows the same code."));
             assert!(
                 !text.contains("PAIRING CODE"),
                 "the SAS replaces the pairing code"

@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use clipsync_core::{
     display_sas, parse_sas, sanitize_untrusted, App, CoreError, SasCheck, SasDecision,
-    MAX_PEER_NAME_CHARS, SAS_DIGITS,
+    MAX_PEER_NAME_COLUMNS, SAS_DIGITS,
 };
 use clipsync_protocol::PAIRING_TTL_SECS;
 use clipsync_storage::{LocalStore, PairingWait};
@@ -544,8 +544,11 @@ fn announce(mode: SasMode, sas: &str, peer_device_name: &str) {
 }
 
 /// What a terminal user sees before the prompt. The peer's name comes from
-/// the relay, so it is sanitized and printed first: the code then sits alone
-/// on its own line, and nothing untrusted is printed after it.
+/// the relay, so it is sanitized, quoted on its own labelled line and
+/// printed first: the code then sits alone on its own line, and nothing
+/// untrusted is printed after it. The sanitizer bounds the name's width, so
+/// the name line cannot wrap into a row that starts like the code line (see
+/// [`clipsync_core::MAX_PEER_NAME_COLUMNS`]).
 fn announcement(sas: &str, peer_device_name: &str) -> String {
     format!(
         "other device: {}\nverification code: {}\nCheck that the other device shows the same verification code.\n",
@@ -557,7 +560,7 @@ fn announcement(sas: &str, peer_device_name: &str) -> String {
 /// A relay-reported name with control and bidi characters made visible and
 /// inert (see [`sanitize_untrusted`]).
 fn untrusted_name(peer_device_name: &str) -> String {
-    sanitize_untrusted(peer_device_name, MAX_PEER_NAME_CHARS)
+    sanitize_untrusted(peer_device_name, MAX_PEER_NAME_COLUMNS)
 }
 
 fn prompt_line(mode: SasMode, interactive: bool) {
@@ -590,7 +593,7 @@ fn display_name(peer_device_name: &str) -> String {
     if peer_device_name.is_empty() {
         "(unnamed device)".into()
     } else {
-        untrusted_name(peer_device_name)
+        format!("\"{}\"", untrusted_name(peer_device_name))
     }
 }
 
@@ -820,7 +823,7 @@ mod tests {
             );
         }
         assert_eq!(display_name(""), "(unnamed device)");
-        assert_eq!(display_name("Laptop"), "Laptop");
+        assert_eq!(display_name("Laptop"), "\"Laptop\"");
     }
 
     #[tokio::test]
@@ -1222,12 +1225,12 @@ mod tests {
         );
         let lines: Vec<&str> = shown.lines().collect();
         assert!(
-            lines[0].starts_with("other device: Laptop\\u{1b}[2K\\u{d}"),
+            lines[0].starts_with("other device: \"Laptop\\u{1b}[2K\\u{d}"),
             "{shown:?}"
         );
         assert_eq!(lines[1], "verification code: 482 913");
         assert!(!lines[2..].iter().any(|line| line.contains("Laptop")));
-        let long = "x".repeat(MAX_PEER_NAME_CHARS * 2);
+        let long = "x".repeat(MAX_PEER_NAME_COLUMNS * 2);
         assert!(
             announcement(SAS, &long)
                 .lines()
@@ -1235,9 +1238,95 @@ mod tests {
                 .unwrap()
                 .chars()
                 .count()
-                <= "other device: ".len() + MAX_PEER_NAME_CHARS
+                <= "other device: \"\"".len() + MAX_PEER_NAME_COLUMNS
         );
-        assert_eq!(untrusted_name(hostile), display_name(hostile));
+        assert_eq!(
+            format!("\"{}\"", untrusted_name(hostile)),
+            display_name(hostile)
+        );
+    }
+
+    /// Split `shown` into the rows a terminal `columns` wide displays,
+    /// counting two columns for every non-ASCII character (the widest any
+    /// character renders), so wide padding wraps at least as early as on a
+    /// real terminal.
+    fn terminal_rows(shown: &str, columns: usize) -> Vec<String> {
+        const WIDE: usize = 2;
+        let mut rows = Vec::new();
+        for line in shown.lines() {
+            let (mut row, mut used) = (String::new(), 0);
+            for c in line.chars() {
+                let width = if c.is_ascii() { 1 } else { WIDE };
+                if used + width > columns {
+                    rows.push(std::mem::take(&mut row));
+                    used = 0;
+                }
+                row.push(c);
+                used += width;
+            }
+            rows.push(row);
+        }
+        rows
+    }
+
+    /// Characters that render as blank space at the start of a row.
+    fn looks_blank(c: char) -> bool {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '\u{2800}' | '\u{3164}' | '\u{ffa0}' | '\u{115f}' | '\u{1160}'
+            )
+    }
+
+    #[test]
+    fn peer_names_cannot_wrap_into_a_forged_code_row() {
+        let forged = "verification code: 111 222";
+        // From 30 columns on, a name within the width bound is too short to
+        // fill the rest of the label row and still hold a whole forged code;
+        // from 40 on, too short to even start a row with "verification code".
+        const NARROWEST: usize = 30;
+        const NO_PARTIAL_FORGERY: usize = 40;
+        const WIDEST: usize = 200;
+        // The reviewer's name: 33 ideographic spaces fill 80 columns.
+        let reviewer = format!("{}{forged}", "\u{3000}".repeat(33));
+        for columns in NARROWEST..=WIDEST {
+            let mut names = vec![reviewer.clone()];
+            // Padding sized to push the forged code onto a row of its own
+            // after the label (with or without a quote), in each character
+            // that renders blank or invisible, and in plain letters.
+            for label in ["other device: ", "other device: \""] {
+                let pad = columns - label.len();
+                names.extend([
+                    format!("{}{forged}", "\u{3000}".repeat(pad / 2)),
+                    format!("{}{forged}", "\u{2800}".repeat(pad / 2)),
+                    format!("{}{forged}", "\u{3164}".repeat(pad / 2)),
+                    format!("{}{forged}", "\u{a0}".repeat(pad)),
+                    format!("{}{forged}", " ".repeat(pad)),
+                    format!("{}{forged}", "x".repeat(pad)),
+                    format!("x{}{forged}", "\u{200b}".repeat(pad)),
+                ]);
+            }
+            for name in names {
+                let shown = announcement(SAS, &name);
+                let lines: Vec<&str> = shown.lines().collect();
+                // The code keeps a line of its own, right after the name.
+                assert_eq!(lines[1], "verification code: 482 913", "{shown:?}");
+                // No row the name line wraps into looks like a code row.
+                let forged_rows: Vec<String> = terminal_rows(lines[0], columns)
+                    .into_iter()
+                    .filter(|row| {
+                        let row = row.trim_start_matches(looks_blank);
+                        let digits = row.chars().filter(char::is_ascii_digit).count();
+                        row.starts_with("verification code")
+                            && (columns >= NO_PARTIAL_FORGERY || digits >= SAS_DIGITS as usize)
+                    })
+                    .collect();
+                assert!(
+                    forged_rows.is_empty(),
+                    "{columns} columns: {forged_rows:?} in {shown:?}"
+                );
+            }
+        }
     }
 
     /// A terminal prompt nobody answers.
