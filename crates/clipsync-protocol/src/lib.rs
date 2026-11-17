@@ -16,7 +16,9 @@ pub use envelope::{
     envelope_aad, EnvelopeFrame, ENVELOPE_AAD_LABEL, ENVELOPE_VERSION_AUTHENTICATED,
     ENVELOPE_VERSION_LEGACY,
 };
-pub use ids::{DeviceId, MessageId, PairingSessionId, RoomId, TransferId};
+pub use ids::{
+    validate_id, DeviceId, IdError, MessageId, PairingSessionId, RoomId, TransferId, ID_MAX_LEN,
+};
 pub use limits::*;
 pub use messages::*;
 

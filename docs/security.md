@@ -19,7 +19,10 @@ confirmation aborts without storing credentials.
 
 The relay limits online guessing of this password. Every failed
 `/v1/pairing/join` counts, whether the code was unknown, expired, busy or
-otherwise rejected. By default, each client address (IPv6 by /64 prefix) may
+otherwise rejected. A join whose body does not decode (`400 invalid_request`,
+for example an invalid device ID) or that names an unsupported protocol version
+is refused before any code is looked up, with a response that does not depend
+on the code, so it tests no code and is not counted. By default, each client address (IPv6 by /64 prefix) may
 fail 10 times per 15 minutes. The whole relay may fail 20 times per 120-second
 pairing TTL.
 A code's lifetime overlaps at most two of those relay-wide windows, so an
@@ -262,6 +265,11 @@ case-insensitive filesystems (macOS, Windows) would store them as one file.
 Names the receiving filesystem otherwise resolves to one entry, such as
 Unicode normalization variants on APFS, are rejected when staging writes the
 second one; filesystems that keep them apart (ext4, NTFS) accept both.
+Wire IDs are checked when decoded (see [interfaces](interfaces.md)), so a
+relay- or peer-supplied room ID cannot add path separators, `..` or control
+characters to `room-<room-id>.secret` or `epoch-<room-id>.secret`; those
+paths are built only after checking the ID again, and the relay answers
+`400` to create/join requests carrying such IDs.
 
 `clipsync.log` in the log directory captures the background pairing worker's
 stdout/stderr (and, on macOS, the launchd daemon's). The pairing worker opens it

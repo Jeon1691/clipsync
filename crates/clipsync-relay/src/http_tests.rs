@@ -34,7 +34,7 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
         ConnectInfo(owner_address),
         State(state.clone()),
         HeaderMap::new(),
-        Json(request.clone()),
+        RequestJson(request.clone()),
     )
     .await
     .unwrap_err();
@@ -45,7 +45,7 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
         ConnectInfo(owner_address),
         State(state.clone()),
         HeaderMap::new(),
-        Json(request),
+        RequestJson(request),
     )
     .await
     .unwrap()
@@ -62,7 +62,7 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
         ConnectInfo(address),
         State(state.clone()),
         HeaderMap::new(),
-        Json(request.clone()),
+        RequestJson(request.clone()),
     )
     .await
     .unwrap_err();
@@ -72,7 +72,7 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
         ConnectInfo(address),
         State(state.clone()),
         HeaderMap::new(),
-        Json(request.clone()),
+        RequestJson(request.clone()),
     )
     .await
     .unwrap_err();
@@ -85,7 +85,7 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
         ConnectInfo(address),
         State(state.clone()),
         HeaderMap::new(),
-        Json(request.clone()),
+        RequestJson(request.clone()),
     )
     .await
     .unwrap_err();
@@ -97,7 +97,7 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
         ConnectInfo(address),
         State(state.clone()),
         HeaderMap::new(),
-        Json(request.clone()),
+        RequestJson(request.clone()),
     )
     .await
     .unwrap();
@@ -106,7 +106,7 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
         ConnectInfo(address),
         State(state.clone()),
         HeaderMap::new(),
-        Json(request.clone()),
+        RequestJson(request.clone()),
     )
     .await
     .unwrap_err();
@@ -119,7 +119,7 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
         ConnectInfo(address),
         State(state),
         HeaderMap::new(),
-        Json(request),
+        RequestJson(request),
     )
     .await
     .unwrap_err();
@@ -344,7 +344,7 @@ async fn create_offer(state: &Arc<RelayState>) -> CreatePairingResponse {
         ConnectInfo("127.0.0.3:4000".parse().unwrap()),
         State(state.clone()),
         HeaderMap::new(),
-        Json(CreatePairingRequest {
+        RequestJson(CreatePairingRequest {
             protocol_version: PROTOCOL_VERSION,
             pairing_session_id: PairingSessionId::new(),
             device_id: DeviceId::new(),
@@ -387,7 +387,7 @@ async fn sweeping_wrong_codes_from_one_ip_is_throttled_and_blocks_the_correct_co
             ConnectInfo(attacker),
             State(state.clone()),
             HeaderMap::new(),
-            Json(join_request(&code)),
+            RequestJson(join_request(&code)),
         )
         .await
         .unwrap_err();
@@ -403,7 +403,7 @@ async fn sweeping_wrong_codes_from_one_ip_is_throttled_and_blocks_the_correct_co
         ConnectInfo(attacker),
         State(state.clone()),
         HeaderMap::new(),
-        Json(join_request(&offer.pairing_code)),
+        RequestJson(join_request(&offer.pairing_code)),
     )
     .await
     .unwrap_err();
@@ -427,7 +427,7 @@ async fn join_status(
         ConnectInfo(peer),
         State(state.clone()),
         headers,
-        Json(join_request(code)),
+        RequestJson(join_request(code)),
     )
     .await
     {
@@ -543,7 +543,7 @@ async fn exhausted_relay_wide_budget_answers_unknown_and_correct_codes_identical
         ConnectInfo(fresh),
         State(state.clone()),
         HeaderMap::new(),
-        Json(join_request("999999")),
+        RequestJson(join_request("999999")),
     )
     .await
     .unwrap_err();
@@ -551,7 +551,7 @@ async fn exhausted_relay_wide_budget_answers_unknown_and_correct_codes_identical
         ConnectInfo(fresh),
         State(state.clone()),
         HeaderMap::new(),
-        Json(join_request(&offer.pairing_code)),
+        RequestJson(join_request(&offer.pairing_code)),
     )
     .await
     .unwrap_err();
@@ -706,7 +706,7 @@ async fn create_status(
         ConnectInfo(peer),
         State(state.clone()),
         headers,
-        Json(CreatePairingRequest {
+        RequestJson(CreatePairingRequest {
             protocol_version: PROTOCOL_VERSION,
             pairing_session_id: PairingSessionId::new(),
             device_id: DeviceId::new(),
@@ -1002,4 +1002,176 @@ async fn a_newcomer_evicts_the_oldest_unauthenticated_socket_instead_of_being_re
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn pairing_endpoints_reject_unsafe_wire_identifiers_with_bad_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = router(RelayConfig {
+        bind: address,
+        public_url: format!("http://{address}"),
+        token_secret: vec![33; 32],
+        webhook_url: None,
+        webhook_secret: None,
+        metrics_token: None,
+    })
+    .into_make_service_with_connect_info::<SocketAddr>();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let post = |path: &'static str, body: serde_json::Value| {
+        let client = client.clone();
+        async move {
+            client
+                .post(format!("http://{address}{path}"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    let create = |sid: &str, device: &str| {
+        serde_json::json!({
+            "pairing_session_id": sid,
+            "device_id": device,
+            "device_name": "owner",
+            "os": "test",
+            "protocol_version": PROTOCOL_VERSION,
+            "ttl_secs": null,
+        })
+    };
+    let good_sid = PairingSessionId::new().to_string();
+    let good_device = DeviceId::new().to_string();
+    for (sid, device) in [
+        (good_sid.as_str(), "../../outside"),
+        (good_sid.as_str(), "dev\u{1b}[2Jice"),
+        (good_sid.as_str(), ""),
+        ("..\\session", good_device.as_str()),
+    ] {
+        let response = post("/v1/pairing/create", create(sid, device)).await;
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        let body: ErrorBody = response.json().await.unwrap();
+        assert_eq!(body.code, "invalid_request");
+        assert!(!body.message.contains("outside") && !body.message.contains('\u{1b}'));
+    }
+
+    let offer: CreatePairingResponse = post(
+        "/v1/pairing/create",
+        create(good_sid.as_str(), good_device.as_str()),
+    )
+    .await
+    .json()
+    .await
+    .unwrap();
+    let join = |device: &str| {
+        serde_json::json!({
+            "pairing_code": offer.pairing_code,
+            "device_id": device,
+            "device_name": "joiner",
+            "os": "test",
+            "protocol_version": PROTOCOL_VERSION,
+        })
+    };
+    // A missing content type keeps axum's own status rather than becoming 400.
+    let untyped = client
+        .post(format!("http://{address}/v1/pairing/create"))
+        .body(create(good_sid.as_str(), good_device.as_str()).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        untyped.status(),
+        reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
+    );
+
+    let response = post("/v1/pairing/join", join("joiner/../../outside")).await;
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.json::<ErrorBody>().await.unwrap().code,
+        "invalid_request"
+    );
+    // The rejected join consumed neither the session nor an attempt.
+    let joined = post("/v1/pairing/join", join(&DeviceId::new().to_string())).await;
+    assert_eq!(joined.status(), reqwest::StatusCode::OK);
+    let joined: JoinPairingResponse = joined.json().await.unwrap();
+    assert_eq!(joined.room_id, offer.room_id);
+    server.abort();
+}
+
+/// Regression for the failed-join budget around undecodable bodies. A join
+/// whose body fails to decode (here an unsafe device ID beside the live code)
+/// is answered with one fixed `400` before any code is looked up, so it tests
+/// no code and is not charged. Guessing therefore still needs decodable joins,
+/// which are charged, and once the budget is spent the correct code is refused
+/// as well, whichever body carries it.
+#[tokio::test]
+async fn undecodable_joins_test_no_code_and_leave_the_join_budget_to_decodable_guesses() {
+    let (url, task) =
+        spawn_router(router(metrics_test_config("127.0.0.1:0".parse().unwrap()))).await;
+    let client = loopback_client();
+    let post = |path: &'static str, body: serde_json::Value| {
+        let request = client.post(format!("{url}{path}")).json(&body);
+        async move { request.send().await.unwrap() }
+    };
+    let offer: CreatePairingResponse = post(
+        "/v1/pairing/create",
+        serde_json::json!({
+            "pairing_session_id": PairingSessionId::new(),
+            "device_id": DeviceId::new(),
+            "device_name": "owner",
+            "os": "test",
+            "protocol_version": PROTOCOL_VERSION,
+            "ttl_secs": null,
+        }),
+    )
+    .await
+    .json()
+    .await
+    .unwrap();
+    let join = |code: &str, device: &str| {
+        serde_json::json!({
+            "pairing_code": code,
+            "device_id": device,
+            "device_name": "joiner",
+            "os": "test",
+            "protocol_version": PROTOCOL_VERSION,
+        })
+    };
+    let undecodable = || join(&offer.pairing_code, "../outside");
+    let expect_invalid_request = |response: reqwest::Response| async move {
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        let body: ErrorBody = response.json().await.unwrap();
+        assert_eq!(body.code, "invalid_request");
+        assert_eq!(body.message, "malformed request body");
+    };
+
+    // More undecodable joins than the client budget allows failures.
+    for _ in 0..=IP_FAILED_JOIN_LIMIT {
+        expect_invalid_request(post("/v1/pairing/join", undecodable()).await).await;
+    }
+    // The whole budget is still there for decodable guesses, which it bounds.
+    let mut guesses = wrong_codes(&offer);
+    for code in guesses.by_ref().take(IP_FAILED_JOIN_LIMIT as usize) {
+        let device = DeviceId::new().to_string();
+        let response = post("/v1/pairing/join", join(&code, &device)).await;
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    }
+    let device = DeviceId::new().to_string();
+    let next = guesses.next().unwrap();
+    let response = post("/v1/pairing/join", join(&next, &device)).await;
+    assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    // Spent budget: an undecodable body still learns nothing about the code,
+    // and a decodable one with the correct code is refused.
+    expect_invalid_request(post("/v1/pairing/join", undecodable()).await).await;
+    let response = post("/v1/pairing/join", join(&offer.pairing_code, &device)).await;
+    assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response.json::<ErrorBody>().await.unwrap().code,
+        "too_many_attempts"
+    );
+    task.abort();
 }
