@@ -59,7 +59,7 @@ async fn regression_f98_stale_room_socket_close_does_not_announce_live_replaceme
         let server = tokio::spawn(async move {
             axum::serve(listener, axum::Router::new()
                 .route("/v1/ws", axum::routing::get(ws_handler))
-                .with_state(server_state)).await.unwrap();
+                .with_state(server_state).into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
         });
         let mut peer = connect(address, &member, &rid, &member_token).await;
         let mut old = connect(address, &owner, &rid, &owner_token).await;
@@ -131,6 +131,20 @@ fn product_logs() -> &'static Arc<std::sync::Mutex<Vec<u8>>> {
     })
 }
 
+/// Client address of sockets driven directly through [`handle_control`].
+const TEST_CLIENT: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+
+/// [`handle_control_from`] for a socket from [`TEST_CLIENT`].
+async fn handle_control(
+    state: &Arc<RelayState>,
+    tx: &mpsc::Sender<WsOut>,
+    ctx: &mut Option<ConnCtx>,
+    msg: ControlMessage,
+    token_q: Option<&str>,
+) -> Result<(), String> {
+    handle_control_from(state, tx, ctx, msg, token_q, TEST_CLIENT).await
+}
+
 fn state() -> Arc<RelayState> {
     let _ = product_logs();
     Arc::new(RelayState::new(RelayConfig {
@@ -148,14 +162,17 @@ fn room(state: &RelayState) -> (RoomId, DeviceId, DeviceId, String, String) {
     let member = DeviceId::new();
     let sid = PairingSessionId::new();
     let offer = state
-        .create_pairing(CreatePairingRequest {
-            protocol_version: clipsync_protocol::PROTOCOL_VERSION,
-            pairing_session_id: sid.clone(),
-            device_id: owner.clone(),
-            device_name: "owner".into(),
-            os: "fixture".into(),
-            ttl_secs: Some(60),
-        })
+        .create_pairing(
+            CreatePairingRequest {
+                protocol_version: clipsync_protocol::PROTOCOL_VERSION,
+                pairing_session_id: sid.clone(),
+                device_id: owner.clone(),
+                device_name: "owner".into(),
+                os: "fixture".into(),
+                ttl_secs: Some(60),
+            },
+            std::net::Ipv4Addr::LOCALHOST.into(),
+        )
         .unwrap();
     state
         .join_pairing(
@@ -550,14 +567,17 @@ async fn missing_peers_and_pairing_abort_report_explicit_control_outcomes() {
     );
     let sid = PairingSessionId::new();
     let pending = state
-        .create_pairing(CreatePairingRequest {
-            protocol_version: clipsync_protocol::PROTOCOL_VERSION,
-            pairing_session_id: sid.clone(),
-            device_id: DeviceId::new(),
-            device_name: "fixture".into(),
-            os: "fixture".into(),
-            ttl_secs: None,
-        })
+        .create_pairing(
+            CreatePairingRequest {
+                protocol_version: clipsync_protocol::PROTOCOL_VERSION,
+                pairing_session_id: sid.clone(),
+                device_id: DeviceId::new(),
+                device_name: "fixture".into(),
+                os: "fixture".into(),
+                ttl_secs: None,
+            },
+            std::net::Ipv4Addr::LOCALHOST.into(),
+        )
         .unwrap();
     ctx.as_mut().unwrap().pairing_sid = Some(sid.to_string());
     handle_control(
@@ -573,7 +593,7 @@ async fn missing_peers_and_pairing_abort_report_explicit_control_outcomes() {
     .await
     .unwrap();
     assert!(state.pairing(&pending.pairing_code).is_none());
-    send_err(&tx, "fixture_error", "details").await;
+    send_msg(&tx, &error_message("fixture_error", "details")).await;
     assert!(
         matches!(receive(&mut rx).await, ControlMessage::Error { code, message } if code == "fixture_error" && message == "details")
     );
@@ -636,7 +656,8 @@ async fn websocket_frame_limits_reject_oversized_binary_before_dispatch() {
                     listener,
                     axum::Router::new()
                         .route("/v1/ws", axum::routing::get(ws_handler))
-                        .with_state(serving),
+                        .with_state(serving)
+                        .into_make_service_with_connect_info::<std::net::SocketAddr>(),
                 )
                 .await
                 .unwrap();
@@ -722,7 +743,7 @@ async fn websocket_recovers_after_malformed_control_and_unauthenticated_binary()
             listener,
             axum::Router::new()
                 .route("/v1/ws", axum::routing::get(ws_handler))
-                .with_state(state),
+                .with_state(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
         .await
         .unwrap();
@@ -790,14 +811,17 @@ async fn unauthenticated_forwarding_and_absent_pairing_peers_fail_without_invent
     let sid = PairingSessionId::new();
     let owner = DeviceId::new();
     let offer = state
-        .create_pairing(CreatePairingRequest {
-            pairing_session_id: sid.clone(),
-            device_id: owner.clone(),
-            device_name: "owner".into(),
-            os: "fixture".into(),
-            protocol_version: clipsync_protocol::PROTOCOL_VERSION,
-            ttl_secs: Some(60),
-        })
+        .create_pairing(
+            CreatePairingRequest {
+                pairing_session_id: sid.clone(),
+                device_id: owner.clone(),
+                device_name: "owner".into(),
+                os: "fixture".into(),
+                protocol_version: clipsync_protocol::PROTOCOL_VERSION,
+                ttl_secs: Some(60),
+            },
+            std::net::Ipv4Addr::LOCALHOST.into(),
+        )
         .unwrap();
     for message in [
         ControlMessage::NoiseHandshake {
@@ -1002,7 +1026,7 @@ async fn regression_f88_revoked_network_peer_is_closed_cannot_send_and_cannot_re
             listener,
             axum::Router::new()
                 .route("/v1/ws", axum::routing::get(ws_handler))
-                .with_state(serving),
+                .with_state(serving).into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
         .await
         .unwrap();
@@ -1336,14 +1360,17 @@ async fn regression_f98_expiry_discards_pending_spake_and_prevents_admission_or_
     let owner = DeviceId::new();
     let member = DeviceId::new();
     let offer = state
-        .create_pairing(CreatePairingRequest {
-            protocol_version: clipsync_protocol::PROTOCOL_VERSION,
-            pairing_session_id: sid.clone(),
-            device_id: owner.clone(),
-            device_name: "owner".into(),
-            os: "fixture".into(),
-            ttl_secs: Some(60),
-        })
+        .create_pairing(
+            CreatePairingRequest {
+                protocol_version: clipsync_protocol::PROTOCOL_VERSION,
+                pairing_session_id: sid.clone(),
+                device_id: owner.clone(),
+                device_name: "owner".into(),
+                os: "fixture".into(),
+                ttl_secs: Some(60),
+            },
+            std::net::Ipv4Addr::LOCALHOST.into(),
+        )
         .unwrap();
     let joined = state
         .join_pairing(
@@ -1415,6 +1442,525 @@ async fn regression_f98_expiry_discards_pending_spake_and_prevents_admission_or_
     assert!(state.room(offer.room_id.as_str()).is_none());
     state.gc();
     assert!(state.pairing(sid.as_str()).is_none());
+}
+
+#[tokio::test]
+async fn text_for_an_offline_peer_is_acked_peer_offline_when_the_queue_is_full() {
+    use crate::resource_limits::MAX_QUEUED_TEXT_ENVELOPES;
+    let state = state();
+    let (rid, owner, member, token, _) = room(&state);
+    let (tx, mut rx) = mpsc::channel(32);
+    let mut ctx = None;
+    handle_control(&state, &tx, &mut ctx, hello(&owner, &rid, &token), None)
+        .await
+        .unwrap();
+    receive(&mut rx).await;
+    let routing = RoutingHeader {
+        version: clipsync_protocol::PROTOCOL_VERSION,
+        message_id: MessageId::new(),
+        transfer_id: TransferId::new(),
+        room_id: rid.clone(),
+        sender_device_id: owner,
+        recipient: Recipient::Broadcast,
+        sent_at: chrono::Utc::now(),
+        expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+        item_kind: ItemKind::Text,
+        seq: 1,
+    };
+    let queued = QueuedEnvelope {
+        routing: routing.clone(),
+        nonce: "opaque-nonce".into(),
+        ciphertext: "opaque-ciphertext".into(),
+    };
+    for n in 0..MAX_QUEUED_TEXT_ENVELOPES {
+        // From other clients, so the test client's own share is untouched.
+        let other = std::net::IpAddr::from([192, 0, 2, n as u8]);
+        assert!(state.queue_text(
+            rid.as_str(),
+            &format!("other-{n}"),
+            queued.clone(),
+            routing.expires_at,
+            other
+        ));
+    }
+    let envelope = ControlMessage::TextEnvelope {
+        routing,
+        nonce: "opaque-nonce".into(),
+        ciphertext: "opaque-ciphertext".into(),
+    };
+    handle_control(&state, &tx, &mut ctx, envelope, None)
+        .await
+        .unwrap();
+    assert!(matches!(
+        receive(&mut rx).await,
+        ControlMessage::Ack {
+            status: AckStatus::PeerOffline,
+            detail: Some(_),
+            ..
+        }
+    ));
+    assert!(state.take_queue(rid.as_str(), member.as_str()).is_none());
+}
+
+/// Idle sockets must not hold connection slots: an unauthenticated socket is
+/// closed at its hello deadline even while it keeps sending other messages,
+/// and an authenticated one after a silence of the idle timeout, but not
+/// while it keeps sending heartbeats.
+#[tokio::test]
+async fn idle_sockets_are_closed_and_free_their_connection_slots() {
+    use crate::resource_limits::SocketDeadlines;
+    use tokio_tungstenite::tungstenite::Message as ClientMessage;
+    const HELLO: Duration = Duration::from_millis(300);
+    const IDLE: Duration = Duration::from_millis(300);
+    const HEARTBEAT: Duration = Duration::from_millis(50);
+    /// Heartbeats sent while checking that traffic keeps a socket open:
+    /// together they span several idle timeouts.
+    const HEARTBEATS: u64 = 20;
+    type Client = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+    async fn closed(socket: &mut Client) {
+        loop {
+            match socket.next().await {
+                None | Some(Err(_)) | Some(Ok(ClientMessage::Close(_))) => return,
+                Some(Ok(_)) => {}
+            }
+        }
+    }
+    let ping = || ClientMessage::Text(ControlMessage::Ping { ts: 1 }.encode().unwrap().into());
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut relay = RelayState::new(RelayConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            public_url: "http://127.0.0.1".into(),
+            token_secret: vec![42; 32],
+            webhook_url: None,
+            webhook_secret: None,
+            metrics_token: None,
+        });
+        relay.socket_deadlines = SocketDeadlines {
+            hello: HELLO,
+            read_idle: IDLE,
+        };
+        let state = Arc::new(relay);
+        let (rid, owner, _, owner_token, _) = room(&state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let serving = state.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new()
+                    .route("/v1/ws", axum::routing::get(ws_handler))
+                    .with_state(serving)
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let url = format!("ws://{address}/v1/ws");
+
+        // Unauthenticated: pings do not extend the hello deadline.
+        let (mut anonymous, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let opened = std::time::Instant::now();
+        let mut heartbeat = tokio::time::interval(HEARTBEAT);
+        loop {
+            tokio::select! {
+                _ = heartbeat.tick() => {
+                    if anonymous.send(ping()).await.is_err() {
+                        break;
+                    }
+                }
+                message = anonymous.next() => match message {
+                    None | Some(Err(_)) | Some(Ok(ClientMessage::Close(_))) => break,
+                    Some(Ok(_)) => {}
+                },
+            }
+        }
+        assert!(opened.elapsed() >= HELLO);
+
+        // Authenticated: heartbeats keep the socket open past several idle
+        // timeouts; silence then closes it.
+        let (mut device, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        device
+            .send(ClientMessage::Text(
+                hello(&owner, &rid, &owner_token).encode().unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        for _ in 0..HEARTBEATS {
+            tokio::time::sleep(HEARTBEAT).await;
+            device.send(ping()).await.unwrap();
+        }
+        assert!(
+            state.is_online(rid.as_str(), owner.as_str()),
+            "a live socket was closed"
+        );
+        let silent = std::time::Instant::now();
+        closed(&mut device).await;
+        assert!(silent.elapsed() >= IDLE);
+
+        while state.connection_counts.total() > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        server.abort();
+    })
+    .await
+    .unwrap();
+}
+
+/// A state whose unauthenticated sockets must send `hello` within `hello`.
+fn state_with_hello_deadline(hello: Duration) -> Arc<RelayState> {
+    use crate::resource_limits::SocketDeadlines;
+    let mut relay = RelayState::new(RelayConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        public_url: "http://127.0.0.1".into(),
+        token_secret: vec![42; 32],
+        webhook_url: None,
+        webhook_secret: None,
+        metrics_token: None,
+    });
+    relay.socket_deadlines = SocketDeadlines {
+        hello,
+        ..SocketDeadlines::default()
+    };
+    Arc::new(relay)
+}
+
+/// Regression for a stalled pre-hello socket: a client that sends requests
+/// and never reads the replies fills its outbound queue. Before the fix, the
+/// first reply that found the queue full blocked the read loop forever, so
+/// the hello deadline never fired and the socket held its connection slot.
+/// Replies to an unauthenticated socket must never wait for queue space.
+#[tokio::test]
+async fn regression_unauthenticated_socket_that_never_reads_still_meets_its_hello_deadline() {
+    const HELLO: Duration = Duration::from_millis(200);
+    /// Far beyond the deadline: the loop must end at the deadline, not here.
+    const HANG: Duration = Duration::from_secs(5);
+    let state = state_with_hello_deadline(HELLO);
+    let slot = state.acquire_connection(TEST_CLIENT).unwrap();
+    // A full outbound queue whose writer never drains it: a client that
+    // stopped reading.
+    let (tx, _rx) = mpsc::channel(1);
+    tx.try_send(WsOut::Close).unwrap();
+    let text = |msg: ControlMessage| Ok(Message::Text(msg.encode().unwrap().into()));
+    let requests = vec![
+        // Answered with a pong.
+        text(ControlMessage::Ping { ts: 1 }),
+        // Answered with an error: no hello yet.
+        text(ControlMessage::Revoke {
+            device_id: DeviceId::new(),
+        }),
+        // Answered with an error: a forged token.
+        text(hello(&DeviceId::new(), &RoomId::new(), "forged")),
+        // Answered on the binary channel.
+        Ok(Message::Ping(Vec::new().into())),
+    ];
+    let mut stream = futures_util::stream::iter(requests).chain(futures_util::stream::pending());
+    let started = tokio::time::Instant::now();
+    let ctx = tokio::time::timeout(
+        HANG,
+        read_loop(&mut stream, &state, &tx, None, TEST_CLIENT, &slot),
+    )
+    .await
+    .expect("a full outbound queue stalled the read loop past its hello deadline");
+    assert!(ctx.is_none());
+    assert!(started.elapsed() >= HELLO);
+}
+
+/// An unauthenticated socket evicted to admit a newer one stops reading at
+/// once, without waiting for its hello deadline.
+#[tokio::test]
+async fn an_evicted_unauthenticated_socket_stops_reading_at_once() {
+    use crate::connection_limits::ConnectionLimits;
+    const HELLO: Duration = Duration::from_secs(30);
+    let limits = ConnectionLimits {
+        max_total: 2,
+        max_unauthenticated: 1,
+        max_per_client: 2,
+        max_per_site: 2,
+        max_eviction_overshoot: 0,
+    };
+    let state = state_with_hello_deadline(HELLO);
+    let oldest = state
+        .connection_counts
+        .acquire(TEST_CLIENT, limits)
+        .unwrap();
+    let _newer = state
+        .connection_counts
+        .acquire(TEST_CLIENT, limits)
+        .unwrap();
+    let (tx, _rx) = mpsc::channel(1);
+    let mut stream = futures_util::stream::pending::<Result<Message, axum::Error>>();
+    let ctx = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_loop(&mut stream, &state, &tx, None, TEST_CLIENT, &oldest),
+    )
+    .await
+    .expect("an evicted socket kept waiting for hello");
+    assert!(ctx.is_none());
+}
+
+/// Regression for one client filling the relay-wide offline queue: a client
+/// with many rooms whose peers are offline gets its share of the queue, and
+/// past it the sender is told `peer_offline` instead of `accepted`.
+#[tokio::test]
+async fn regression_a_client_with_many_rooms_gets_only_its_share_of_the_offline_queue() {
+    use crate::resource_limits::MAX_CLIENT_QUEUED_TEXT_ENVELOPES;
+    let state = state();
+    let mut statuses = Vec::new();
+    for _ in 0..=MAX_CLIENT_QUEUED_TEXT_ENVELOPES {
+        let (rid, owner, _, token, _) = room(&state);
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut ctx = None;
+        handle_control(&state, &tx, &mut ctx, hello(&owner, &rid, &token), None)
+            .await
+            .unwrap();
+        receive(&mut rx).await;
+        let routing = RoutingHeader {
+            version: clipsync_protocol::PROTOCOL_VERSION,
+            message_id: MessageId::new(),
+            transfer_id: TransferId::new(),
+            room_id: rid,
+            sender_device_id: owner,
+            recipient: Recipient::Broadcast,
+            sent_at: chrono::Utc::now(),
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+            item_kind: ItemKind::Text,
+            seq: 1,
+        };
+        let envelope = ControlMessage::TextEnvelope {
+            routing,
+            nonce: "opaque-nonce".into(),
+            ciphertext: "opaque-ciphertext".into(),
+        };
+        handle_control(&state, &tx, &mut ctx, envelope, None)
+            .await
+            .unwrap();
+        match receive(&mut rx).await {
+            ControlMessage::Ack { status, .. } => statuses.push(status),
+            other => panic!("expected an ack, got {other:?}"),
+        }
+    }
+    let accepted = statuses
+        .iter()
+        .filter(|status| **status == AckStatus::Accepted)
+        .count();
+    assert_eq!(accepted, MAX_CLIENT_QUEUED_TEXT_ENVELOPES);
+    assert_eq!(statuses.last(), Some(&AckStatus::PeerOffline));
+}
+
+/// A device-token `hello` keeps its room from eviction until the socket's
+/// cleanup removes its member route; a failed `hello` routes nothing.
+#[tokio::test]
+async fn an_authenticated_device_socket_holds_its_room_online_until_it_closes() {
+    let state = state();
+    let (rid, owner, _, token, _) = room(&state);
+    let online = || state.is_online(rid.as_str(), owner.as_str());
+    let (tx, mut rx) = mpsc::channel(8);
+    let mut ctx = None;
+    assert!(
+        handle_control(&state, &tx, &mut ctx, hello(&owner, &rid, "forged"), None)
+            .await
+            .is_err()
+    );
+    assert!(!online());
+    handle_control(&state, &tx, &mut ctx, hello(&owner, &rid, &token), None)
+        .await
+        .unwrap();
+    receive(&mut rx).await;
+    assert!(online());
+    forget_socket(&state, &tx, ctx.as_ref().unwrap()).await;
+    assert!(!online());
+}
+
+/// Open a pairing session; returns its ID and the creator's pairing `hello`.
+fn pairing_hello(state: &RelayState) -> (PairingSessionId, ControlMessage) {
+    let owner = DeviceId::new();
+    let sid = PairingSessionId::new();
+    let offer = state
+        .create_pairing(
+            CreatePairingRequest {
+                protocol_version: clipsync_protocol::PROTOCOL_VERSION,
+                pairing_session_id: sid.clone(),
+                device_id: owner.clone(),
+                device_name: "owner".into(),
+                os: "fixture".into(),
+                ttl_secs: Some(60),
+            },
+            TEST_CLIENT,
+        )
+        .unwrap();
+    let mut greeting = hello(&owner, &offer.room_id, &offer.pairing_token);
+    if let ControlMessage::Hello {
+        role,
+        pairing_session_id,
+        ..
+    } = &mut greeting
+    {
+        *role = ClientRole::PairingA;
+        *pairing_session_id = Some(sid.clone());
+    }
+    (sid, greeting)
+}
+
+/// Regression for a stalled valid `hello`: a client that fills its own queue
+/// and then authenticates must not block in `hello` itself. A device token
+/// becomes a member socket; a pairing token stays bounded by its session's
+/// expiry, however full its queue.
+#[tokio::test]
+async fn regression_a_valid_hello_on_a_full_queue_never_blocks() {
+    const HELLO: Duration = Duration::from_secs(30);
+    /// The pairing session's remaining lifetime in this test.
+    const PAIRING_LEFT: Duration = Duration::from_millis(300);
+    /// Far beyond either bound.
+    const HANG: Duration = Duration::from_secs(5);
+    let state = state_with_hello_deadline(HELLO);
+    let full_queue = || {
+        let (tx, rx) = mpsc::channel(1);
+        tx.try_send(WsOut::Close).unwrap();
+        (tx, rx)
+    };
+    let text = |msg: &ControlMessage| Ok(Message::Text(msg.encode().unwrap().into()));
+
+    // Device token: `hello` completes, then the stream ends the loop.
+    let (rid, owner, _, token, _) = room(&state);
+    let slot = state.acquire_connection(TEST_CLIENT).unwrap();
+    let (tx, _rx) = full_queue();
+    let mut stream = futures_util::stream::iter(vec![text(&hello(&owner, &rid, &token))]);
+    let ctx = tokio::time::timeout(
+        HANG,
+        read_loop(&mut stream, &state, &tx, None, TEST_CLIENT, &slot),
+    )
+    .await
+    .expect("a device hello blocked on its own full queue");
+    assert!(ctx.is_some_and(|c| c.is_member()));
+
+    // Pairing token: `hello` completes, then the session's expiry closes it
+    // although its replies cannot be queued.
+    let (sid, greeting) = pairing_hello(&state);
+    state.pairing_mut(sid.as_str()).unwrap().expires_at =
+        chrono::Utc::now() + chrono::Duration::from_std(PAIRING_LEFT).unwrap();
+    let slot = state.acquire_connection(TEST_CLIENT).unwrap();
+    let (tx, _rx) = full_queue();
+    let requests = vec![text(&greeting), text(&ControlMessage::Ping { ts: 1 })];
+    let mut stream = futures_util::stream::iter(requests).chain(futures_util::stream::pending());
+    let started = tokio::time::Instant::now();
+    let ctx = tokio::time::timeout(
+        HANG,
+        read_loop(&mut stream, &state, &tx, None, TEST_CLIENT, &slot),
+    )
+    .await
+    .expect("a pairing socket outlived its session");
+    let ctx = ctx.expect("the pairing hello was accepted");
+    assert!(ctx.pairing_side.is_some() && !ctx.is_member());
+    assert!(
+        started.elapsed() < HELLO,
+        "closed by its session, not the hello deadline"
+    );
+}
+
+/// Pairing tokens are issued without authentication, so a pairing socket
+/// stays evictable after its `hello`: it cannot hold the slots kept for room
+/// members.
+#[tokio::test]
+async fn a_pairing_socket_stays_evictable_after_its_hello() {
+    use crate::connection_limits::ConnectionLimits;
+    const HELLO: Duration = Duration::from_secs(30);
+    let limits = ConnectionLimits {
+        max_total: 2,
+        max_unauthenticated: 1,
+        max_per_client: 2,
+        max_per_site: 2,
+        max_eviction_overshoot: 0,
+    };
+    let state = state_with_hello_deadline(HELLO);
+    let (sid, greeting) = pairing_hello(&state);
+    let slot = state
+        .connection_counts
+        .acquire(TEST_CLIENT, limits)
+        .unwrap();
+    let (tx, _rx) = mpsc::channel(8);
+    let (frames, incoming) = mpsc::unbounded_channel::<Result<Message, axum::Error>>();
+    let mut stream = futures_util::stream::unfold(incoming, |mut incoming| async move {
+        incoming.recv().await.map(|frame| (frame, incoming))
+    })
+    .boxed();
+    let reader = {
+        let state = state.clone();
+        tokio::spawn(async move {
+            read_loop(&mut stream, &state, &tx, None, TEST_CLIENT, &slot)
+                .await
+                .is_some()
+        })
+    };
+    frames
+        .send(Ok(Message::Text(greeting.encode().unwrap().into())))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.pairing(sid.as_str()).unwrap().pairing_senders[0].is_none() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the pairing hello was not handled");
+    assert_eq!(state.connection_counts.unauthenticated(), 1);
+    let _newer = state
+        .connection_counts
+        .acquire(TEST_CLIENT, limits)
+        .unwrap();
+    let paired = tokio::time::timeout(Duration::from_secs(5), reader)
+        .await
+        .expect("a pairing socket could not be evicted")
+        .unwrap();
+    assert!(paired);
+    drop(frames);
+}
+
+/// Regression for a closing pairing socket holding its connection slot: the
+/// room it paired into may have a member whose queue is full because it
+/// stopped reading. A pairing socket is never routed to room members, so its
+/// cleanup sends that member nothing and never waits for queue space, or the
+/// closed socket would keep its slot indefinitely.
+#[tokio::test]
+async fn regression_a_closing_pairing_socket_never_waits_on_a_stalled_peer() {
+    /// Far beyond a cleanup that does not wait.
+    const HANG: Duration = Duration::from_secs(5);
+    let state = state();
+    let (rid, owner, member, _, _) = room(&state);
+    // The owner is online but has stopped reading: its queue is full.
+    let (stalled, mut unread) = mpsc::channel(1);
+    stalled
+        .try_send(WsOut::Text("unread".into()))
+        .expect("fill the stalled queue");
+    state
+        .register_conn(rid.as_str(), owner.as_str(), stalled)
+        .unwrap();
+    // The joiner's pairing socket closes; it is not a room member.
+    let (tx, _rx) = mpsc::channel(8);
+    let pairing = ConnCtx {
+        device_id: member.to_string(),
+        room_id: rid.to_string(),
+        pairing_sid: None,
+        device_role: DeviceRole::Member,
+        pairing_side: None,
+        client: TEST_CLIENT,
+        member_conn: None,
+        presence: None,
+        pairing_deadline: Some(tokio::time::Instant::now() + HANG),
+        _live: state.live_connection(),
+    };
+    assert!(!pairing.is_member());
+    tokio::time::timeout(HANG, forget_socket(&state, &tx, &pairing))
+        .await
+        .expect("a closing pairing socket waited on a stalled peer's queue");
+    // `handle_socket` frees the slot once this returns and the writer closes.
+    assert!(!state.is_online(rid.as_str(), member.as_str()));
+    assert!(matches!(unread.try_recv(), Ok(WsOut::Text(text)) if text == "unread"));
+    assert!(
+        unread.try_recv().is_err(),
+        "a pairing socket announced its leave"
+    );
 }
 
 #[tokio::test]
@@ -1572,7 +2118,7 @@ mod liveness {
             webhook_secret: None,
             metrics_token: None,
         });
-        state.read_idle_timeout = timeout;
+        state.socket_deadlines.read_idle = timeout;
         Arc::new(state)
     }
 
@@ -1584,7 +2130,8 @@ mod liveness {
                 listener,
                 axum::Router::new()
                     .route("/v1/ws", axum::routing::get(ws_handler))
-                    .with_state(state),
+                    .with_state(state)
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
             )
             .await
             .unwrap();

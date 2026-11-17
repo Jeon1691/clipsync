@@ -20,6 +20,8 @@ use std::time::Duration;
 use anyhow::bail;
 use clipsync_protocol::PAIRING_TTL_SECS;
 
+use crate::rate_limit::BudgetLimits;
+
 /// Failed joins one client may make per window: enough to retype a mistyped
 /// code a few times, while one address alone tests at most 10 of 10^6 codes.
 pub(crate) const IP_FAILED_JOIN_LIMIT: u32 = 10;
@@ -37,11 +39,11 @@ pub(crate) const GLOBAL_FAILED_JOIN_LIMIT: u32 = 20;
 /// Not configurable: the bound depends on it.
 pub(crate) const GLOBAL_FAILED_JOIN_WINDOW: Duration = Duration::from_secs(PAIRING_TTL_SECS);
 /// Values a pairing code can take: six decimal digits (see `alloc_code`).
-const PAIRING_CODE_SPACE: u64 = 1_000_000;
+pub(crate) const PAIRING_CODE_SPACE: u64 = 1_000_000;
 /// Largest acceptable guessing success per session, as 1 in this many (1e-4).
 const NEGLIGIBLE_GUESS_ODDS: u64 = 10_000;
 /// Fixed windows per pairing lifetime in the worst case (see the bound above).
-const WINDOWS_PER_PAIRING_LIFETIME: u64 = 2;
+pub(crate) const WINDOWS_PER_PAIRING_LIFETIME: u64 = 2;
 /// Largest relay-wide limit that keeps one session's guessing chance at or
 /// below 1 / `NEGLIGIBLE_GUESS_ODDS` (50 with the values above).
 pub(crate) const MAX_GLOBAL_FAILED_JOIN_LIMIT: u32 =
@@ -129,6 +131,17 @@ impl PairingJoinLimits {
 
     pub(crate) fn client_fail_window(&self) -> Duration {
         Duration::from_secs(self.client_fail_window_secs)
+    }
+
+    pub(crate) fn budget(&self) -> BudgetLimits {
+        BudgetLimits {
+            client_limit: self.client_fail_limit,
+            client_window: self.client_fail_window(),
+            // Failed joins keep #26's per-client accounting.
+            site_limit: None,
+            relay_limit: self.relay_fail_limit,
+            relay_window: GLOBAL_FAILED_JOIN_WINDOW,
+        }
     }
 }
 
