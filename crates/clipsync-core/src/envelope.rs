@@ -209,7 +209,7 @@ pub(crate) fn check_header(
     // early v1 adds nothing and would stop released peers whose clock runs
     // ahead, which synced before v2 existed. Expiry stays for both versions.
     // Checked arithmetic throughout: header timestamps come from the relay
-    // before authentication, and an overflowing `DateTime + Duration` panics
+    // before authentication, and an overflowing `Timestamp + Duration` panics
     // (process abort in release builds). Overflow rejects the envelope.
     if routing.version == ENVELOPE_VERSION_AUTHENTICATED {
         let latest_sent = now

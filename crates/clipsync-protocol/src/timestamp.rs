@@ -49,7 +49,8 @@ const UNSIGNED_YEAR_DIGITS: usize = 4;
 const FIELD_DIGITS: usize = 2;
 /// Fraction digits that carry nanoseconds; later digits are dropped.
 const FRACTION_DIGITS: usize = 9;
-/// Fraction digits per SI group (milli, micro, nano) on output.
+/// Nanoseconds per millisecond and microsecond. Output writes the fraction
+/// with 3, 6 or 9 digits, the fewest that hold it exactly, as `chrono` did.
 const NANOS_PER_MILLI: u32 = 1_000_000;
 const NANOS_PER_MICRO: u32 = 1_000;
 /// A numeric offset must be under a day, as `chrono::FixedOffset` requires.
@@ -76,7 +77,11 @@ impl Timestamp {
         secs: MIN_UNIX_SECS,
         nanos: 0,
     };
-    /// `+262142-12-31T23:59:59.999999999Z`, the latest representable instant.
+    /// `+262142-12-31T23:59:59.999999999Z`, the latest non-leap instant.
+    ///
+    /// A leap second on that last day still parses and orders above `MAX`:
+    /// `+262142-12-31T23:59:60.5Z` is `MAX_UNIX_SECS` with 1.5e9 ns, as it was
+    /// past `chrono`'s `DateTime::<Utc>::MAX_UTC`.
     pub const MAX: Self = Self {
         secs: MAX_UNIX_SECS,
         nanos: NANOS_PER_SEC - 1,
@@ -130,7 +135,7 @@ impl Timestamp {
                 nanos -= NANOS;
             } else if secs_to_add < 0 {
                 nanos -= NANOS;
-                secs += 1;
+                secs = secs.checked_add(1)?;
             } else {
                 // Stays within (or just before) the leap second.
                 return Some(Self {
@@ -139,14 +144,16 @@ impl Timestamp {
                 });
             }
         }
+        // Every step is checked: `time::Duration` spans the full `i64` seconds,
+        // so the sum can sit on `i64::MAX`/`MIN` before the nanosecond carry.
         let mut secs = secs.checked_add(secs_to_add)?;
         nanos += nanos_to_add;
         if nanos < 0 {
             nanos += NANOS;
-            secs -= 1;
+            secs = secs.checked_sub(1)?;
         } else if nanos >= NANOS {
             nanos -= NANOS;
-            secs += 1;
+            secs = secs.checked_add(1)?;
         }
         (MIN_UNIX_SECS..=MAX_UNIX_SECS)
             .contains(&secs)
@@ -544,6 +551,10 @@ mod tests {
             format!("{:?}", Timestamp::MAX),
             "+262142-12-31T23:59:59.999999999Z"
         );
+        // The documented quirk: a leap second on the last day is past `MAX`.
+        let leap_at_max: Timestamp = "+262142-12-31T23:59:60.5Z".parse().unwrap();
+        assert!(leap_at_max > Timestamp::MAX);
+        assert_eq!(leap_at_max.unix_timestamp(), MAX_UNIX_SECS);
     }
 
     #[test]
@@ -611,6 +622,51 @@ mod tests {
             Some(MAX_UNIX_SECS - 1)
         );
         assert_eq!(Timestamp::MIN + second - second, Timestamp::MIN);
+    }
+
+    /// `time::Duration` spans the full `i64` seconds, so the whole-second sum
+    /// can land exactly on `i64::MAX`/`MIN` before the nanosecond carry or
+    /// borrow; that last step must not overflow either.
+    #[test]
+    fn nanosecond_carry_and_borrow_at_the_i64_extremes_return_none() {
+        let epoch = Timestamp::from_unix(0, 0).unwrap();
+        let leap_at_max: Timestamp = "+262142-12-31T23:59:60.5Z".parse().unwrap();
+        let half_second = i32::try_from(NANOS_PER_SEC / 2).unwrap();
+        for (start, delta) in [
+            // Carry past i64::MAX.
+            (Timestamp::MAX, Duration::new(i64::MAX - MAX_UNIX_SECS, 1)),
+            (
+                leap_at_max,
+                Duration::new(i64::MAX - MAX_UNIX_SECS, half_second),
+            ),
+            // Borrow past i64::MIN.
+            (epoch, Duration::new(i64::MIN, -1)),
+            (Timestamp::MIN, Duration::new(i64::MIN - MIN_UNIX_SECS, -1)),
+            // Whole-second sums exactly on an extreme, with no carry or borrow.
+            (Timestamp::MIN, Duration::new(i64::MIN - MIN_UNIX_SECS, 0)),
+            (epoch, Duration::new(i64::MAX, 0)),
+        ] {
+            assert_eq!(start.checked_add(delta), None, "{start:?} + {delta}");
+            if let Some(negated) = delta.checked_neg() {
+                assert_eq!(start.checked_sub(negated), None, "{start:?} - {negated}");
+            }
+        }
+        // A carry or borrow that lands on a range end is still in range.
+        let nano = Duration::nanoseconds(1);
+        assert_eq!(
+            Timestamp::from_unix(MAX_UNIX_SECS - 1, NANOS_PER_SEC - 1)
+                .unwrap()
+                .checked_add(nano)
+                .map(Timestamp::unix_timestamp),
+            Some(MAX_UNIX_SECS)
+        );
+        assert_eq!(
+            Timestamp::from_unix(MIN_UNIX_SECS + 1, 0)
+                .unwrap()
+                .checked_sub(nano)
+                .map(|at| (at.unix_timestamp(), at.subsec_nanos())),
+            Some((MIN_UNIX_SECS, NANOS_PER_SEC - 1))
+        );
     }
 
     /// Leap-second arithmetic as `chrono`'s `NaiveTime::overflowing_add_signed`
