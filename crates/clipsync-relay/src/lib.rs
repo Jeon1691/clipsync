@@ -21,7 +21,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 use clipsync_protocol::{
     CreatePairingRequest, CreatePairingResponse, ErrorBody, JoinPairingRequest,
@@ -113,10 +113,18 @@ pub async fn serve_with_transport(
     let listener = std::net::TcpListener::bind(config.bind)?;
     let addr = listener.local_addr()?;
     if !transport.trusted_proxies.is_empty() {
+        let trusted = client_ip::canonical_trusted_proxies(&transport.trusted_proxies);
         info!(
-            ranges = transport.trusted_proxies.len(),
+            ranges = trusted.len(),
             "honoring X-Forwarded-For from trusted proxies for pairing limits"
         );
+        for net in client_ip::trusts_every_address(&trusted) {
+            warn!(
+                %net,
+                "trusted proxy range covers every address: any client can choose \
+                 the address its pairing-join limits are charged to"
+            );
+        }
     }
     if transport.join_limits != PairingJoinLimits::default() {
         info!(limits = ?transport.join_limits, "using configured pairing-join limits");

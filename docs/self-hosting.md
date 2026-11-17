@@ -61,8 +61,13 @@ proxy. Entries to the left of that entry are ignored because clients can write
 them. Configure the proxy to append the connecting address, as nginx's
 `$proxy_add_x_forwarded_for` and Caddy's `reverse_proxy` do. List only addresses
 that untrusted clients cannot connect from. A process that can connect from a
-trusted address can claim any client address. The setting affects pairing-join
-limits only. Leave it unset when clients connect to the relay directly.
+trusted address can claim any client address. The relay logs a startup warning
+when an entry covers a whole address family (`0.0.0.0/0`, `::/0`). IPv4-mapped
+IPv6 entries such as `::ffff:127.0.0.1` match the same IPv4 peers and hops as
+`127.0.0.1`. An IPv6 range that contains all of `::ffff:0:0/96` also trusts
+every IPv4 address. Empty entries are ignored, so an empty value or a trailing
+comma leaves the setting unset. The setting affects pairing-join limits only.
+Leave it unset when clients connect to the relay directly.
 
 For a container, mount the certificate directory read-only and pass the paths
 at runtime. Keep private files out of the image and build context. This example
@@ -202,7 +207,7 @@ location / {
 | `CLIPSYNC_RELAY_TLS_CERT_FILE` | PEM certificate chain for direct HTTPS/WSS |
 | `CLIPSYNC_RELAY_TLS_KEY_FILE` | Matching PEM private key; both TLS files are required |
 | `CLIPSYNC_RELAY_ALLOW_HTTP` | Explicit `true` for a local/TLS-proxy plaintext origin; default `false` |
-| `CLIPSYNC_RELAY_TRUSTED_PROXIES` | Optional comma-separated proxy addresses/CIDRs whose `X-Forwarded-For` identifies clients for pairing-join limits; unset uses only the TCP peer address |
+| `CLIPSYNC_RELAY_TRUSTED_PROXIES` | Optional comma-separated proxy addresses/CIDRs whose `X-Forwarded-For` identifies clients for pairing-join limits; unset or empty uses only the TCP peer address |
 | `CLIPSYNC_RELAY_PAIRING_CLIENT_FAIL_LIMIT` | Failed pairing joins per client per window; default `10` (see [pairing-join limits](#pairing-join-limits)) |
 | `CLIPSYNC_RELAY_PAIRING_CLIENT_FAIL_WINDOW_SECS` | Per-client window in seconds; default `900` |
 | `CLIPSYNC_RELAY_PAIRING_RELAY_FAIL_LIMIT` | Failed pairing joins relay-wide per pairing TTL; default `20`, at most `50` |

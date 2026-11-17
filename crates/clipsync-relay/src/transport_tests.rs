@@ -73,4 +73,16 @@ fn trusted_proxies_default_to_none_and_parse_comma_separated_ranges() {
         ["10.0.0.0/8", "127.0.0.1/32", "::1/128"].map(|net| net.parse::<ipnet::IpNet>().unwrap())
     );
     assert!(parse(&["--trusted-proxies", "10.0.0.0/8,proxy.example"]).is_err());
+    // An empty value (as an empty `CLIPSYNC_RELAY_TRUSTED_PROXIES`, which clap
+    // parses through the same path) and stray separators mean "unset".
+    for empty in ["", " ", ",", " , "] {
+        assert!(
+            parse(&["--trusted-proxies", empty]).unwrap().is_empty(),
+            "{empty:?}"
+        );
+    }
+    assert_eq!(
+        parse(&["--trusted-proxies", "127.0.0.1, ,10.0.0.0/8,"]).unwrap(),
+        ["127.0.0.1/32", "10.0.0.0/8"].map(|net| net.parse::<ipnet::IpNet>().unwrap())
+    );
 }
