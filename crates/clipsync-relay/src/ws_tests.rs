@@ -139,6 +139,7 @@ fn state() -> Arc<RelayState> {
         token_secret: vec![42; 32],
         webhook_url: None,
         webhook_secret: None,
+        metrics_token: None,
     }))
 }
 
@@ -1569,6 +1570,7 @@ mod liveness {
             token_secret: vec![42; 32],
             webhook_url: None,
             webhook_secret: None,
+            metrics_token: None,
         });
         state.read_idle_timeout = timeout;
         Arc::new(state)

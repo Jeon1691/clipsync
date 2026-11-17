@@ -10,7 +10,7 @@ use clipsync_protocol::{
     ItemKind, JoinPairingRequest, JoinPairingResponse, MessageId, PairingSessionId, Recipient,
     RoomId, RoutingHeader, TransferId, PROTOCOL_VERSION,
 };
-use clipsync_relay::{router, RelayConfig, MAX_MEMBER_SOCKETS};
+use clipsync_relay::{router, MetricsToken, RelayConfig, MAX_MEMBER_SOCKETS};
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -24,6 +24,8 @@ type Socket =
 const FIXTURE_DEADLINE: Duration = Duration::from_secs(20);
 const FRAME_DEADLINE: Duration = Duration::from_secs(3);
 const METRICS_POLL: Duration = Duration::from_millis(5);
+/// Scrape credential for this fixture's relay; readiness polls read `/metrics`.
+const METRICS_TEST_TOKEN: &str = "connection-registry-metrics-token-0123456789";
 // Well inside the relay's queue retention, so queued text cannot expire mid-test.
 const TEXT_LIFETIME_SECS: i64 = 60;
 // The relay forwards nonces opaquely; this is a 12-byte AEAD nonce in hex.
@@ -69,6 +71,7 @@ impl Relay {
             token_secret: vec![73; 32],
             webhook_url: None,
             webhook_secret: None,
+            metrics_token: Some(MetricsToken::new(METRICS_TEST_TOKEN).unwrap()),
         });
         let task = tokio::spawn(async move {
             axum::serve(
@@ -238,6 +241,7 @@ impl Relay {
                 let metrics = self
                     .client
                     .get(format!("{}/metrics", self.url))
+                    .bearer_auth(METRICS_TEST_TOKEN)
                     .send()
                     .await
                     .unwrap()

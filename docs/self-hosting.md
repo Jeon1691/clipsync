@@ -220,6 +220,8 @@ location / {
 | `CLIPSYNC_RELAY_TOKEN_SECRET` | HMAC token key; at least 32 bytes when explicitly set. Unset, empty, or whitespace-only generates a fresh random 32-byte key. |
 | `CLIPSYNC_RELAY_WEBHOOK_URL` | Optional metadata webhook |
 | `CLIPSYNC_RELAY_WEBHOOK_SECRET` | HMAC key for webhook signatures |
+| `CLIPSYNC_RELAY_METRICS_TOKEN` | Bearer token that enables `GET /metrics`; at least 32 visible ASCII characters. Unset, empty, or whitespace-only leaves `/metrics` disabled (`404`). |
+| `CLIPSYNC_RELAY_METRICS_TOKEN_FILE` | Optional private file containing the metrics bearer token; surrounding whitespace such as a trailing newline is trimmed; cannot be combined with `CLIPSYNC_RELAY_METRICS_TOKEN` |
 
 ## Token keys and rotation
 
@@ -260,6 +262,41 @@ state, so clients must pair again, including after a key rotation. To rotate,
 replace the deployment key with a newly generated value, restart the relay,
 then leave the old room on both clients (`clipsync room leave --yes`) and run
 `room create` / `room join CODE` again.
+
+## Metrics
+
+`GET /metrics` reports live WebSocket connection counts and pairing
+success/failure/throttled counters. It is **disabled by default**: the route is not
+registered and returns `404`. `GET /healthz` stays public for liveness checks.
+
+To enable scraping, configure a dedicated bearer token, independent of the
+token key and webhook secret:
+
+```bash
+export CLIPSYNC_RELAY_METRICS_TOKEN="$(openssl rand -hex 32)"
+```
+
+The relay then serves `/metrics` only to requests carrying
+`Authorization: Bearer <token>` and answers anything else with `401` and a
+`WWW-Authenticate: Bearer` challenge. The token is compared in constant time.
+Values shorter than 32 bytes or containing spaces or control characters prevent
+startup. For credential-file deployments, set
+`CLIPSYNC_RELAY_METRICS_TOKEN_FILE` instead; the file uses the same private
+permission rules as the token key file.
+
+The endpoint shares the client listener, so a public reverse proxy forwards it
+as well. Keep the token private and, where possible, block `/metrics` at the
+proxy for public hostnames and scrape the local origin instead. A Prometheus
+scrape job can read the same token file:
+
+```yaml
+scrape_configs:
+  - job_name: clipsync-relay
+    authorization:
+      credentials_file: /etc/prometheus/clipsync-relay-metrics.token
+    static_configs:
+      - targets: ["127.0.0.1:7600"]
+```
 
 ## Client
 

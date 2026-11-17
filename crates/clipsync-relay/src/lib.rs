@@ -6,6 +6,7 @@
 mod auth;
 mod client_ip;
 mod join_limits;
+mod metrics;
 mod state;
 mod transport;
 mod webhook;
@@ -31,6 +32,7 @@ use clipsync_protocol::{
 pub use join_limits::PairingJoinLimits;
 #[cfg(test)]
 use join_limits::IP_FAILED_JOIN_LIMIT;
+pub use metrics::{MetricsToken, MIN_METRICS_TOKEN_BYTES};
 pub use state::{RelayState, MAX_MEMBER_SOCKETS};
 pub use transport::RelayTransportConfig;
 
@@ -41,6 +43,8 @@ pub struct RelayConfig {
     pub token_secret: Vec<u8>,
     pub webhook_url: Option<String>,
     pub webhook_secret: Option<String>,
+    /// Bearer token for `GET /metrics`; `None` leaves the route unregistered.
+    pub metrics_token: Option<MetricsToken>,
 }
 
 impl RelayConfig {
@@ -58,6 +62,8 @@ impl RelayConfig {
             token_secret,
             webhook_url: std::env::var("CLIPSYNC_RELAY_WEBHOOK_URL").ok(),
             webhook_secret: std::env::var("CLIPSYNC_RELAY_WEBHOOK_SECRET").ok(),
+            metrics_token: metrics::metrics_token_from_env()
+                .expect("relay metrics token configuration"),
         }
     }
 }
@@ -176,10 +182,11 @@ fn router_with_state(state: Arc<RelayState>) -> Router {
             janitor_state.gc();
         }
     });
-    Router::new()
-        .route("/healthz", get(healthz))
-        .route("/metrics", get(metrics))
-        .route("/v1/pairing/create", post(create_pairing))
+    let mut app = Router::new().route("/healthz", get(healthz));
+    if state.config.metrics_token.is_some() {
+        app = app.route("/metrics", get(metrics::metrics));
+    }
+    app.route("/v1/pairing/create", post(create_pairing))
         .route("/v1/pairing/join", post(join_pairing))
         .route("/v1/ws", get(ws::ws_handler))
         .layer(TraceLayer::new_for_http())
@@ -189,10 +196,6 @@ fn router_with_state(state: Arc<RelayState>) -> Router {
 
 async fn healthz() -> Json<serde_json::Value> {
     Json(serde_json::json!({"ok": true, "service": "clipsync-relay"}))
-}
-
-async fn metrics(State(state): State<Arc<RelayState>>) -> String {
-    state.metrics_text()
 }
 
 async fn create_pairing(
