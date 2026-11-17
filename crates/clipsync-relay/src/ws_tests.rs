@@ -2068,6 +2068,7 @@ fn pairing_with_stalled_peer(
     let spake = ControlMessage::Spake2Msg {
         pairing_session_id: sid.clone(),
         message: "opaque".into(),
+        after_commitment: false,
     };
     (sid, frames(&[greeting, spake]), unread)
 }
