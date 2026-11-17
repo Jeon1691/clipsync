@@ -259,7 +259,10 @@ fn partial_entries(inbox: &Inbox) -> Vec<String> {
     std::fs::read_dir(&inbox.0)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| name.starts_with('.'))
+        // Scratch directories only; the persistent publish lock file stays.
+        .filter(|name| {
+            name.starts_with('.') && (name.ends_with(".partial") || name.ends_with(".retired"))
+        })
         .collect()
 }
 
@@ -441,4 +444,98 @@ async fn regression_cancelled_commit_leaves_no_partial_directory() {
         tokio::time::sleep(CANCELLED_COMMIT_POLL).await;
     }
     assert_eq!(published_names(&inbox, &id), ["a.txt", "b.txt"]);
+}
+
+/// Rounds of concurrent retries over a stale commit. This exercises the
+/// replace path end to end; the interleaving itself is pinned
+/// deterministically by the publish-lock unit test in `staging.rs`.
+const STALE_RETRY_ROUNDS: usize = 16;
+
+/// Files per manifest and bytes per file in those retries.
+const STALE_RETRY_FILES: usize = 4;
+const STALE_RETRY_FILE_BYTES: usize = 4096;
+
+/// Two receivers of the same retried manifest both find an older commit in
+/// place. Neither may retire the other's freshly published copy: each
+/// caller must still read every returned file after its commit returns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn regression_concurrent_retries_over_a_stale_commit_keep_each_others_files() {
+    let inbox = Inbox::new();
+    let bodies: Vec<Vec<u8>> = (0..STALE_RETRY_FILES)
+        .map(|index| vec![b'a' + index as u8; STALE_RETRY_FILE_BYTES])
+        .collect();
+    let manifests: Vec<_> = bodies
+        .iter()
+        .enumerate()
+        .map(|(index, body)| file(&format!("{index}.bin"), body))
+        .collect();
+    let payload = bodies.concat();
+    for _ in 0..STALE_RETRY_ROUNDS {
+        let id = TransferId::new();
+        inbox
+            .staging()
+            .commit_files(&id, &[file("old.txt", b"old")], b"old")
+            .await
+            .unwrap();
+        let receive = |staging: StagingArea| {
+            let (id, manifests, payload) = (id.clone(), manifests.clone(), payload.clone());
+            tokio::spawn(async move {
+                let paths = staging.commit_files(&id, &manifests, payload).await?;
+                let mut read = Vec::new();
+                for path in &paths {
+                    read.push(tokio::fs::read(path).await?);
+                }
+                Ok::<_, TransferError>(read)
+            })
+        };
+        let (daemon, pull) = tokio::join!(receive(inbox.staging()), receive(inbox.staging()));
+        for read in [daemon.unwrap().unwrap(), pull.unwrap().unwrap()] {
+            assert_eq!(read, bodies);
+        }
+        let expected: Vec<_> = (0..STALE_RETRY_FILES)
+            .map(|index| format!("{index}.bin"))
+            .collect();
+        assert_eq!(published_names(&inbox, &id), expected);
+    }
+    assert!(
+        partial_entries(&inbox).is_empty(),
+        "{:?}",
+        partial_entries(&inbox)
+    );
+}
+
+/// Names that differ only by case land on one file on macOS and Windows, so
+/// one of them would silently hold the other's bytes.
+#[tokio::test]
+async fn regression_names_differing_only_by_case_are_rejected() {
+    let inbox = Inbox::new();
+    let id = TransferId::new();
+    let error = inbox
+        .staging()
+        .commit_files(
+            &id,
+            &[file("Report.txt", b"one"), file("report.txt", b"two")],
+            b"onetwo",
+        )
+        .await
+        .expect_err("case-colliding names must not share one file");
+    assert!(matches!(error, TransferError::UnsafeName(name) if name == "report.txt"));
+    assert!(!inbox.0.join(id.as_str()).exists());
+}
+
+/// Sender-chosen sizes whose sum wraps must be rejected, not panic.
+#[tokio::test]
+async fn regression_overflowing_file_sizes_are_rejected_without_panicking() {
+    let inbox = Inbox::new();
+    let mut huge = file("huge.bin", b"");
+    huge.size = u64::MAX;
+    let files = [file("a.bin", b"a"), huge, file("b.bin", b"bb")];
+    assert!(matches!(
+        inbox
+            .staging()
+            .commit_files(&TransferId::new(), &files, b"ab")
+            .await,
+        Err(TransferError::Integrity)
+    ));
+    inbox.assert_empty();
 }

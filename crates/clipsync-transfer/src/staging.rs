@@ -63,8 +63,12 @@ impl StagingArea {
             return Err(TransferError::Integrity);
         }
         let id = safe_transfer_id(transfer_id.as_str())?;
-        let expected = files.iter().map(|f| f.size as usize).sum::<usize>();
-        if payload.len() != expected {
+        // Checked: sizes come from the sender, and a wrapped sum must not
+        // pass this check or panic.
+        let expected = files
+            .iter()
+            .try_fold(0u64, |total, f| total.checked_add(f.size));
+        if expected != Some(payload.len() as u64) {
             return Err(TransferError::Integrity);
         }
         let root = self.root.clone();
@@ -75,12 +79,11 @@ impl StagingArea {
     }
 }
 
-/// A partial directory may be swept once it is this much older than the
-/// transfer idle limit. A live commit keeps its partial directory only while
-/// it writes a payload it already holds in memory (at most
-/// `TRANSFER_MAX_BYTES`), which takes seconds; sixty idle periods (one hour)
-/// leaves a wide margin for slow disks, so the sweep never removes the
-/// directory of a receiver that is still running.
+/// Age after which a partial or retired directory counts as abandoned. A live
+/// commit keeps its partial directory only while it writes a payload it
+/// already holds in memory (at most `TRANSFER_MAX_BYTES`), which takes
+/// seconds. Sixty transfer idle periods (one hour) leave a wide margin for
+/// slow disks, so the sweep never removes a running receiver's partial.
 const STALE_STAGING_IDLE_MULTIPLE: u64 = 60;
 const STALE_STAGING_AGE: Duration =
     Duration::from_secs(clipsync_protocol::TRANSFER_IDLE_SECS * STALE_STAGING_IDLE_MULTIPLE);
@@ -91,16 +94,14 @@ const STALE_STAGING_AGE: Duration =
 /// can accumulate while keeping each commit's extra work bounded.
 const STALE_STAGING_REMOVALS_PER_COMMIT: usize = 4;
 
-/// Publication attempts before giving up. Each retry means another local
-/// receiver changed the destination between inspection and rename; a device
-/// runs only a few receivers at once (daemon, `pull`), so a handful of
-/// attempts always converges on one complete commit.
-const PUBLISH_ATTEMPTS: usize = 4;
-
 /// Suffix of a directory a commit is still writing.
 const PARTIAL_SUFFIX: &str = ".partial";
 /// Suffix of a stale commit that was swapped out and is being removed.
 const RETIRED_SUFFIX: &str = ".retired";
+/// Inbox-wide lock file that serialises publication across local receivers.
+/// One persistent file, never removed: removing a lock file while another
+/// process waits on it would let two holders lock different files.
+const PUBLISH_LOCK_NAME: &str = ".publish.lock";
 
 /// Removes a staging directory owned by one commit when the commit ends,
 /// whether it returns early, fails, or unwinds from a panic.
@@ -152,7 +153,19 @@ fn commit_blocking(
         restrict(&target, PRIVATE_FILE_MODE);
         offset = end;
     }
-    publish(root, id, &staged.path, &dest_dir, &names, files)?;
+    let retired = {
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join(PUBLISH_LOCK_NAME))?;
+        restrict(&root.join(PUBLISH_LOCK_NAME), PRIVATE_FILE_MODE);
+        // Released when `lock` is closed at the end of this block, before
+        // the retired directory is removed outside the critical section.
+        lock.lock()?;
+        publish(root, id, &staged.path, &dest_dir, &names, files)?
+    };
+    drop(retired);
     Ok(names.into_iter().map(|name| dest_dir.join(name)).collect())
 }
 
@@ -163,11 +176,17 @@ fn validated_names(files: &[FileManifest], payload: &[u8]) -> Result<Vec<String>
     let mut offset = 0usize;
     for file in files {
         let name = safe_filename(&file.name)?;
-        if !seen.insert(name.clone()) {
+        // Case-folded: on case-insensitive filesystems (macOS, Windows) two
+        // names that differ only by case would land on one file.
+        if !seen.insert(name.to_lowercase()) {
             return Err(TransferError::UnsafeName(name));
         }
-        let end = offset + file.size as usize;
-        if end > payload.len() || blake3_hex(&payload[offset..end]) != file.hash {
+        let end = usize::try_from(file.size)
+            .ok()
+            .and_then(|size| offset.checked_add(size))
+            .filter(|end| *end <= payload.len())
+            .ok_or(TransferError::Integrity)?;
+        if blake3_hex(&payload[offset..end]) != file.hash {
             return Err(TransferError::Integrity);
         }
         names.push(name);
@@ -177,6 +196,9 @@ fn validated_names(files: &[FileManifest], payload: &[u8]) -> Result<Vec<String>
 }
 
 /// Make `staged` visible as `dest_dir`, or reuse an identical commit there.
+/// The caller holds the inbox publish lock, so no other local receiver can
+/// change `dest_dir` between this inspection and the renames. Returns the
+/// stale commit that was moved aside, if any, for removal after the lock.
 fn publish(
     root: &Path,
     id: &str,
@@ -184,48 +206,39 @@ fn publish(
     dest_dir: &Path,
     names: &[String],
     files: &[FileManifest],
-) -> Result<()> {
-    for _ in 0..PUBLISH_ATTEMPTS {
-        match std::fs::symlink_metadata(dest_dir) {
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                // A rename onto a directory another receiver published in the
-                // meantime fails; inspect the destination again.
-                if std::fs::rename(staged, dest_dir).is_ok() {
-                    return Ok(());
-                }
+) -> Result<Option<OwnedDir>> {
+    match std::fs::symlink_metadata(dest_dir) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::rename(staged, dest_dir)?;
+            Ok(None)
+        }
+        Err(err) => Err(err.into()),
+        // Check the type explicitly instead of relying on rename: Windows
+        // lets a directory rename replace a file. A file or symlink here is
+        // an error so placement is never redirected or destroyed.
+        Ok(meta) if !meta.is_dir() => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "transfer destination is not a directory",
+        )
+        .into()),
+        // Another receiver already published this exact manifest, and its
+        // caller may be reading it: keep it untouched.
+        Ok(_) if holds_exactly(dest_dir, names, files) => Ok(None),
+        Ok(_) => {
+            // A stale commit of a retried transfer: move it aside whole so
+            // the published directory never mixes two manifests.
+            let retired = OwnedDir {
+                path: root.join(scratch_name(id, RETIRED_SUFFIX)),
+            };
+            std::fs::rename(dest_dir, &retired.path)?;
+            if let Err(err) = std::fs::rename(staged, dest_dir) {
+                // Put the previous commit back rather than leave none.
+                let _ = std::fs::rename(&retired.path, dest_dir);
+                return Err(err.into());
             }
-            Err(err) => return Err(err.into()),
-            // Check the type explicitly instead of relying on rename: Windows
-            // lets a directory rename replace a file. A file or symlink here
-            // is an error so placement is never redirected or destroyed.
-            Ok(meta) if !meta.is_dir() => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    "transfer destination is not a directory",
-                )
-                .into());
-            }
-            Ok(_) if holds_exactly(dest_dir, names, files) => return Ok(()),
-            Ok(_) => {
-                // A stale commit of a retried transfer: move it aside whole
-                // so the published directory never mixes two manifests.
-                let retired = OwnedDir {
-                    path: root.join(scratch_name(id, RETIRED_SUFFIX)),
-                };
-                match std::fs::rename(dest_dir, &retired.path) {
-                    Ok(()) => {
-                        if std::fs::rename(staged, dest_dir).is_ok() {
-                            return Ok(());
-                        }
-                    }
-                    // Another receiver moved it first; inspect again.
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(err) => return Err(err.into()),
-                }
-            }
+            Ok(Some(retired))
         }
     }
-    Err(std::io::Error::other("transfer destination kept changing during publication").into())
 }
 
 /// True when `dir` contains exactly the manifest's files, each a regular file
@@ -241,14 +254,24 @@ fn holds_exactly(dir: &Path, names: &[String], files: &[FileManifest]) -> bool {
         let target = dir.join(name);
         std::fs::symlink_metadata(&target)
             .is_ok_and(|meta| meta.is_file() && meta.len() == file.size)
-            && std::fs::read(&target).is_ok_and(|bytes| blake3_hex(&bytes) == file.hash)
+            && file_hash(&target).is_ok_and(|hash| hash == file.hash)
     })
+}
+
+/// Streaming BLAKE3 hex digest, so checking an existing commit never holds a
+/// second copy of a large file in memory.
+fn file_hash(path: &Path) -> std::io::Result<String> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update_reader(std::fs::File::open(path)?)?;
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 /// Remove up to `STALE_STAGING_REMOVALS_PER_COMMIT` partial or retired
 /// directories last modified more than `max_age` before `now`, left behind by
 /// a receiver process that exited mid-commit. Published transfers, files,
-/// symlinks and fresh directories are never touched.
+/// symlinks and fresh partial directories are never touched. A retired
+/// directory keeps the modification time of the commit it held, so it may be
+/// removed here while its owner removes it too; both sides only delete it.
 fn sweep_stale_staging(root: &Path, now: SystemTime, max_age: Duration) -> usize {
     let Ok(entries) = std::fs::read_dir(root) else {
         return 0;
@@ -562,6 +585,48 @@ mod tests {
         let file_root = root.path().join("file-root");
         std::fs::write(&file_root, b"file").unwrap();
         assert!(StagingArea::new(file_root).is_err());
+    }
+
+    /// How long the lock test waits to show a commit stays blocked; a
+    /// small unblocked commit publishes in milliseconds.
+    const BLOCKED_PUBLISH_WINDOW: Duration = Duration::from_millis(300);
+
+    /// Inspecting the destination and replacing it must be one step with
+    /// respect to every other local receiver: otherwise a receiver that saw
+    /// a stale commit could retire another receiver's fresh copy of the same
+    /// manifest after that receiver returned it. Publication therefore waits
+    /// for the inbox publish lock, which another process may hold.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn publication_waits_for_the_inbox_publish_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let inbox = root.path().join("inbox");
+        let staging = StagingArea::new(inbox.clone()).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(inbox.join(PUBLISH_LOCK_NAME))
+            .unwrap();
+        held.lock().unwrap();
+        let id = TransferId::new();
+        let commit = tokio::spawn({
+            let id = id.clone();
+            async move {
+                let manifest = clipsync_protocol::FileManifest {
+                    name: "report.txt".into(),
+                    size: 7,
+                    mime: None,
+                    hash: blake3_hex(b"payload"),
+                };
+                staging.commit_files(&id, &[manifest], b"payload").await
+            }
+        });
+        tokio::time::sleep(BLOCKED_PUBLISH_WINDOW).await;
+        assert!(!commit.is_finished());
+        assert!(!inbox.join(id.as_str()).exists());
+        held.unlock().unwrap();
+        let paths = commit.await.unwrap().unwrap();
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), b"payload");
     }
 
     #[test]
