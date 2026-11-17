@@ -62,6 +62,22 @@ The notice is unauthenticated, but a relay that forges it gains nothing it
 could not get by dropping the session. The peer name comes from the relay and
 is not authenticated; only the code is.
 
+**Untrusted text next to the code.** The relay chooses the peer name it
+reports and the text of its error messages. Printed raw, terminal escape
+sequences, carriage returns or backspaces in that text could overwrite the
+displayed code with matching digits, and Unicode bidirectional controls could
+reorder digits in a text view, so a user could approve a split pairing. All
+front ends show such text through one sanitizer
+(`clipsync_core::sanitize_untrusted`): C0 and C1 controls (including ESC, CR
+and backspace) and bidi or other format controls (U+061C, U+200B-U+200F,
+U+2028-U+202E, U+2060-U+206F, U+FEFF) are shown as visible `\u{..}` escapes,
+and names are cut to 64 characters, relay messages to 256. The CLI prints the
+peer name before the code, which sits alone on its own line with nothing
+untrusted printed after it; the desktop app and the mobile `SasVerifier`
+receive the sanitized name and show it apart from the code. The CLI device
+list (`clipsync devices`) applies the same sanitizer to peer names and OS
+strings.
+
 Users must actually compare the codes. Typing the code shown on the other
 device is the most reliable comparison, and the only one the CLI accepts
 without a terminal: `clipsync room confirm CODE` and a piped `room join`

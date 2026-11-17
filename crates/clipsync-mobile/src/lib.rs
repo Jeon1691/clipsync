@@ -12,7 +12,10 @@ use clipsync_clipboard::{
     hash_item, AdapterInfo, Capabilities, ClipboardBackend, ClipboardItem, ImageMime,
     SystemClipboard,
 };
-use clipsync_core::{begin_create_room, join_room, run_daemon, App, SasCheck, SasDecision};
+use clipsync_core::{
+    begin_create_room, join_room, run_daemon, sanitize_untrusted, App, SasCheck, SasDecision,
+    MAX_PEER_NAME_CHARS,
+};
 use clipsync_storage::AppPaths;
 use tokio::runtime::Runtime;
 use tracing::warn;
@@ -51,6 +54,11 @@ pub trait ClipboardBridge: Send + Sync {
 /// Show `sas` (for example grouped as `482 913`) together with
 /// `peer_device_name`, ask the user whether the other device shows the same
 /// code, block until they answer, and return `true` only if it matches.
+///
+/// `peer_device_name` is chosen by the relay and not authenticated. It
+/// arrives with control and bidi characters escaped and at most
+/// `MAX_PEER_NAME_CHARS` long; still show it in its own text element, never
+/// in the same string as `sas`.
 /// Returning `false` aborts the pairing and stores nothing.
 ///
 /// If the pairing ends first (deadline, the other device rejected, relay
@@ -93,7 +101,8 @@ fn verifier_confirmer(
             };
             // The native callback blocks on UI; keep it off the runtime workers.
             let confirmed = tokio::task::spawn_blocking(move || {
-                let confirmed = verifier.confirm_sas(check.sas, check.peer_device_name);
+                let peer = sanitize_untrusted(&check.peer_device_name, MAX_PEER_NAME_CHARS);
+                let confirmed = verifier.confirm_sas(check.sas, peer);
                 answered.store(true, std::sync::atomic::Ordering::SeqCst);
                 confirmed
             })
@@ -630,6 +639,39 @@ mod tests {
         fn sas_cancelled(&self) {
             self.cancelled.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    /// Verifier that records the name it was shown and rejects.
+    struct RecordingVerifier {
+        shown: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl SasVerifier for RecordingVerifier {
+        fn confirm_sas(&self, _sas: String, peer_device_name: String) -> bool {
+            self.shown.lock().unwrap().push(peer_device_name);
+            false
+        }
+
+        fn sas_cancelled(&self) {}
+    }
+
+    #[tokio::test]
+    async fn hostile_peer_names_reach_the_host_inert() {
+        let shown = Arc::new(Mutex::new(Vec::new()));
+        let confirm = verifier_confirmer(Box::new(RecordingVerifier {
+            shown: shown.clone(),
+        }));
+        let decision = confirm(SasCheck {
+            sas: "482913".into(),
+            peer_device_id: "peer".into(),
+            peer_device_name: "Phone\u{202e}319 284\u{2066}\u{1b}[2K\r".into(),
+        })
+        .await;
+        assert_eq!(decision, SasDecision::Rejected);
+        assert_eq!(
+            shown.lock().unwrap().as_slice(),
+            ["Phone\\u{202e}319 284\\u{2066}\\u{1b}[2K\\u{d}"]
+        );
     }
 
     #[tokio::test]

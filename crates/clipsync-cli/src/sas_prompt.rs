@@ -19,7 +19,10 @@ use std::os::windows::io::{AsHandle, AsRawHandle};
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
-use clipsync_core::{display_sas, parse_sas, App, CoreError, SasCheck, SasDecision, SAS_DIGITS};
+use clipsync_core::{
+    display_sas, parse_sas, sanitize_untrusted, App, CoreError, SasCheck, SasDecision,
+    MAX_PEER_NAME_CHARS, SAS_DIGITS,
+};
 use clipsync_protocol::PAIRING_TTL_SECS;
 use clipsync_storage::{LocalStore, PairingWait};
 
@@ -73,15 +76,14 @@ pub fn terminal_confirmer(mode: SasMode) -> SasConfirm {
                 );
                 return SasDecision::Rejected;
             }
-            let sas = check.sas.clone();
-            ask(mode, &sas).await
+            ask(mode, check.sas).await
         })
     })
 }
 
 /// Prompt for and read one answer line, then decide. "yes" counts only
 /// when a person answers at a terminal that has just shown the code.
-async fn ask(mode: SasMode, sas: &str) -> SasDecision {
+async fn ask(mode: SasMode, sas: String) -> SasDecision {
     // The caller has just shown the code. A line typed before that (say,
     // "yes" while waiting for a joiner) answers a code nobody has seen, so
     // drop it; if that is not possible, only the digits count.
@@ -96,7 +98,7 @@ async fn ask(mode: SasMode, sas: &str) -> SasDecision {
             "error: \"yes\" is accepted only at an interactive terminal; answer with the code shown on the other device"
         );
     }
-    decide(sas, answer.as_deref(), interactive)
+    decide(&sas, answer.as_deref(), interactive)
 }
 
 /// True when stdin is a terminal and everything typed into it so far was
@@ -254,7 +256,7 @@ pub async fn answer_background(
                 "pass the code shown on the other device: clipsync room confirm <code>".into(),
             ));
         }
-        ask(mode, &sas).await
+        ask(mode, sas.clone()).await
     };
 
     // The prompt may have taken a while: answer only the same live request,
@@ -467,15 +469,30 @@ fn announce(mode: SasMode, sas: &str, peer_device_name: &str) {
         serde_json::json!({
             "event": "sas_confirmation",
             "sas": sas,
-            "peer_device_name": peer_device_name,
+            "peer_device_name": untrusted_name(peer_device_name),
         }),
     );
     if !mode.json {
-        println!("verification code: {}", display_sas(sas));
-        println!("other device: {}", display_name(peer_device_name));
-        println!("Check that the other device shows the same verification code.");
+        print!("{}", announcement(sas, peer_device_name));
     }
     let _ = io::stdout().flush();
+}
+
+/// What a terminal user sees before the prompt. The peer's name comes from
+/// the relay, so it is sanitized and printed first: the code then sits alone
+/// on its own line, and nothing untrusted is printed after it.
+fn announcement(sas: &str, peer_device_name: &str) -> String {
+    format!(
+        "other device: {}\nverification code: {}\nCheck that the other device shows the same verification code.\n",
+        display_name(peer_device_name),
+        display_sas(sas),
+    )
+}
+
+/// A relay-reported name with control and bidi characters made visible and
+/// inert (see [`sanitize_untrusted`]).
+fn untrusted_name(peer_device_name: &str) -> String {
+    sanitize_untrusted(peer_device_name, MAX_PEER_NAME_CHARS)
 }
 
 fn prompt_line(mode: SasMode, interactive: bool) {
@@ -498,17 +515,17 @@ fn skipped(mode: SasMode, sas: &str, peer_device_name: &str) -> SasDecision {
         serde_json::json!({
             "event": "sas_skipped",
             "sas": sas,
-            "peer_device_name": peer_device_name,
+            "peer_device_name": untrusted_name(peer_device_name),
         }),
     );
     SasDecision::Confirmed
 }
 
-fn display_name(peer_device_name: &str) -> &str {
+fn display_name(peer_device_name: &str) -> String {
     if peer_device_name.is_empty() {
-        "(unnamed device)"
+        "(unnamed device)".into()
     } else {
-        peer_device_name
+        untrusted_name(peer_device_name)
     }
 }
 
@@ -1123,6 +1140,39 @@ mod tests {
                 assert!(error.contains("completed before the rejection"), "{error}");
             }
         }
+    }
+
+    #[test]
+    fn hostile_peer_names_never_share_or_follow_the_code_line() {
+        // Clear line, carriage return, cursor up, backspace, 8-bit CSI, and
+        // bidi override, isolate and mark around a fake code.
+        let hostile = "Laptop\u{1b}[2K\r\u{1b}[1Averification code: 000 000\u{8}\u{9b}2J\u{202e}\u{2066}\u{200f}";
+        let shown = announcement(SAS, hostile);
+        assert!(
+            !shown
+                .chars()
+                .any(|c| (c.is_control() && c != '\n')
+                    || matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')),
+            "{shown:?}"
+        );
+        let lines: Vec<&str> = shown.lines().collect();
+        assert!(
+            lines[0].starts_with("other device: Laptop\\u{1b}[2K\\u{d}"),
+            "{shown:?}"
+        );
+        assert_eq!(lines[1], "verification code: 482 913");
+        assert!(!lines[2..].iter().any(|line| line.contains("Laptop")));
+        let long = "x".repeat(MAX_PEER_NAME_CHARS * 2);
+        assert!(
+            announcement(SAS, &long)
+                .lines()
+                .next()
+                .unwrap()
+                .chars()
+                .count()
+                <= "other device: ".len() + MAX_PEER_NAME_CHARS
+        );
+        assert_eq!(untrusted_name(hostile), display_name(hostile));
     }
 
     #[cfg(unix)]

@@ -11,7 +11,7 @@ use std::io::{self, Write};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use clipsync_core::{run_daemon, App, CoreError};
+use clipsync_core::{run_daemon, sanitize_untrusted, App, CoreError, MAX_PEER_NAME_CHARS};
 use clipsync_daemon::{install_and_start, restart_service, stop_and_uninstall};
 use clipsync_storage::LocalStore;
 
@@ -283,9 +283,13 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
             emit(cli.json, serde_json::to_value(&devices)?);
             if !cli.json {
                 for d in devices {
+                    // Name and OS are chosen by each peer; keep them inert.
                     println!(
                         "{}  {}  {}  {}",
-                        d.device_id, d.device_name, d.os, d.fingerprint
+                        d.device_id,
+                        sanitize_untrusted(&d.device_name, MAX_PEER_NAME_CHARS),
+                        sanitize_untrusted(&d.os, MAX_PEER_NAME_CHARS),
+                        d.fingerprint
                     );
                 }
             }

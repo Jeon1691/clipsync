@@ -6,7 +6,7 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
-use clipsync_core::{App, SasDecision};
+use clipsync_core::{sanitize_untrusted, App, SasDecision, MAX_PEER_NAME_CHARS};
 use clipsync_daemon::connect_ipc;
 use clipsync_desktop::{
     create_room, join_room_code, local_status, open_app, window_confirmer, DeskStatus, SasPrompt,
@@ -213,10 +213,12 @@ impl DesktopApp {
             ui.add_space(16.0);
 
             if let Some(prompt) = &self.sas_prompt {
+                // The relay chose this name: keep bidi and control characters
+                // inert, and keep it out of the code's label.
                 let peer = if prompt.check.peer_device_name.is_empty() {
-                    "the other device"
+                    "the other device".to_owned()
                 } else {
-                    prompt.check.peer_device_name.as_str()
+                    sanitize_untrusted(&prompt.check.peer_device_name, MAX_PEER_NAME_CHARS)
                 };
                 let mut decision = None;
                 egui::Frame::NONE
@@ -540,18 +542,57 @@ mod tests {
     }
 
     fn sas_prompt(app: &DesktopApp) -> tokio::sync::oneshot::Receiver<SasDecision> {
+        sas_prompt_from(app, "Work laptop")
+    }
+
+    fn sas_prompt_from(
+        app: &DesktopApp,
+        peer_device_name: &str,
+    ) -> tokio::sync::oneshot::Receiver<SasDecision> {
         let (answer_tx, answer) = tokio::sync::oneshot::channel();
         let confirm = app.confirmer();
+        let peer_device_name = peer_device_name.to_owned();
         app.rt.spawn(async move {
             let decision = confirm(clipsync_core::SasCheck {
                 sas: "482913".into(),
                 peer_device_id: "peer".into(),
-                peer_device_name: "Work laptop".into(),
+                peer_device_name,
             })
             .await;
             let _ = answer_tx.send(decision);
         });
         answer
+    }
+
+    #[test]
+    fn headless_sas_prompt_shows_a_hostile_peer_name_inert() {
+        // A right-to-left override would make the code's neighbour read
+        // backwards; control characters could hide or break the text.
+        let hostile = "Work\u{202e}319 284\u{2066}\u{200f}\u{1b}[2K\r";
+        let (_root, mut app) = fixture();
+        let ui = HeadlessUi::default();
+        let _answer = sas_prompt_from(&app, hostile);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while app.sas_prompt.is_none() {
+            assert!(std::time::Instant::now() < deadline, "prompt never arrived");
+            app.drain();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let text = ui.text(&mut app);
+        assert!(text.contains("482 913"), "{text:?}");
+        assert!(
+            text.contains(
+                "Check that Work\\u{202e}319 284\\u{2066}\\u{200f}\\u{1b}[2K\\u{d} shows"
+            ),
+            "{text:?}"
+        );
+        assert!(
+            !text
+                .chars()
+                .any(|c| matches!(c, '\u{1b}' | '\r' | '\u{200f}' | '\u{202e}' | '\u{2066}')),
+            "{text:?}"
+        );
+        app.answer_sas(SasDecision::Rejected);
     }
 
     #[test]

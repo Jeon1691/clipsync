@@ -766,6 +766,10 @@ async fn wait_hello_ok_msg(conn: &mut RelayConnection) -> Result<ControlMessage,
                 match msg {
                     Some(Incoming::Control(m @ ControlMessage::HelloOk { .. })) => return Ok(m),
                     Some(Incoming::Control(ControlMessage::Error { code, message })) => {
+                        let (code, message) = (
+                            crate::pairing::relay_text(&code),
+                            crate::pairing::relay_text(&message),
+                        );
                         return Err(CoreError::Message(format!("relay {code}: {message}")));
                     }
                     Some(_) => continue,

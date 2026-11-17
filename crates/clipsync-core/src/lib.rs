@@ -8,6 +8,7 @@ mod error;
 mod loop_guard;
 mod notify;
 mod pairing;
+mod untrusted_text;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -25,6 +26,7 @@ pub use pairing::{
     begin_create_room, create_room, display_sas, join_room, leave_room, normalize_sas, parse_sas,
     PendingCreate, RoomOffer, SasCheck, SasDecision,
 };
+pub use untrusted_text::{sanitize_untrusted, MAX_PEER_NAME_CHARS, MAX_RELAY_MESSAGE_CHARS};
 
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;

@@ -19,6 +19,7 @@ use clipsync_protocol::{
 use clipsync_storage::{AppConfig, LocalStore, PeerRecord, RoomRecord};
 use clipsync_transport::{join_ws, Incoming, RelayConnection};
 
+use crate::untrusted_text::{sanitize_untrusted, MAX_PEER_NAME_CHARS, MAX_RELAY_MESSAGE_CHARS};
 use crate::{current_os, device_name, http_client, CoreError};
 
 /// Advisory error code sent to the relay when the local user rejects the SAS.
@@ -38,6 +39,12 @@ const SAS_REJECT_FLUSH: Duration = Duration::from_secs(2);
 /// as this notice.
 const SAS_ABORT_NOTICE_MAC: &str = "";
 
+/// Relay-supplied text made safe to print: it ends up in error messages on
+/// a terminal, possibly right after a verification code.
+pub(crate) fn relay_text(raw: &str) -> String {
+    sanitize_untrusted(raw, MAX_RELAY_MESSAGE_CHARS)
+}
+
 /// What the local user must compare with the other device before a pairing
 /// is committed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +55,8 @@ pub struct SasCheck {
     pub peer_device_id: DeviceId,
     /// Name the relay reported for the peer. It is not authenticated and is
     /// shown for context only; the SAS is what proves the peer's identity.
+    /// Control and bidi characters arrive escaped (see
+    /// [`crate::sanitize_untrusted`]), but show it apart from the SAS anyway.
     pub peer_device_name: String,
 }
 
@@ -188,7 +197,7 @@ pub async fn begin_create_room(
             ))
         })?;
     if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
+        let body = relay_text(&resp.text().await.unwrap_or_default());
         return Err(CoreError::Pairing(format!("create failed: {body}")));
     }
     let created: CreatePairingResponse = resp.json().await?;
@@ -284,6 +293,7 @@ where
                 "unknown or expired pairing code; on the other device run `clipsync room create` again".into(),
             ));
         }
+        let body = relay_text(&body);
         return Err(CoreError::Pairing(format!("join failed: {body}")));
     }
     let joined: JoinPairingResponse = resp.json().await?;
@@ -411,7 +421,8 @@ where
                     Incoming::Control(ControlMessage::HelloOk { .. }) => {}
                     Incoming::Control(ControlMessage::PeerJoined { device }) => {
                         peer_id = Some(device.device_id.clone());
-                        peer_name = Some(device.device_name.clone());
+                        // Shown next to the SAS: make relay escapes inert.
+                        peer_name = Some(sanitize_untrusted(&device.device_name, MAX_PEER_NAME_CHARS));
                     }
                     Incoming::Control(ControlMessage::Spake2Msg { message, .. }) => {
                         inbound_spake = Some(b64_decode(&message)?);
@@ -434,6 +445,7 @@ where
                         complete = Some(msg);
                     }
                     Incoming::Control(ControlMessage::Error { code, message }) => {
+                        let (code, message) = (relay_text(&code), relay_text(&message));
                         if our_bind_sent {
                             // The relay drops the session when the other device
                             // rejects, so our binding is refused afterwards.
@@ -747,6 +759,21 @@ mod tests {
         SasDecision::Confirmed
     }
 
+    /// Name a hostile relay reports for the joiner: it clears the line,
+    /// returns the cursor, prints a fake code and reverses the text after it.
+    const HOSTILE_PEER_NAME: &str =
+        "Pixel\u{1b}[2K\r\u{9b}1Averification code: 000 000\u{202e}\u{2066}\u{200f}";
+    /// Error text a hostile relay sends to overwrite the screen.
+    const HOSTILE_RELAY_MESSAGE: &str = "unknown pairing session\u{1b}[1A\r\u{8}\u{202d}paired";
+
+    /// True when `text` can move the cursor, overwrite or reorder what a
+    /// terminal or text view shows.
+    fn can_rewrite_display(text: &str) -> bool {
+        text.chars().any(|c| {
+            c.is_control() || matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
+    }
+
     fn secret_files(store: &LocalStore) -> Vec<std::path::PathBuf> {
         std::fs::read_dir(&store.paths.data_dir)
             .map(|entries| {
@@ -801,7 +828,7 @@ mod tests {
                     ControlMessage::PeerJoined {
                         device: clipsync_protocol::PeerInfo {
                             device_id: peer.clone(),
-                            device_name: "Pixel of the joiner".into(),
+                            device_name: HOSTILE_PEER_NAME.into(),
                             os: "android".into(),
                             role: DeviceRole::Member,
                             online: true,
@@ -925,7 +952,7 @@ mod tests {
                                 &mut socket,
                                 ControlMessage::Error {
                                     code: "pairing_failed".into(),
-                                    message: "unknown pairing session".into(),
+                                    message: HOSTILE_RELAY_MESSAGE.into(),
                                 },
                             )
                             .await;
@@ -987,7 +1014,15 @@ mod tests {
                 assert_eq!(check.sas, peer_sas.await.unwrap(), "honest peers agree");
                 assert!(check.matches(&check.display()));
                 assert_eq!(check.peer_device_id, DeviceId::from("sas-peer-remote"));
-                assert_eq!(check.peer_device_name, "Pixel of the joiner");
+                // The relay-reported name is shown next to the code, so it
+                // arrives inert: escapes visible, nothing that moves the cursor.
+                assert!(
+                    !can_rewrite_display(&check.peer_device_name),
+                    "{:?}",
+                    check.peer_device_name
+                );
+                assert!(check.peer_device_name.starts_with("Pixel"));
+                assert!(check.peer_device_name.contains("\\u{1b}"));
                 // While the user is still comparing, nothing is bound or stored.
                 assert!(
                     tokio::time::timeout(Duration::from_millis(200), &mut frame)
@@ -1130,6 +1165,8 @@ mod tests {
             .expect("a confirmed device must not wait out the deadline after a peer rejection")
             .unwrap_err();
             assert!(error.to_string().contains(expected), "{error}");
+            // Relay error text ends up on the terminal; it must stay inert.
+            assert!(!can_rewrite_display(&error.to_string()), "{error:?}");
             assert!(matches!(
                 frame.await.unwrap().as_slice(),
                 [ControlMessage::DeviceBind { .. }]
