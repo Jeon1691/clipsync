@@ -84,6 +84,13 @@ impl StagingArea {
 /// already holds in memory (at most `TRANSFER_MAX_BYTES`), which takes
 /// seconds. Sixty transfer idle periods (one hour) leave a wide margin for
 /// slow disks, so the sweep never removes a running receiver's partial.
+///
+/// Age is the partial's mtime against the wall clock, so a forward clock
+/// jump of more than this (an NTP correction on a device whose clock was
+/// wrong) can remove a live partial. That receiver's commit then fails with
+/// an I/O error and nothing is published or corrupted. Also requiring the
+/// owner's process (named in the partial) to be dead was rejected: process
+/// ids are reused, and a reused id would keep a leftover forever.
 const STALE_STAGING_IDLE_MULTIPLE: u64 = 60;
 const STALE_STAGING_AGE: Duration =
     Duration::from_secs(clipsync_protocol::TRANSFER_IDLE_SECS * STALE_STAGING_IDLE_MULTIPLE);
@@ -149,9 +156,11 @@ fn commit_blocking(
     let names = validated_names(files, payload)?;
     // Reclaim abandoned staging before writing anything new, so leftovers
     // that filled the disk cannot make every later commit fail before its
-    // cleanup runs. Best effort: if even the lock cannot be taken, staging
-    // below reports the real error. The lock is released while staging.
-    if let Ok(_lock) = publish_lock(root) {
+    // cleanup runs. A lock that cannot be taken fails the commit: every
+    // publication needs it, and nothing here runs unlocked. The lock is
+    // released while staging.
+    {
+        let _lock = publish_lock(root)?;
         sweep_stale_staging(root, SystemTime::now(), STALE_STAGING_AGE);
     }
     let dest_dir = root.join(id);
@@ -165,13 +174,21 @@ fn commit_blocking(
     let mut offset = 0usize;
     for (name, file) in names.iter().zip(files) {
         let end = offset + file.size as usize;
-        let target = staged.path.join(name);
-        std::fs::write(&target, &payload[offset..end])?;
-        restrict(&target, PRIVATE_FILE_MODE);
+        write_new_file(&staged.path.join(name), &payload[offset..end]).map_err(|err| {
+            // The directory is fresh and this commit's names are distinct
+            // strings, so an existing entry means the filesystem treats this
+            // name as one written before (Unicode normalization on APFS and
+            // HFS+, or case folding beyond `to_lowercase`).
+            if err.kind() == std::io::ErrorKind::AlreadyExists {
+                TransferError::UnsafeName(name.clone())
+            } else {
+                err.into()
+            }
+        })?;
         offset = end;
     }
     let retired = {
-        // Released when `_lock` is closed at the end of this block, before
+        // Released when `_lock` is dropped at the end of this block, before
         // the retired directory is removed outside the critical section.
         let _lock = publish_lock(root)?;
         publish(root, id, &staged.path, &dest_dir, &names, files)?
@@ -180,20 +197,110 @@ fn commit_blocking(
     Ok(names.into_iter().map(|name| dest_dir.join(name)).collect())
 }
 
-/// Open and exclusively lock the inbox publish lock; closing the returned
-/// file releases it. Every inspection or rename of a published transfer or
-/// retired directory happens while holding it, so the sweep never sees a
-/// live publisher between its two renames.
-fn publish_lock(root: &Path) -> std::io::Result<std::fs::File> {
+/// Create `path`, which must not exist yet, owner-only, holding `contents`.
+/// `create_new` fails with `AlreadyExists` when the filesystem resolves the
+/// name to an entry this commit already wrote, instead of overwriting it.
+fn write_new_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(PRIVATE_FILE_MODE);
+    }
+    options.open(path)?.write_all(contents)
+}
+
+/// Exclusive lock on the inbox publish lock file, released on drop. Every
+/// inspection or rename of a published transfer or retired directory happens
+/// while holding it, so the sweep never sees a live publisher between its two
+/// renames.
+///
+/// It is `flock` on Unix (Android included) and `LockFileEx` on Windows: it
+/// excludes other processes and other handles in this process alike, and the
+/// OS releases it if the process dies. Failing to take it is an error; there
+/// is no in-process-only fallback.
+struct PublishLock(std::fs::File);
+
+impl Drop for PublishLock {
+    fn drop(&mut self) {
+        // Closing the handle releases the lock too, but Windows may do that
+        // lazily; unlock explicitly so the next receiver is not delayed.
+        let _ = unlock(&self.0);
+    }
+}
+
+fn publish_lock(root: &Path) -> std::io::Result<PublishLock> {
     let path = root.join(PUBLISH_LOCK_NAME);
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)?;
-    restrict(&path, PRIVATE_FILE_MODE);
-    lock.lock()?;
-    Ok(lock)
+    let mut options = std::fs::OpenOptions::new();
+    // Never truncate: the file has no content, only a lock.
+    options.create(true).truncate(false).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // A planted `.publish.lock` symlink fails the open instead of being
+        // followed, so the lock (and the chmod below) never act on its target.
+        options
+            .mode(PRIVATE_FILE_MODE)
+            .custom_flags(O_NOFOLLOW_FLAG);
+    }
+    let file = options.open(&path)?;
+    // Also tighten a lock file left by an older version. Through the handle,
+    // never by path, so the chmod cannot be redirected.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(PRIVATE_FILE_MODE));
+    }
+    lock_exclusive(&file)?;
+    Ok(PublishLock(file))
+}
+
+/// `O_NOFOLLOW` as an `open(2)` flag for `OpenOptionsExt::custom_flags`.
+#[cfg(unix)]
+const O_NOFOLLOW_FLAG: i32 = rustix::fs::OFlags::NOFOLLOW.bits() as i32;
+
+/// Block until `file` holds an exclusive `flock`.
+///
+/// Not `File::lock`: before Rust 1.98 std returns `Unsupported` for it on
+/// Android, and the workspace MSRV is lower. std uses the same `flock` call on
+/// the other Unix targets, so the semantics are unchanged.
+#[cfg(unix)]
+fn lock_exclusive(file: &std::fs::File) -> std::io::Result<()> {
+    use rustix::fs::{flock, FlockOperation};
+    loop {
+        match flock(file, FlockOperation::LockExclusive) {
+            // A signal interrupted the wait; the lock is not held yet.
+            Err(rustix::io::Errno::INTR) => {}
+            result => return result.map_err(std::io::Error::from),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn unlock(file: &std::fs::File) -> std::io::Result<()> {
+    rustix::fs::flock(file, rustix::fs::FlockOperation::Unlock).map_err(std::io::Error::from)
+}
+
+/// `LockFileEx` on Windows. Any other target gets std's `Unsupported` error,
+/// which fails the commit instead of publishing unlocked.
+#[cfg(not(unix))]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Not Unix, so not Android; std's lock is LockFileEx on Windows."
+)]
+fn lock_exclusive(file: &std::fs::File) -> std::io::Result<()> {
+    file.lock()
+}
+
+#[cfg(not(unix))]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Not Unix, so not Android; std's unlock is UnlockFile on Windows."
+)]
+fn unlock(file: &std::fs::File) -> std::io::Result<()> {
+    file.unlock()
 }
 
 /// Check every name and hash before anything touches the filesystem.
@@ -204,7 +311,10 @@ fn validated_names(files: &[FileManifest], payload: &[u8]) -> Result<Vec<String>
     for file in files {
         let name = safe_filename(&file.name)?;
         // Case-folded: on case-insensitive filesystems (macOS, Windows) two
-        // names that differ only by case would land on one file.
+        // names that differ only by case would land on one file. Rejected on
+        // every platform so a transfer behaves the same wherever it lands.
+        // Other spellings a filesystem treats as one name (Unicode
+        // normalization on APFS) are caught when staging writes them.
         if !seen.insert(name.to_lowercase()) {
             return Err(TransferError::UnsafeName(name));
         }
@@ -367,6 +477,7 @@ fn sweep_stale_staging(root: &Path, now: SystemTime, max_age: Duration) -> usize
 
 /// Owner-only permissions for staged directories and files on Unix.
 const PRIVATE_DIR_MODE: u32 = 0o700;
+#[cfg(unix)]
 const PRIVATE_FILE_MODE: u32 = 0o600;
 
 fn restrict(path: &Path, mode: u32) {
@@ -662,13 +773,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let inbox = root.path().join("inbox");
         let staging = StagingArea::new(inbox.clone()).unwrap();
-        let held = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(inbox.join(PUBLISH_LOCK_NAME))
-            .unwrap();
-        held.lock().unwrap();
+        let held = publish_lock(&inbox).unwrap();
         let id = TransferId::new();
         let commit = tokio::spawn({
             let id = id.clone();
@@ -685,7 +790,7 @@ mod tests {
         tokio::time::sleep(BLOCKED_PUBLISH_WINDOW).await;
         assert!(!commit.is_finished());
         assert!(!inbox.join(id.as_str()).exists());
-        held.unlock().unwrap();
+        drop(held);
         let paths = commit.await.unwrap().unwrap();
         assert_eq!(std::fs::read(&paths[0]).unwrap(), b"payload");
     }
@@ -789,6 +894,71 @@ mod tests {
         );
         assert!(!orphan.exists());
     }
+
+    /// The publish lock must exclude a second handle on the same file, as a
+    /// second receiver process would open, until the first is released. It
+    /// is taken with `flock`/`LockFileEx`, never std's `File::lock`, which
+    /// returns `Unsupported` on Android at the workspace MSRV.
+    #[test]
+    fn publish_lock_excludes_a_second_handle_until_released() {
+        let root = tempfile::tempdir().unwrap();
+        let held = publish_lock(root.path()).unwrap();
+        let (locked, waiter_locked) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn({
+            let root = root.path().to_owned();
+            move || {
+                let second = publish_lock(&root)?;
+                let _ = locked.send(());
+                drop(second);
+                std::io::Result::Ok(())
+            }
+        });
+        assert!(
+            waiter_locked.recv_timeout(BLOCKED_PUBLISH_WINDOW).is_err(),
+            "a second handle took the lock while it was held"
+        );
+        drop(held);
+        waiter_locked.recv().unwrap();
+        waiter.join().unwrap().unwrap();
+    }
+
+    /// A `.publish.lock` symlink planted in the inbox is neither followed nor
+    /// has its target chmodded, and a commit then fails instead of running
+    /// unlocked.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_publish_lock_is_not_followed_and_fails_the_commit() {
+        use std::os::unix::fs::PermissionsExt;
+        /// A mode the lock code would never set, to detect a chmod.
+        const FOREIGN_MODE: u32 = 0o644;
+        let root = tempfile::tempdir().unwrap();
+        let inbox = root.path().join("inbox");
+        let staging = StagingArea::new(inbox.clone()).unwrap();
+        let target = root.path().join("target");
+        std::fs::write(&target, b"foreign").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(FOREIGN_MODE)).unwrap();
+        std::os::unix::fs::symlink(&target, inbox.join(PUBLISH_LOCK_NAME)).unwrap();
+        assert!(publish_lock(&inbox).is_err());
+        let manifest = clipsync_protocol::FileManifest {
+            name: "report.txt".into(),
+            size: 7,
+            mime: None,
+            hash: blake3_hex(b"payload"),
+        };
+        let id = TransferId::new();
+        assert!(staging
+            .commit_files(&id, &[manifest], b"payload")
+            .await
+            .is_err());
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & PERMISSION_BITS, FOREIGN_MODE);
+        assert_eq!(std::fs::read(&target).unwrap(), b"foreign");
+        assert!(!inbox.join(id.as_str()).exists());
+    }
+
+    /// Mask of the permission bits in `st_mode`, without the file type.
+    #[cfg(unix)]
+    const PERMISSION_BITS: u32 = 0o777;
 
     #[test]
     fn owned_staging_directory_is_removed_with_its_contents_when_dropped() {

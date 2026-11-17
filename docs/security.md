@@ -97,7 +97,12 @@ macOS Keychain / Windows Credential Manager when available. Linux currently
 uses private files; a Secret Service backend is not enabled. Secret files have
 mode `0600` on Unix. Unix data/inbox directories use `0700`; Windows relies on
 the user's profile-directory access controls rather than POSIX modes.
-Received filenames are sanitized to basenames.
+Received filenames are sanitized to basenames. A file transfer whose names
+differ only by letter case is rejected whole on every platform, because
+case-insensitive filesystems (macOS, Windows) would store them as one file.
+Names the receiving filesystem otherwise resolves to one entry, such as
+Unicode normalization variants on APFS, are rejected when staging writes the
+second one; filesystems that keep them apart (ext4, NTFS) accept both.
 
 Device tokens are stored separately as `device-token-<hex-room-id>.secret`;
 webhook credentials use `webhook.secret`. These credentials use canonical private files without OS-keychain fallback; missing or empty files are errors. New `state.json` and `config.toml`

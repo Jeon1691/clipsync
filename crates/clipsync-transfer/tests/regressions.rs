@@ -523,6 +523,43 @@ async fn regression_names_differing_only_by_case_are_rejected() {
     assert!(!inbox.0.join(id.as_str()).exists());
 }
 
+/// APFS and HFS+ ignore Unicode normalization, so a precomposed and a
+/// decomposed spelling of one name are one directory entry there. Accepting
+/// both would leave one path holding the other file's bytes, and the
+/// published directory would never match its manifest, so a concurrent
+/// receiver of the same transfer would retire it as a stale commit. Where the
+/// filesystem keeps the names apart (ext4, NTFS) both files are distinct and
+/// the commit may succeed, but every returned path must hold its own bytes.
+#[tokio::test]
+async fn regression_names_one_filesystem_entry_would_share_are_rejected() {
+    const COMPOSED: &str = "caf\u{e9}.txt";
+    const DECOMPOSED: &str = "cafe\u{301}.txt";
+    let inbox = Inbox::new();
+    let id = TransferId::new();
+    let result = inbox
+        .staging()
+        .commit_files(
+            &id,
+            &[file(COMPOSED, b"composed"), file(DECOMPOSED, b"decomposed")],
+            b"composeddecomposed",
+        )
+        .await;
+    match result {
+        Err(TransferError::UnsafeName(name)) => {
+            assert_eq!(name, DECOMPOSED);
+            assert!(!inbox.0.join(id.as_str()).exists());
+            assert!(partial_entries(&inbox).is_empty());
+        }
+        Ok(paths) => {
+            let published = inbox.0.join(id.as_str());
+            assert_eq!(std::fs::read_dir(&published).unwrap().count(), 2);
+            assert_eq!(std::fs::read(&paths[0]).unwrap(), b"composed");
+            assert_eq!(std::fs::read(&paths[1]).unwrap(), b"decomposed");
+        }
+        Err(other) => panic!("unexpected error: {other}"),
+    }
+}
+
 /// Sender-chosen sizes whose sum wraps must be rejected, not panic.
 #[tokio::test]
 async fn regression_overflowing_file_sizes_are_rejected_without_panicking() {
