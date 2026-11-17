@@ -105,10 +105,11 @@ pub(crate) const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 /// it. Clients themselves reconnect after two heartbeats plus 5 s, so three
 /// tolerates a late beat and never closes a socket its client still trusts.
 const READ_IDLE_HEARTBEATS: u64 = 3;
-/// Longest silence accepted on a room member's WebSocket before the relay
-/// closes it and drops its route. A half-open socket (laptop sleep, network
-/// change) never delivers a FIN; without this it would keep its member online
-/// and swallow the text that should have been queued for it.
+/// Longest silence accepted on a WebSocket past its `hello` before the relay
+/// closes it; a room member's socket also loses its route. A half-open socket
+/// (laptop sleep, network change) never delivers a FIN; without this it would
+/// keep its member online and swallow the text that should have been queued
+/// for it.
 pub(crate) const READ_IDLE_TIMEOUT: Duration =
     Duration::from_secs(READ_IDLE_HEARTBEATS * HEARTBEAT_SECS);
 
@@ -117,7 +118,9 @@ pub(crate) const READ_IDLE_TIMEOUT: Duration =
 pub(crate) struct SocketDeadlines {
     /// For `hello` on an unauthenticated socket, from the upgrade.
     pub(crate) hello: Duration,
-    /// For any message on an authenticated socket, from the last one.
+    /// For any message on a socket past its `hello`, room member or pairing,
+    /// from the last one. A pairing socket also closes when its session
+    /// expires, if that comes first.
     pub(crate) read_idle: Duration,
 }
 

@@ -1634,6 +1634,14 @@ async fn idle_sockets_are_closed_and_free_their_connection_slots() {
 /// A state whose unauthenticated sockets must send `hello` within `hello`.
 fn state_with_hello_deadline(hello: Duration) -> Arc<RelayState> {
     use crate::resource_limits::SocketDeadlines;
+    state_with_deadlines(SocketDeadlines {
+        hello,
+        ..SocketDeadlines::default()
+    })
+}
+
+/// A state whose sockets close at `deadlines`.
+fn state_with_deadlines(deadlines: crate::resource_limits::SocketDeadlines) -> Arc<RelayState> {
     let mut relay = RelayState::new(RelayConfig {
         bind: "127.0.0.1:0".parse().unwrap(),
         public_url: "http://127.0.0.1".into(),
@@ -1642,10 +1650,7 @@ fn state_with_hello_deadline(hello: Duration) -> Arc<RelayState> {
         webhook_secret: None,
         metrics_token: None,
     });
-    relay.socket_deadlines = SocketDeadlines {
-        hello,
-        ..SocketDeadlines::default()
-    };
+    relay.socket_deadlines = deadlines;
     Arc::new(relay)
 }
 
@@ -1982,6 +1987,197 @@ async fn regression_a_closing_pairing_socket_never_waits_on_a_stalled_peer() {
     assert!(
         unread.try_recv().is_err(),
         "a pairing socket announced its leave"
+    );
+}
+
+/// A queue of capacity one that is already full and never drained: the
+/// outbound queue of a client that stopped reading. Keep the receiver alive,
+/// or sends fail at once instead of waiting.
+fn stalled_queue() -> (mpsc::Sender<WsOut>, mpsc::Receiver<WsOut>) {
+    let (tx, rx) = mpsc::channel(1);
+    tx.try_send(WsOut::Text("unread".into()))
+        .expect("fill the stalled queue");
+    (tx, rx)
+}
+
+/// Wire frames of `messages`, as a client sends them.
+fn frames(messages: &[ControlMessage]) -> Vec<Result<Message, axum::Error>> {
+    messages
+        .iter()
+        .map(|msg| Ok(Message::Text(msg.encode().unwrap().into())))
+        .collect()
+}
+
+/// Regression for a member `hello` waiting on a peer's full queue: the
+/// `peer_joined` notice to a peer that stopped reading is dropped instead of
+/// awaited. Awaited, it would run past the hello deadline, which cancels the
+/// handler after the member route was registered but before the socket's
+/// context was set, leaking a route that keeps the member online and its room
+/// unevictable.
+#[tokio::test(start_paused = true)]
+async fn regression_a_member_hello_never_waits_on_a_peer_with_a_full_queue() {
+    use crate::resource_limits::HELLO_TIMEOUT;
+    let state = state_with_hello_deadline(HELLO_TIMEOUT);
+    let (rid, owner, member, owner_token, _) = room(&state);
+    let (stalled, mut unread) = stalled_queue();
+    state
+        .register_conn(rid.as_str(), member.as_str(), stalled)
+        .unwrap();
+    let slot = state.acquire_connection(TEST_CLIENT).unwrap();
+    let (tx, mut rx) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
+    // The stream ends right after `hello`, so the loop returns once the
+    // handler does.
+    let mut stream = futures_util::stream::iter(frames(&[hello(&owner, &rid, &owner_token)]));
+    let started = tokio::time::Instant::now();
+    let ctx = read_loop(&mut stream, &state, &tx, None, TEST_CLIENT, &slot).await;
+    assert!(
+        started.elapsed() < HELLO_TIMEOUT,
+        "the member hello waited for its hello deadline"
+    );
+    let ctx = ctx.expect("the member hello was cancelled before its context was set");
+    assert!(ctx.is_member());
+    let member_conn = ctx.member_conn.as_ref().unwrap();
+    assert!(state.owns_route(rid.as_str(), owner.as_str(), member_conn.id));
+    assert!(matches!(
+        receive(&mut rx).await,
+        ControlMessage::HelloOk { .. }
+    ));
+    // The stalled peer misses the notice; its queue holds only its own frame.
+    assert!(matches!(unread.try_recv(), Ok(WsOut::Text(text)) if text == "unread"));
+    assert!(unread.try_recv().is_err());
+}
+
+/// A pairing creator's socket whose peer pairing socket stopped reading.
+/// Returns the session, the creator's frames (its `hello`, then a SPAKE
+/// message whose forward waits on the peer's full queue) and the peer's
+/// receiver, which must stay alive.
+fn pairing_with_stalled_peer(
+    state: &RelayState,
+) -> (
+    PairingSessionId,
+    Vec<Result<Message, axum::Error>>,
+    mpsc::Receiver<WsOut>,
+) {
+    let (sid, greeting) = pairing_hello(state);
+    let (stalled, unread) = stalled_queue();
+    state.pairing_mut(sid.as_str()).unwrap().pairing_senders[1] = Some(stalled);
+    let spake = ControlMessage::Spake2Msg {
+        pairing_session_id: sid.clone(),
+        message: "opaque".into(),
+    };
+    (sid, frames(&[greeting, spake]), unread)
+}
+
+/// A pairing socket whose forward waits on its peer's full queue still
+/// closes at its deadline: the handler runs under it, so a peer that stopped
+/// reading cannot hold the socket's connection slot past its session.
+#[tokio::test(start_paused = true)]
+async fn a_pairing_socket_stalled_on_its_peer_closes_at_its_deadline() {
+    /// The pairing session's remaining lifetime: well inside the read-idle
+    /// limit, so the session's expiry is the socket's deadline.
+    const PAIRING_LEFT: Duration = Duration::from_secs(2);
+    /// Far beyond the deadline: the loop must end at the deadline, not here.
+    const HANG: Duration = Duration::from_secs(30);
+    let state = state();
+    let (sid, requests, _unread) = pairing_with_stalled_peer(&state);
+    state.pairing_mut(sid.as_str()).unwrap().expires_at =
+        chrono::Utc::now() + chrono::Duration::from_std(PAIRING_LEFT).unwrap();
+    let slot = state.acquire_connection(TEST_CLIENT).unwrap();
+    let (tx, _rx) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
+    let mut stream = futures_util::stream::iter(requests).chain(futures_util::stream::pending());
+    let ctx = tokio::time::timeout(
+        HANG,
+        read_loop(&mut stream, &state, &tx, None, TEST_CLIENT, &slot),
+    )
+    .await
+    .expect("a pairing forward stalled past the socket's deadline");
+    assert!(ctx.is_some_and(|c| c.pairing_side == Some(0) && !c.is_member()));
+}
+
+/// A pairing socket whose forward waits on its peer's full queue still
+/// closes at once when it is evicted to admit a newer socket.
+#[tokio::test(start_paused = true)]
+async fn a_pairing_socket_stalled_on_its_peer_closes_when_evicted() {
+    use crate::connection_limits::ConnectionLimits;
+    use crate::resource_limits::READ_IDLE_TIMEOUT;
+    /// Well before the socket's own deadline, the read-idle limit (its
+    /// pairing session lasts longer): only the eviction can end the loop.
+    const HANG: Duration = Duration::from_secs(5);
+    const _: () = assert!(HANG.as_secs() < READ_IDLE_TIMEOUT.as_secs());
+    /// Lets the reader run until it waits on the stalled peer: paused time
+    /// advances only once every task is idle.
+    const SETTLE: Duration = Duration::from_millis(1);
+    let limits = ConnectionLimits {
+        max_total: 2,
+        max_unauthenticated: 1,
+        max_per_client: 2,
+        max_per_site: 2,
+        max_eviction_overshoot: 0,
+    };
+    let state = state();
+    let (sid, requests, _unread) = pairing_with_stalled_peer(&state);
+    let slot = state
+        .connection_counts
+        .acquire(TEST_CLIENT, limits)
+        .unwrap();
+    let (tx, mut rx) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
+    let reader = {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut stream =
+                futures_util::stream::iter(requests).chain(futures_util::stream::pending());
+            read_loop(&mut stream, &state, &tx, None, TEST_CLIENT, &slot)
+                .await
+                .is_some_and(|c| c.pairing_side == Some(0))
+        })
+    };
+    tokio::time::sleep(SETTLE).await;
+    assert!(state.pairing(sid.as_str()).unwrap().pairing_senders[0].is_some());
+    assert!(matches!(
+        receive(&mut rx).await,
+        ControlMessage::HelloOk { .. }
+    ));
+    let _newer = state
+        .connection_counts
+        .acquire(TEST_CLIENT, limits)
+        .unwrap();
+    let paired = tokio::time::timeout(HANG, reader)
+        .await
+        .expect("an evicted pairing socket stayed stalled on its peer")
+        .unwrap();
+    assert!(paired);
+}
+
+/// A pairing socket is closed after `read_idle` of silence, even while its
+/// pairing session lasts longer: a silent pairing socket holds its slot no
+/// longer than a silent member socket.
+#[tokio::test(start_paused = true)]
+async fn a_silent_pairing_socket_is_closed_after_the_read_idle_limit() {
+    use crate::resource_limits::{SocketDeadlines, HELLO_TIMEOUT};
+    const READ_IDLE: Duration = Duration::from_secs(2);
+    /// The pairing session's remaining lifetime: far beyond `READ_IDLE`.
+    const PAIRING_LEFT: Duration = Duration::from_secs(30);
+    /// Paused timers fire at millisecond granularity, so the close lands
+    /// just after `READ_IDLE`; this is far below the gap to `PAIRING_LEFT`.
+    const TIMER_SLACK: Duration = Duration::from_secs(1);
+    let state = state_with_deadlines(SocketDeadlines {
+        hello: HELLO_TIMEOUT,
+        read_idle: READ_IDLE,
+    });
+    let (sid, greeting) = pairing_hello(&state);
+    state.pairing_mut(sid.as_str()).unwrap().expires_at =
+        chrono::Utc::now() + chrono::Duration::from_std(PAIRING_LEFT).unwrap();
+    let slot = state.acquire_connection(TEST_CLIENT).unwrap();
+    let (tx, _rx) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
+    let mut stream =
+        futures_util::stream::iter(frames(&[greeting])).chain(futures_util::stream::pending());
+    let started = tokio::time::Instant::now();
+    let ctx = read_loop(&mut stream, &state, &tx, None, TEST_CLIENT, &slot).await;
+    assert!(ctx.is_some_and(|c| c.pairing_side == Some(0)));
+    let silent = started.elapsed();
+    assert!(
+        silent >= READ_IDLE && silent < READ_IDLE + TIMER_SLACK,
+        "closed after {silent:?}, not at the read-idle limit"
     );
 }
 

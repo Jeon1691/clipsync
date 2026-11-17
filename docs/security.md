@@ -369,11 +369,13 @@ takes to close, so sockets closing after an eviction at the cap may exceed it
 by 5% (at least one). Every socket holds its own slot, so each of a member's
 up to four routed sockets counts against these caps. A closing pairing socket
 sends its room no leave notice, so it never waits for a peer that stopped
-reading. A pairing-token socket is also closed when its pairing session
-expires. A socket that has not sent a valid `hello` within 10 seconds of the
-upgrade is closed, even while it keeps sending other messages or stops reading
-the relay's replies; no message extends that deadline. A room member's socket
-is closed after 60 seconds of silence, as above. The caps still count
+reading. A pairing-token socket is closed after 60 seconds of silence or when
+its pairing session expires, whichever comes first, even while a peer that
+stopped reading holds up a frame it forwards. A socket that has not sent a
+valid `hello` within 10 seconds of the upgrade is closed, even while it keeps
+sending other messages or stops reading the relay's replies; no message
+extends that deadline. A room member's socket is closed after 60 seconds of
+silence, as above. The caps still count
 sockets during those deadlines, so a client that keeps reopening idle sockets can deny
 connections to others sharing its address. Clients with enough addresses can
 hold the authenticated share by authenticating into rooms of their own. The

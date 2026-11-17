@@ -219,9 +219,10 @@ every device in a room has been revoked, or until its device tokens expire,
 one year after pairing, with none of its devices connected.
 
 A WebSocket that sends no valid `hello` within 10 seconds of the upgrade, or
-that goes silent for 60 seconds after authenticating, is closed and frees its
-connection slot. Offline text is queued for at most 256 recipients at once, at
-most 16 of them from one client address, each envelope for at most 60 seconds.
+that goes silent for 60 seconds after its `hello` (a room member or a pairing
+socket), is closed and frees its connection slot. Offline text is queued for
+at most 256 recipients at once, at most 16 of them from one client address,
+each envelope for at most 60 seconds.
 `/metrics` (when enabled; see [Metrics](#metrics)) reports
 `clipsync_ws_sockets`, `clipsync_ws_refused`,
 `clipsync_pairing_sessions`, `clipsync_pairing_create_throttled`,
