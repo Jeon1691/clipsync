@@ -169,7 +169,26 @@ pub struct PairingSession {
     pub completed: bool,
     // Only authenticated sockets for this session may exchange pairing frames.
     pub(crate) pairing_senders: [Option<mpsc::Sender<WsOut>>; 2],
-    pub(crate) pending_spake: [Option<String>; 2],
+    pub(crate) pending_spake: [Option<PendingSpake>; 2],
+    // The joiner's commitment, held like its SPAKE message until the creator
+    // is connected. Only side 1 (the joiner) ever fills its slot.
+    pub(crate) pending_commit: [Option<String>; 2],
+}
+
+/// A SPAKE message retained until the peer's authenticated socket arrives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingSpake {
+    pub(crate) message: String,
+    pub(crate) after_commitment: bool,
+}
+
+impl PairingSession {
+    /// Drop every retained pairing frame (expiry, completion, a replaced or
+    /// closed pairing socket).
+    pub(crate) fn clear_pending(&mut self) {
+        self.pending_spake = [None, None];
+        self.pending_commit = [None, None];
+    }
 }
 
 pub struct Room {
@@ -405,6 +424,7 @@ impl RelayState {
             completed: false,
             pairing_senders: [None, None],
             pending_spake: [None, None],
+            pending_commit: [None, None],
         };
         self.pairing_by_code.insert(code.clone(), session);
         self.pairing_by_id
@@ -635,7 +655,7 @@ impl RelayState {
             return None;
         }
         if session.expires_at < Utc::now() {
-            session.pending_spake = [None, None];
+            session.clear_pending();
             return None;
         }
         if session.completed {
@@ -646,7 +666,7 @@ impl RelayState {
             return None;
         }
         session.completed = true;
-        session.pending_spake = [None, None];
+        session.clear_pending();
         let joiner = session.joiner.clone()?;
         let creator = session.creator.clone();
         let room_id = session.room_id.clone();

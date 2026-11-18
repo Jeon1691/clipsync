@@ -126,6 +126,7 @@ mod tests {
             sas: "482913".into(),
             peer_device_id: "peer".into(),
             peer_device_name: "Laptop".into(),
+            protection: clipsync_core::SasProtection::Committed,
         };
         for answer in [
             Some(SasDecision::Confirmed),

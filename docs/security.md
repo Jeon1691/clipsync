@@ -7,7 +7,8 @@ To disclose a vulnerability privately, follow the [security policy](../SECURITY.
 - Honest-but-curious relay operator
 - Pairing-code guessing
 - A relay that runs one SPAKE2 session with each device during pairing, within
-  the limit described under [Verification code](#verification-code-sas)
+  the limits described under [Verification code](#verification-code-sas) and
+  [Commitment round](#commitment-round)
 - Replay, truncation, and chunk reordering
 - Path traversal on received files
 - Oversized payloads and connection floods
@@ -84,10 +85,13 @@ string from its own SPAKE2 result:
 
 ```
 HKDF-SHA-256(ikm = SPAKE2 secret, salt = transcript hash,
-             info = "clipsync/v1/sas")[0..8] as u64be mod 10^6
+             info = "clipsync/v1/sas-committed" after the commitment round,
+                    "clipsync/v1/sas" without it)[0..8] as u64be mod 10^6
 ```
 
-Both devices show the code and the other device's relay-reported name. The
+Both devices show the code, the other device's relay-reported name, and
+whether the [commitment round](#commitment-round) ran (`protection: full` or
+`protection: REDUCED`). The
 user confirms only if the two screens show the same code. Two devices show the
 same code only when they ran SPAKE2 with each other:
 
@@ -189,34 +193,110 @@ Users must actually compare the codes. Typing the code shown on the other
 device is the most reliable comparison, and the only one the CLI accepts
 without a terminal: `clipsync room confirm CODE` and a piped `room join`
 answer must be the other device's digits, which are checked against the local
-code. Answering "yes" is accepted only at an interactive prompt that has just
-displayed the local code, and relies on the user having looked. Before that
-prompt the CLI discards everything already typed at the terminal, so a "yes"
-typed while `room confirm` or `room join` was still waiting cannot approve a
-code that appears later. If the terminal's pending input cannot be discarded
-(for example an MSYS terminal on Windows, whose stdin is a pipe rather than a
-console), only the other device's digits are accepted.
+code. Every one of these paths prints this device's protection line (fixed
+local text, apart from the peer's name) before the answer counts; `room
+confirm CODE`, which shows no code, prints it once `CODE` has been read. Under
+`protection: REDUCED` a match is trustworthy only on a relay the user trusts,
+so an answer that no person gave right after seeing the REDUCED line (`room
+confirm CODE`, a prompt answer read from a pipe or file, or a prompt whose
+output is redirected or in `--json`) is refused before comparing unless the
+command was given `--accept-reduced-protection`. Otherwise a relay that
+downgraded the creator could have a scripted confirmation approve a code it
+searched for without the warning reaching anyone. With
+`pairing.require_commitment` set, the pairing is refused before any code is
+shown, and the flag does not change that. Answering "yes" is accepted only at
+an interactive prompt that has just displayed the local code, and relies on
+the user having looked. Before that prompt the CLI discards everything already
+typed at the terminal, so a "yes" typed while `room confirm` or `room join`
+was still waiting cannot approve a code that appears later. If the terminal's
+pending input cannot be discarded (for example an MSYS terminal on Windows,
+whose stdin is a pipe rather than a console), only the other device's digits
+are accepted.
 
-**Limit: offline search by a relay.** There is no commitment step: a device
-sends its SPAKE2 message before it sees the peer's. A relay in the middle sees
-both honest messages before it picks its own message toward each device. It can
-therefore search offline for a pair of its own messages that make the two
-devices derive the same 6-digit code. This is a birthday search of roughly
-2^10 cheap trials per side, so a relay that is built to do this can defeat the
-comparison. The code fully stops a guessed-code joiner and any relay that does
-not run this search, and it makes an attack an explicit, targeted change to
-the relay. Closing the gap needs a commitment to the SPAKE2 messages, which is
-a protocol change; relay SAS grinding is addressed in a follow-up PR. Until
-that ships, pair through a relay you trust.
+#### Commitment round
 
-**Older peers.** The code is computed locally, so the wire format is unchanged
-and an updated device still pairs with an older one. The older device shows no
-code, so the comparison cannot be made. Treat such a pairing as unverified, or
-update both devices first. An older device writes its room key to local
-storage right after key confirmation, before the comparison. If the updated
-device rejects, the older one stores no room record or device token, but
-keeps that room-key secret. No room refers to it, so it is never used; removing
-it would need a change on the older device.
+The relay knows the pairing code, so it can run one SPAKE2 session with each
+device. If a device sent its SPAKE2 message before anything bound the other
+side, a relay in the middle would see both honest messages before it picked
+its own message toward each device. It could then search offline for a pair
+of messages that make the two devices derive the same 6-digit code, a
+birthday search of roughly 2^10 cheap trials per side.
+
+The commitment round removes that freedom. The joiner first sends a SHA-256
+commitment to its SPAKE2 message, bound to the protocol version, pairing
+session ID, both device IDs and its role. The creator sends its own message
+only after it holds that commitment, and checks that the joiner's message,
+revealed afterwards, opens it; a mismatch aborts before key confirmation with
+nothing stored. The joiner reveals its message only after the creator's
+arrived. When both devices run the round this way, a relay in the middle has
+to fix its message toward the creator (by committing to it) before it learns
+the creator's message, and its message toward the joiner before it learns the
+joiner's. When it learns each device's message it can no longer change
+anything that device's code depends on, so the two codes are independent: they
+match with probability 10^-6 (about 2^-20) per pairing attempt. A failed
+attempt shows the users two different codes and stores nothing. This is the
+commit-then-reveal order of ZRTP (RFC 6189) and of the Bluetooth LE Secure
+Connections numeric comparison. Binding rests on SHA-256 collision resistance;
+the committed message is a fresh random group element, so it hides itself
+without a separate nonce. See [protocol](protocol.md#commitment-round) for the
+frames.
+
+**Reduced protection.** A device that predates the round, and a relay that
+predates it (it drops the unknown frame), still pair. The creator waits 5
+seconds for a commitment that never comes, or answers an older joiner's
+SPAKE2 message at once, and both devices then derive the code without the
+round. The screen says `protection: REDUCED`. In that mode the creator may
+send its message before anything binds the joiner's side, and the offline
+search above is possible again, so pair only through a relay you trust.
+
+**What a matching code proves.** Each half of the exchange is protected on
+its own. The creator's half is protected only if the creator held the
+joiner's commitment before it sent its message, which the creator checks
+itself; then it shows `protection: full`. The joiner's half is protected
+whenever the joiner runs the round, because it always commits first and
+reveals last. The joiner's mode line repeats the creator's acknowledgement,
+which the relay can forge, so it is not proof about the creator. A relay that
+leaves either half unprotected can search for messages toward that device
+until its code equals the other device's code, whatever either screen says.
+Therefore:
+
+- **Trust a match only when both screens show `protection: full`.** Then the
+  creator held a commitment and the joiner runs the round, so the relay had
+  one try per pairing. A device that predates the round shows no protection
+  line, and a match with it is not protected against the relay.
+- The mode is also an HKDF input to the code. A relay that only strips the
+  acknowledgement, or only withholds the commitment, without that search
+  leaves the devices in different modes, and their codes differ. This is
+  defense in depth, not the protection itself.
+- A relay can make the creator fall back by dropping the commitment, exactly
+  as an older relay does; the two cases cannot be told apart. The creator
+  then shows `protection: REDUCED`, even if the relay makes the joiner show
+  `full`. With `clipsync config set pairing.require_commitment true` on the
+  creating device, the creator refuses instead: it sends `error`
+  (`commitment_required`) before it shows a code and stores nothing. Set it
+  on every device you pair from, because the creator's setting is the one
+  that counts against a malicious relay. A joiner with the setting refuses a
+  creator that does not acknowledge the commitment, but it cannot detect a
+  forged acknowledgement. The setting is off by default so that devices and
+  relays without the round still pair.
+
+The CLI and the desktop app show the mode next to the code, and every CLI
+confirmation path states it (see [the comparison](#verification-code-sas) above
+for when the CLI also requires `--accept-reduced-protection`). The mobile
+`SasVerifier.confirm_sas` callback receives it as `full_protection`, and the
+mobile library also logs a warning for a reduced-protection pairing.
+
+**Older peers.** An updated device still pairs with an older one. With a
+device that shows a code but predates the commitment round, both show the same
+code and the updated device states `protection: REDUCED` when its peer is
+honest. Through a malicious relay it may show `full` (see above), but the
+older device shows no protection line, so such a match is never protected. A
+device that predates the code shows none, so the comparison cannot be made.
+Treat such a pairing as unverified, or update both devices first. An older
+device writes its room key to local storage right after key confirmation,
+before the comparison. If the updated device rejects, the older one stores no
+room record or device token, but keeps that room-key secret. No room refers to
+it, so it is never used; removing it would need a change on the older device.
 
 **Skipping the comparison.** `clipsync room create|join --insecure-skip-sas`
 and the mobile `create_room()` / `join_room()` calls, kept for existing apps,
