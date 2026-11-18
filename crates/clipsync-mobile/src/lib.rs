@@ -14,7 +14,7 @@ use clipsync_clipboard::{
 };
 use clipsync_core::{
     begin_create_room, join_room, run_daemon, sanitize_untrusted, App, SasCheck, SasDecision,
-    MAX_PEER_NAME_COLUMNS,
+    SasProtection, MAX_PEER_NAME_COLUMNS,
 };
 use clipsync_storage::AppPaths;
 use tokio::runtime::Runtime;
@@ -60,6 +60,12 @@ pub trait ClipboardBridge: Send + Sync {
 /// invisible characters escaped and at most `MAX_PEER_NAME_COLUMNS` terminal
 /// columns wide; still show it in its own text element, never in the same
 /// string as `sas`.
+///
+/// `full_protection` says whether this device ran the commitment round that
+/// keeps a relay from searching for matching codes. Show it with the code:
+/// "full protection" when true, "reduced protection" otherwise. A match is
+/// trustworthy only when both devices show full protection; tell the user
+/// so when it is false.
 /// Returning `false` aborts the pairing and stores nothing.
 ///
 /// If the pairing ends first (deadline, the other device rejected, relay
@@ -68,7 +74,7 @@ pub trait ClipboardBridge: Send + Sync {
 /// must not block.
 #[uniffi::export(callback_interface)]
 pub trait SasVerifier: Send + Sync {
-    fn confirm_sas(&self, sas: String, peer_device_name: String) -> bool;
+    fn confirm_sas(&self, sas: String, peer_device_name: String, full_protection: bool) -> bool;
     fn sas_cancelled(&self);
 }
 
@@ -95,6 +101,10 @@ fn verifier_confirmer(
     let verifier: Arc<dyn SasVerifier> = Arc::from(verifier);
     move |check: SasCheck| {
         Box::pin(async move {
+            let full_protection = check.protection == SasProtection::Committed;
+            if !full_protection {
+                warn!("{}", check.protection_notice());
+            }
             let answered = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let _cancel = CancelUnanswered {
                 verifier: verifier.clone(),
@@ -103,7 +113,7 @@ fn verifier_confirmer(
             // The native callback blocks on UI; keep it off the runtime workers.
             let confirmed = tokio::task::spawn_blocking(move || {
                 let peer = sanitize_untrusted(&check.peer_device_name, MAX_PEER_NAME_COLUMNS);
-                let confirmed = verifier.confirm_sas(check.sas, peer);
+                let confirmed = verifier.confirm_sas(check.sas, peer, full_protection);
                 answered.store(true, std::sync::atomic::Ordering::SeqCst);
                 confirmed
             })
@@ -600,7 +610,14 @@ mod tests {
     }
 
     impl SasVerifier for ChannelVerifier {
-        fn confirm_sas(&self, sas: String, peer_device_name: String) -> bool {
+        fn confirm_sas(
+            &self,
+            sas: String,
+            peer_device_name: String,
+            full_protection: bool,
+        ) -> bool {
+            // Both test devices run the commitment round over the test relay.
+            assert!(full_protection);
             self.seen
                 .lock()
                 .unwrap()
@@ -631,7 +648,7 @@ mod tests {
     }
 
     impl SasVerifier for StalledVerifier {
-        fn confirm_sas(&self, _sas: String, _peer_device_name: String) -> bool {
+        fn confirm_sas(&self, _sas: String, _peer_device_name: String, _full: bool) -> bool {
             self.shown.lock().unwrap().send(()).unwrap();
             let _ = self.release.lock().unwrap().recv();
             true
@@ -642,14 +659,21 @@ mod tests {
         }
     }
 
-    /// Verifier that records the name it was shown and rejects.
+    /// Verifier that records the name and protection it was shown and rejects.
     struct RecordingVerifier {
         shown: Arc<Mutex<Vec<String>>>,
+        protection: Arc<Mutex<Vec<bool>>>,
     }
 
     impl SasVerifier for RecordingVerifier {
-        fn confirm_sas(&self, _sas: String, peer_device_name: String) -> bool {
+        fn confirm_sas(
+            &self,
+            _sas: String,
+            peer_device_name: String,
+            full_protection: bool,
+        ) -> bool {
             self.shown.lock().unwrap().push(peer_device_name);
+            self.protection.lock().unwrap().push(full_protection);
             false
         }
 
@@ -657,15 +681,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_host_is_told_whether_the_commitment_round_ran() {
+        let protection = Arc::new(Mutex::new(Vec::new()));
+        for mode in [
+            clipsync_core::SasProtection::Committed,
+            clipsync_core::SasProtection::Uncommitted,
+        ] {
+            let confirm = verifier_confirmer(Box::new(RecordingVerifier {
+                shown: Arc::default(),
+                protection: protection.clone(),
+            }));
+            let decision = confirm(SasCheck {
+                sas: "482913".into(),
+                peer_device_id: "peer".into(),
+                peer_device_name: "Phone".into(),
+                protection: mode,
+            })
+            .await;
+            assert_eq!(decision, SasDecision::Rejected);
+        }
+        assert_eq!(protection.lock().unwrap().as_slice(), [true, false]);
+    }
+
+    #[tokio::test]
     async fn hostile_peer_names_reach_the_host_inert() {
         let shown = Arc::new(Mutex::new(Vec::new()));
         let confirm = verifier_confirmer(Box::new(RecordingVerifier {
             shown: shown.clone(),
+            protection: Arc::default(),
         }));
         let decision = confirm(SasCheck {
             sas: "482913".into(),
             peer_device_id: "peer".into(),
             peer_device_name: "Phone\u{202e}319 284\u{2066}\u{1b}[2K\r".into(),
+            protection: clipsync_core::SasProtection::Committed,
         })
         .await;
         assert_eq!(decision, SasDecision::Rejected);
@@ -690,6 +739,7 @@ mod tests {
             sas: "482913".into(),
             peer_device_id: "peer".into(),
             peer_device_name: "Phone".into(),
+            protection: clipsync_core::SasProtection::Committed,
         });
         let pairing = tokio::spawn(decision);
         tokio::task::spawn_blocking(move || shown.recv_timeout(Duration::from_secs(5)).unwrap())

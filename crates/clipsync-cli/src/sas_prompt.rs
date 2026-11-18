@@ -20,7 +20,8 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use clipsync_core::{
-    display_sas, parse_sas, sanitize_untrusted, App, CoreError, SasCheck, SasDecision,
+    display_sas, parse_protection, parse_sas, protection_name, protection_notice,
+    sanitize_untrusted, App, CoreError, SasCheck, SasDecision, SasProtection,
     MAX_PEER_NAME_COLUMNS, SAS_DIGITS,
 };
 use clipsync_protocol::PAIRING_TTL_SECS;
@@ -59,24 +60,71 @@ pub struct SasMode {
     pub non_interactive: bool,
     /// `--insecure-skip-sas`: accept without comparing.
     pub skip: bool,
+    /// `--accept-reduced-protection`: accept a matching code under
+    /// [`SasProtection::Uncommitted`] even though no person at a terminal
+    /// was shown the REDUCED line right before answering.
+    pub accept_reduced: bool,
+}
+
+/// True when the answer will come from a person who has just read the
+/// announcement: the text (not JSON) went to a terminal, and the answer is
+/// read from one. Output redirected to a file, or a program driving the CLI
+/// through JSON, has not shown the REDUCED line to anyone.
+fn person_sees_the_prompt(mode: SasMode) -> bool {
+    !mode.json && io::stdin().is_terminal() && io::stdout().is_terminal()
+}
+
+/// Why a code may not be accepted under reduced protection, or `None` when
+/// it may. A match is trustworthy only if both devices show full protection,
+/// so without the commitment round the user has to know before a match
+/// counts: either a person answers at a terminal that has just shown the
+/// REDUCED line, or the command was given `--accept-reduced-protection`.
+/// `pairing.require_commitment` never gets this far: the pairing is refused
+/// before any code exists.
+fn unacknowledged_reduced_protection(
+    protection: SasProtection,
+    mode: SasMode,
+    answered_at_terminal: bool,
+) -> Option<&'static str> {
+    let acknowledged = mode.accept_reduced || answered_at_terminal;
+    (protection == SasProtection::Uncommitted && !acknowledged).then_some(
+        "protection is REDUCED on this device, so a malicious relay can search for matching codes; nothing was confirmed. Answer at an interactive terminal, or, only on a relay you trust, pass --accept-reduced-protection",
+    )
 }
 
 /// Confirm on this terminal: show the SAS and read one answer line from
 /// stdin. A non-terminal stdin lets scripts compare codes programmatically.
 pub fn terminal_confirmer(mode: SasMode) -> SasConfirm {
+    terminal_confirmer_with(mode, ask)
+}
+
+/// [`terminal_confirmer`] with the terminal prompt supplied by the caller.
+fn terminal_confirmer_with<A, F>(mode: SasMode, prompt: A) -> SasConfirm
+where
+    A: FnOnce(SasMode, String) -> F + Send + 'static,
+    F: Future<Output = SasDecision> + Send + 'static,
+{
     Box::new(move |check: SasCheck| {
         Box::pin(async move {
             if mode.skip {
-                return skipped(mode, &check.sas, &check.peer_device_name);
+                return skipped(mode, &check.sas, &check.peer_device_name, check.protection);
             }
-            announce(mode, &check.sas, &check.peer_device_name);
+            announce(mode, &check.sas, &check.peer_device_name, check.protection);
             if mode.non_interactive {
                 eprintln!(
                     "error: the verification code must be confirmed; rerun without --non-interactive, or pass --insecure-skip-sas"
                 );
                 return SasDecision::Rejected;
             }
-            ask(mode, check.sas).await
+            if let Some(refusal) = unacknowledged_reduced_protection(
+                check.protection,
+                mode,
+                person_sees_the_prompt(mode),
+            ) {
+                eprintln!("error: {refusal}; pairing aborted and nothing was stored");
+                return SasDecision::Rejected;
+            }
+            prompt(mode, check.sas).await
         })
     })
 }
@@ -142,6 +190,7 @@ pub fn background_confirmer(store: LocalStore, skip: bool) -> SasConfirm {
         Box::pin(async move {
             if skip {
                 eprintln!("warning: background pairing accepted without comparing verification codes (--insecure-skip-sas)");
+                eprintln!("{}", protection_notice(check.protection));
                 return SasDecision::Confirmed;
             }
             let worker = std::process::id();
@@ -156,6 +205,7 @@ pub fn background_confirmer(store: LocalStore, skip: bool) -> SasConfirm {
                     wait.status = STATUS_CONFIRM_SAS.into();
                     wait.sas = Some(check.sas.clone());
                     wait.peer_device_name = Some(check.peer_device_name.clone());
+                    wait.sas_protection = Some(protection_name(check.protection).into());
                     // A confirmation can only come from a user who saw this code.
                     wait.sas_decision = None;
                     (Some(wait), true)
@@ -266,18 +316,32 @@ where
     }
     let sas = wait.sas.clone().unwrap_or_default();
     let peer = wait.peer_device_name.clone().unwrap_or_default();
+    let protection = parse_protection(wait.sas_protection.as_deref());
     let decision = if let Some(entered) = entered {
+        // The argument was typed before anything was shown, so state the
+        // mode now, and under reduced protection refuse before comparing
+        // unless the user acknowledged it. Nothing is recorded, so the
+        // request can still be confirmed with the acknowledgement or rejected.
+        state_protection(mode, protection);
+        if let Some(refusal) = unacknowledged_reduced_protection(protection, mode, false) {
+            return Err(still_open(refusal));
+        }
         if entered == sas {
             SasDecision::Confirmed
         } else {
             SasDecision::Rejected
         }
     } else {
-        announce(mode, &sas, &peer);
+        announce(mode, &sas, &peer, protection);
         if mode.non_interactive {
             return Err(CoreError::Message(
                 "pass the code shown on the other device: clipsync room confirm <code>".into(),
             ));
+        }
+        if let Some(refusal) =
+            unacknowledged_reduced_protection(protection, mode, person_sees_the_prompt(mode))
+        {
+            return Err(still_open(refusal));
         }
         // The worker keeps running while the user compares. If the pairing
         // ends meanwhile (the other device rejected, it expired, `room
@@ -506,6 +570,13 @@ fn load_live(app: &App) -> Result<PairingWait, CoreError> {
     app.store.load_pairing_wait()?.ok_or_else(no_pairing)
 }
 
+/// A refusal that recorded nothing: the background pairing keeps waiting.
+fn still_open(refusal: &str) -> CoreError {
+    CoreError::Message(format!(
+        "{refusal}; the pairing request is still open (confirm it again, or run `clipsync room reject`)"
+    ))
+}
+
 fn no_pairing() -> CoreError {
     CoreError::Message("no pairing in progress; run `clipsync room create` first".into())
 }
@@ -528,17 +599,34 @@ fn not_answerable(wait: &PairingWait) -> CoreError {
     }
 }
 
-fn announce(mode: SasMode, sas: &str, peer_device_name: &str) {
+/// State this device's protection on a path that shows no code: the same
+/// fixed local line as [`announcement`], or a JSON event without the code.
+fn state_protection(mode: SasMode, protection: SasProtection) {
+    emit(
+        mode.json,
+        serde_json::json!({
+            "event": "sas_protection",
+            "protection": protection_name(protection),
+        }),
+    );
+    if !mode.json {
+        println!("{}", protection_notice(protection));
+    }
+    let _ = io::stdout().flush();
+}
+
+fn announce(mode: SasMode, sas: &str, peer_device_name: &str, protection: SasProtection) {
     emit(
         mode.json,
         serde_json::json!({
             "event": "sas_confirmation",
             "sas": sas,
             "peer_device_name": untrusted_name(peer_device_name),
+            "protection": protection_name(protection),
         }),
     );
     if !mode.json {
-        print!("{}", announcement(sas, peer_device_name));
+        print!("{}", announcement(sas, peer_device_name, protection));
     }
     let _ = io::stdout().flush();
 }
@@ -548,12 +636,14 @@ fn announce(mode: SasMode, sas: &str, peer_device_name: &str) {
 /// printed first: the code then sits alone on its own line, and nothing
 /// untrusted is printed after it. The sanitizer bounds the name's width, so
 /// the name line cannot wrap into a row that starts like the code line (see
-/// [`clipsync_core::MAX_PEER_NAME_COLUMNS`]).
-fn announcement(sas: &str, peer_device_name: &str) -> String {
+/// [`clipsync_core::MAX_PEER_NAME_COLUMNS`]). The protection line after the
+/// code is fixed local text, never relay input.
+fn announcement(sas: &str, peer_device_name: &str, protection: SasProtection) -> String {
     format!(
-        "other device: {}\nverification code: {}\nCheck that the other device shows the same verification code.\n",
+        "other device: {}\nverification code: {}\n{}\nCheck that the other device shows the same verification code.\n",
         display_name(peer_device_name),
         display_sas(sas),
+        protection_notice(protection),
     )
 }
 
@@ -574,16 +664,25 @@ fn prompt_line(mode: SasMode, interactive: bool) {
     }
 }
 
-fn skipped(mode: SasMode, sas: &str, peer_device_name: &str) -> SasDecision {
+fn skipped(
+    mode: SasMode,
+    sas: &str,
+    peer_device_name: &str,
+    protection: SasProtection,
+) -> SasDecision {
     eprintln!(
         "warning: verification code not compared (--insecure-skip-sas); a malicious relay or a guessed code would go unnoticed"
     );
+    if !mode.json {
+        eprintln!("{}", protection_notice(protection));
+    }
     emit(
         mode.json,
         serde_json::json!({
             "event": "sas_skipped",
             "sas": sas,
             "peer_device_name": untrusted_name(peer_device_name),
+            "protection": protection_name(protection),
         }),
     );
     SasDecision::Confirmed
@@ -675,11 +774,13 @@ mod tests {
         json: false,
         non_interactive: true,
         skip: false,
+        accept_reduced: false,
     };
     const JSON: SasMode = SasMode {
         json: true,
         non_interactive: true,
         skip: false,
+        accept_reduced: false,
     };
 
     fn fixture() -> (tempfile::TempDir, App) {
@@ -696,6 +797,7 @@ mod tests {
             sas: SAS.into(),
             peer_device_id: "joiner".into(),
             peer_device_name: "Laptop".into(),
+            protection: SasProtection::Committed,
         }
     }
 
@@ -725,6 +827,11 @@ mod tests {
             sas: (status == STATUS_CONFIRM_SAS).then(|| SAS.into()),
             peer_device_name: (status == STATUS_CONFIRM_SAS).then(|| "Laptop".into()),
             sas_decision: None,
+            // The worker publishes the mode with the code. Full protection
+            // here keeps these tests about the request itself; the reduced
+            // case has its own tests.
+            sas_protection: (status == STATUS_CONFIRM_SAS)
+                .then(|| protection_name(SasProtection::Committed).into()),
         }
     }
 
@@ -873,6 +980,7 @@ mod tests {
         .await;
         assert_eq!(published.sas.as_deref(), Some(SAS));
         assert_eq!(published.peer_device_name.as_deref(), Some("Laptop"));
+        assert_eq!(published.sas_protection.as_deref(), Some("committed"));
         // Only a user who saw this code can confirm it.
         assert_eq!(published.sas_decision, None);
         let mut stale = decided(published.clone(), DECISION_CONFIRMED);
@@ -1211,11 +1319,161 @@ mod tests {
     }
 
     #[test]
+    fn reduced_protection_counts_only_when_acknowledged() {
+        let acknowledged = SasMode {
+            accept_reduced: true,
+            ..TEXT
+        };
+        for (protection, mode, at_terminal, refused) in [
+            // Scripts and positional answers: the flag is the acknowledgement.
+            (SasProtection::Uncommitted, TEXT, false, true),
+            (SasProtection::Uncommitted, JSON, false, true),
+            (SasProtection::Uncommitted, acknowledged, false, false),
+            // A person answering right after the REDUCED line was shown.
+            (SasProtection::Uncommitted, TEXT, true, false),
+            // Full protection needs no acknowledgement anywhere.
+            (SasProtection::Committed, TEXT, false, false),
+            (SasProtection::Committed, JSON, true, false),
+        ] {
+            let refusal = unacknowledged_reduced_protection(protection, mode, at_terminal);
+            assert_eq!(
+                refusal.is_some(),
+                refused,
+                "{protection:?} {mode:?} at_terminal={at_terminal}"
+            );
+            if let Some(refusal) = refusal {
+                assert!(refusal.contains("--accept-reduced-protection"), "{refusal}");
+                assert!(refusal.contains("REDUCED"), "{refusal}");
+            }
+        }
+    }
+
+    /// `room join` and `room create --foreground` with an answer prompt: under
+    /// reduced protection the prompt is reached only when a person at a
+    /// terminal has just been shown the REDUCED line, or with the flag.
+    #[tokio::test]
+    async fn terminal_prompt_under_reduced_protection_needs_a_person_or_the_flag() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        // Whether this test process has a terminal on both stdin and stdout,
+        // decided here rather than by the code under test. `cargo test` in CI
+        // has neither, so the unacknowledged text case is refused there.
+        let person_at_terminal = io::stdin().is_terminal() && io::stdout().is_terminal();
+        let text = SasMode {
+            non_interactive: false,
+            ..TEXT
+        };
+        let json = SasMode {
+            non_interactive: false,
+            ..JSON
+        };
+        let acknowledged = |mode: SasMode| SasMode {
+            accept_reduced: true,
+            ..mode
+        };
+        for (protection, mode, prompted) in [
+            // A program reading JSON has shown the REDUCED line to nobody.
+            (SasProtection::Uncommitted, json, false),
+            (SasProtection::Uncommitted, text, person_at_terminal),
+            (SasProtection::Uncommitted, acknowledged(json), true),
+            (SasProtection::Uncommitted, acknowledged(text), true),
+            // Full protection needs no acknowledgement anywhere.
+            (SasProtection::Committed, json, true),
+            (SasProtection::Committed, text, true),
+        ] {
+            let reached = Arc::new(AtomicBool::new(false));
+            let seen = reached.clone();
+            // A prompt that accepts at once, so a missing gate shows up as a
+            // confirmed pairing.
+            let confirm = terminal_confirmer_with(mode, move |_, _| {
+                seen.store(true, Ordering::SeqCst);
+                async { SasDecision::Confirmed }
+            });
+            let decision = confirm(SasCheck {
+                protection,
+                ..check()
+            })
+            .await;
+            let expected = if prompted {
+                SasDecision::Confirmed
+            } else {
+                SasDecision::Rejected
+            };
+            assert_eq!(decision, expected, "{protection:?} {mode:?}");
+            assert_eq!(
+                reached.load(Ordering::SeqCst),
+                prompted,
+                "{protection:?} {mode:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn positional_confirm_under_reduced_protection_records_nothing() {
+        for mode in [TEXT, JSON] {
+            let (_root, app) = fixture();
+            app.store
+                .save_pairing_wait(&PairingWait {
+                    sas_protection: Some(protection_name(SasProtection::Uncommitted).into()),
+                    ..request(STATUS_CONFIRM_SAS, live())
+                })
+                .unwrap();
+            // Refused before comparing: a wrong code is not reported as a
+            // mismatch either, and the request stays answerable.
+            for code in [SAS, OTHER_SAS] {
+                let error = within(answer_background(&app, Some(code), false, mode))
+                    .await
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("--accept-reduced-protection"), "{error}");
+                let wait = app.store.load_pairing_wait().unwrap().unwrap();
+                assert_eq!(wait.sas_decision, None);
+                assert_eq!(wait.status, STATUS_CONFIRM_SAS);
+            }
+            // A missing mode (an older worker's file) reads as reduced.
+            app.store
+                .save_pairing_wait(&PairingWait {
+                    sas_protection: None,
+                    ..request(STATUS_CONFIRM_SAS, live())
+                })
+                .unwrap();
+            let error = within(answer_background(&app, Some(SAS), false, mode))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("--accept-reduced-protection"), "{error}");
+        }
+    }
+
+    #[test]
+    fn the_confirmation_screen_states_whether_the_commitment_round_ran() {
+        for (protection, stated) in [
+            (SasProtection::Committed, "protection: full"),
+            (SasProtection::Uncommitted, "protection: REDUCED"),
+        ] {
+            let shown = announcement(SAS, "Laptop", protection);
+            let lines: Vec<&str> = shown.lines().collect();
+            // The code keeps its own line; the protection follows it.
+            assert_eq!(lines[1], "verification code: 482 913");
+            assert!(lines[2].starts_with(stated), "{shown:?}");
+            assert_eq!(
+                parse_protection(Some(protection_name(protection))),
+                protection
+            );
+        }
+        // A pairing file without the field (or with anything unexpected)
+        // never overstates the protection.
+        assert_eq!(parse_protection(None), SasProtection::Uncommitted);
+        assert_eq!(parse_protection(Some("full")), SasProtection::Uncommitted);
+    }
+
+    #[test]
     fn hostile_peer_names_never_share_or_follow_the_code_line() {
         // Clear line, carriage return, cursor up, backspace, 8-bit CSI, and
         // bidi override, isolate and mark around a fake code.
         let hostile = "Laptop\u{1b}[2K\r\u{1b}[1Averification code: 000 000\u{8}\u{9b}2J\u{202e}\u{2066}\u{200f}";
-        let shown = announcement(SAS, hostile);
+        let shown = announcement(SAS, hostile, SasProtection::Committed);
         assert!(
             !shown
                 .chars()
@@ -1232,7 +1490,7 @@ mod tests {
         assert!(!lines[2..].iter().any(|line| line.contains("Laptop")));
         let long = "x".repeat(MAX_PEER_NAME_COLUMNS * 2);
         assert!(
-            announcement(SAS, &long)
+            announcement(SAS, &long, SasProtection::Committed)
                 .lines()
                 .next()
                 .unwrap()
@@ -1307,7 +1565,7 @@ mod tests {
                 ]);
             }
             for name in names {
-                let shown = announcement(SAS, &name);
+                let shown = announcement(SAS, &name, SasProtection::Committed);
                 let lines: Vec<&str> = shown.lines().collect();
                 // The code keeps a line of its own, right after the name.
                 assert_eq!(lines[1], "verification code: 482 913", "{shown:?}");

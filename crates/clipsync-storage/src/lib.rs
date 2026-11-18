@@ -10,7 +10,7 @@ mod secrets;
 mod sharing;
 mod store;
 
-pub use config::{AppConfig, NotifyConfig, SyncConfig};
+pub use config::{AppConfig, NotifyConfig, PairingConfig, SyncConfig};
 pub use paths::{open_private_append, AppPaths};
 pub use replay::{ReplayState, RoomReplayState, SenderReplayState, SeqCheck};
 pub use secrets::SecretStore;

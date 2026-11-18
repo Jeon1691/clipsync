@@ -153,6 +153,10 @@ pub async fn serve_with_transport(
     )?
     .into_make_service_with_connect_info::<SocketAddr>();
     let server = axum_server::from_tcp(listener)?.first_request_timeout(Duration::from_secs(10));
+    // Both listening diagnostics are emitted only after the bind succeeded and
+    // carry the bound `addr`, which reports the OS-chosen port for `--bind
+    // HOST:0`. The integration-test harness (tests/support) reads that message
+    // and field to find the relay it spawned; keep them stable.
     if let Some(tls) = tls {
         info!(%addr, "clipsync-relay listening with TLS 1.2/1.3");
         server
