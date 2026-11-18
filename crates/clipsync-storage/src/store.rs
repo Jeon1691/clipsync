@@ -1,6 +1,6 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
-use chrono::{DateTime, Utc};
+use clipsync_protocol::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use clipsync_protocol::{DeviceId, DeviceRole, RoomId};
@@ -15,7 +15,7 @@ pub struct RoomRecord {
     pub room_id: RoomId,
     pub epoch: u64,
     pub role: DeviceRole,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     // Kept in memory for callers; legacy inline credentials are migrated on load.
     #[serde(default, skip_serializing)]
     pub device_token: String,
@@ -426,7 +426,7 @@ mod failure_tests {
                 room_id: RoomId::new(),
                 epoch: 1,
                 role: DeviceRole::Owner,
-                created_at: Utc::now(),
+                created_at: Timestamp::now(),
                 device_token: "fixture".into(),
                 peers: vec![]
             })

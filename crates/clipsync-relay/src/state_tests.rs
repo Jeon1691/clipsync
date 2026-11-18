@@ -74,14 +74,14 @@ fn pairing_rejects_expiry_reuse_same_device_and_exhausted_attempts() {
     {
         let mut session = state.pairing_mut(sid.as_str()).unwrap();
         session.attempts = 0;
-        session.expires_at = Utc::now() - chrono::Duration::seconds(1);
+        session.expires_at = Timestamp::now() - time::Duration::seconds(1);
     }
     assert!(matches!(
         state.join_pairing(join(&offer.pairing_code, DeviceId::new()), ip),
         Err(JoinError::Expired)
     ));
     state.pairing_mut(sid.as_str()).unwrap().expires_at =
-        Utc::now() + chrono::Duration::seconds(60);
+        Timestamp::now() + time::Duration::seconds(60);
     state
         .join_pairing(join(&offer.pairing_code, DeviceId::new()), ip)
         .unwrap();
@@ -132,7 +132,7 @@ fn failed_join_rate_limit_resets_after_its_window_and_abort_removes_the_code() {
 fn queue_expiry_discards_only_expired_envelopes_and_gc_counts_them() {
     let (state, offer, _, owner) = fixture();
     let room = offer.room_id.to_string();
-    let now = Utc::now();
+    let now = Timestamp::now();
     let routing = RoutingHeader {
         version: clipsync_protocol::PROTOCOL_VERSION,
         message_id: MessageId::new(),
@@ -141,7 +141,7 @@ fn queue_expiry_discards_only_expired_envelopes_and_gc_counts_them() {
         sender_device_id: owner,
         recipient: Recipient::Broadcast,
         sent_at: now,
-        expires_at: now + chrono::Duration::seconds(60),
+        expires_at: now + time::Duration::seconds(60),
         item_kind: ItemKind::Text,
         seq: 1,
     };
@@ -154,7 +154,7 @@ fn queue_expiry_discards_only_expired_envelopes_and_gc_counts_them() {
         &room,
         "expired-on-read",
         envelope.clone(),
-        now - chrono::Duration::seconds(1),
+        now - time::Duration::seconds(1),
         SENDER,
     );
     assert!(state.take_queue(&room, "expired-on-read").is_none());
@@ -162,14 +162,14 @@ fn queue_expiry_discards_only_expired_envelopes_and_gc_counts_them() {
         &room,
         "expired-on-gc",
         envelope.clone(),
-        now - chrono::Duration::seconds(1),
+        now - time::Duration::seconds(1),
         SENDER,
     );
     state.queue_text(
         &room,
         "fresh",
         envelope.clone(),
-        now + chrono::Duration::seconds(60),
+        now + time::Duration::seconds(60),
         SENDER,
     );
     state.gc();
@@ -556,7 +556,7 @@ fn open_pairing_sessions_are_capped_well_below_the_code_space() {
 
     // An expired session frees its slot at once, without waiting for GC.
     state.pairing_by_code.iter_mut().next().unwrap().expires_at =
-        Utc::now() - chrono::Duration::seconds(1);
+        Timestamp::now() - time::Duration::seconds(1);
     state.create_pairing(create_request(), next).unwrap();
     assert_eq!(state.pairing_by_code.len(), MAX_ACTIVE_PAIRING_SESSIONS);
     assert_eq!(state.pairing_by_id.len(), MAX_ACTIVE_PAIRING_SESSIONS);
@@ -611,7 +611,7 @@ fn gc_prunes_pairing_by_id_with_expired_completed_and_aborted_sessions() {
     let (state, _, expired_sid, _) = fixture();
     let ip: IpAddr = Ipv4Addr::LOCALHOST.into();
     state.pairing_mut(expired_sid.as_str()).unwrap().expires_at =
-        Utc::now() - chrono::Duration::seconds(1);
+        Timestamp::now() - time::Duration::seconds(1);
     let completed = create_request();
     let completed_sid = completed.pairing_session_id.clone();
     let completed_offer = state.create_pairing(completed, ip).unwrap();
@@ -648,7 +648,7 @@ fn gc_prunes_pairing_by_id_with_expired_completed_and_aborted_sessions() {
         .pairing_by_code
         .get_mut(&older_code)
         .unwrap()
-        .expires_at = Utc::now() - chrono::Duration::seconds(1);
+        .expires_at = Timestamp::now() - time::Duration::seconds(1);
     state.gc();
     assert_eq!(
         state.pairing(live_sid.as_str()).unwrap().code,
@@ -676,7 +676,8 @@ fn gc_drops_only_rooms_that_can_never_be_used_again() {
         assert!(state.revoke(&revoked, &device));
     }
     for room in [&expired, &expired_online] {
-        state.room_mut(room).unwrap().tokens_expire_at = Utc::now() - chrono::Duration::seconds(1);
+        state.room_mut(room).unwrap().tokens_expire_at =
+            Timestamp::now() - time::Duration::seconds(1);
     }
     let (tx, _rx) = mpsc::channel(1);
     let _online = state
@@ -702,18 +703,18 @@ fn completed_rooms_outlive_every_device_token_issued_for_them() {
     let (state, offer, sid, _) = fixture();
     let tokens = complete(&state, &offer, sid.as_str());
     let room = state.room(offer.room_id.as_str()).unwrap();
-    let lifetime = room.tokens_expire_at - Utc::now();
-    assert!(lifetime > chrono::Duration::seconds(DEVICE_TOKEN_TTL_SECS - 60));
-    assert!(lifetime <= chrono::Duration::seconds(DEVICE_TOKEN_TTL_SECS + TOKEN_EXPIRY_GRACE_SECS));
+    let lifetime = room.tokens_expire_at - Timestamp::now();
+    assert!(lifetime > time::Duration::seconds(DEVICE_TOKEN_TTL_SECS - 60));
+    assert!(lifetime <= time::Duration::seconds(DEVICE_TOKEN_TTL_SECS + TOKEN_EXPIRY_GRACE_SECS));
     for token in tokens {
         let claims = crate::auth::verify_token(&state.config.token_secret, &token).unwrap();
         // A token is valid through its `exp` second.
-        assert!(room.tokens_expire_at.timestamp() > claims.exp);
+        assert!(room.tokens_expire_at.unix_timestamp() > claims.exp);
     }
 }
 
 fn envelope(id: &str) -> QueuedEnvelope {
-    let now = Utc::now();
+    let now = Timestamp::now();
     QueuedEnvelope {
         routing: RoutingHeader {
             version: clipsync_protocol::PROTOCOL_VERSION,
@@ -891,9 +892,9 @@ async fn revocation_drops_every_route_evicts_every_socket_and_blocks_reregistrat
 #[test]
 fn queued_text_retention_is_capped_whatever_expiry_the_sender_chose() {
     let (state, room, _, member) = paired_room();
-    let sent_at = Utc::now();
+    let sent_at = Timestamp::now();
     // Far beyond the relay's retention cap, as a misbehaving sender may claim.
-    let claimed_expiry = sent_at + chrono::Duration::days(SENDER_CLAIMED_EXPIRY_DAYS);
+    let claimed_expiry = sent_at + time::Duration::days(SENDER_CLAIMED_EXPIRY_DAYS);
     assert!(state.queue_text(
         &room,
         &member,
@@ -906,8 +907,8 @@ fn queued_text_retention_is_capped_whatever_expiry_the_sender_chose() {
         .get(&member_key(&room, &member))
         .map(|entry| entry.expires_at)
         .unwrap();
-    let cap = chrono::Duration::seconds(QUEUE_TTL_SECS as i64);
-    assert!(retained_until <= Utc::now() + cap);
+    let cap = time::Duration::seconds(QUEUE_TTL_SECS as i64);
+    assert!(retained_until <= Timestamp::now() + cap);
     assert!(retained_until >= sent_at + cap);
 }
 
@@ -917,7 +918,7 @@ const EVICTION_DEADLINE: std::time::Duration = std::time::Duration::from_millis(
 const SENDER_CLAIMED_EXPIRY_DAYS: i64 = 30;
 
 fn queued_envelope(room: &str, sender: &str) -> QueuedEnvelope {
-    let now = Utc::now();
+    let now = Timestamp::now();
     QueuedEnvelope {
         routing: RoutingHeader {
             version: clipsync_protocol::PROTOCOL_VERSION,
@@ -942,7 +943,7 @@ const QUEUE_ROOM: &str = "queue-room";
 #[test]
 fn the_offline_queue_is_capped_and_never_outlives_the_queue_ttl() {
     let (state, _, _, _) = fixture();
-    let far_future = Utc::now() + chrono::Duration::days(365);
+    let far_future = Timestamp::now() + time::Duration::days(365);
     // Spread over enough senders that no one reaches its own share.
     let sender = |n: usize| client(n / MAX_CLIENT_QUEUED_TEXT_ENVELOPES);
     for n in 0..MAX_QUEUED_TEXT_ENVELOPES {
@@ -966,7 +967,7 @@ fn the_offline_queue_is_capped_and_never_outlives_the_queue_ttl() {
         far_future,
         sender(0)
     ));
-    let retention = Utc::now() + chrono::Duration::seconds(QUEUE_TTL_SECS as i64);
+    let retention = Timestamp::now() + time::Duration::seconds(QUEUE_TTL_SECS as i64);
     assert!(
         state
             .queue
@@ -980,7 +981,7 @@ fn the_offline_queue_is_capped_and_never_outlives_the_queue_ttl() {
         .queue
         .get_mut(&member_key(QUEUE_ROOM, "device-1"))
         .unwrap()
-        .expires_at = Utc::now() - chrono::Duration::seconds(1);
+        .expires_at = Timestamp::now() - time::Duration::seconds(1);
     assert!(state.queue_text(QUEUE_ROOM, "one-too-many", envelope("m"), far_future, fresh));
     assert_eq!(state.queue.len(), MAX_QUEUED_TEXT_ENVELOPES);
     let charged: usize = state.queue_senders.iter().map(|held| *held).sum();
@@ -993,7 +994,7 @@ fn the_offline_queue_is_capped_and_never_outlives_the_queue_ttl() {
 #[test]
 fn regression_one_client_cannot_fill_the_relay_wide_offline_queue() {
     let (state, _, _, _) = fixture();
-    let far_future = Utc::now() + chrono::Duration::days(365);
+    let far_future = Timestamp::now() + time::Duration::days(365);
     let attacker: IpAddr = "2001:db8:91::1".parse().unwrap();
     let queued = (0..MAX_QUEUED_TEXT_ENVELOPES)
         .filter(|n| {
@@ -1043,7 +1044,7 @@ fn regression_one_client_cannot_fill_the_relay_wide_offline_queue() {
         .queue
         .get_mut(&member_key(QUEUE_ROOM, "attacker-peer-1"))
         .unwrap()
-        .expires_at = Utc::now() - chrono::Duration::seconds(1);
+        .expires_at = Timestamp::now() - time::Duration::seconds(1);
     state.gc();
     assert!(state.queue_text(
         QUEUE_ROOM,

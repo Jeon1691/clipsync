@@ -4,7 +4,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use base64::Engine as _;
-use chrono::Utc;
+use clipsync_protocol::Timestamp;
 use tracing::{info, warn};
 
 use clipsync_crypto::{
@@ -261,7 +261,7 @@ pub enum SasDecision {
 pub struct RoomOffer {
     pub pairing_code: String,
     pub room_id: clipsync_protocol::RoomId,
-    pub expires_at: chrono::DateTime<Utc>,
+    pub expires_at: Timestamp,
 }
 
 pub struct PendingCreate {
@@ -919,7 +919,7 @@ where
                     room_id: room_id.clone(),
                     epoch,
                     role,
-                    created_at: Utc::now(),
+                    created_at: Timestamp::now(),
                     device_token,
                     peers: vec![peer],
                 };
@@ -2756,7 +2756,7 @@ mod tests {
                 room_id,
                 pairing_code,
                 pairing_token: "synthetic-token".into(),
-                expires_at: Utc::now(),
+                expires_at: Timestamp::now(),
                 ws_path: "/v1/ws".into(),
             };
             let server = crate::test_relay::Server::http(Router::new().route(
@@ -2784,7 +2784,7 @@ mod tests {
                 room_id,
                 pairing_token: "synthetic-token".into(),
                 peer,
-                expires_at: Utc::now(),
+                expires_at: Timestamp::now(),
                 ws_path: "/v1/ws".into(),
             };
             let server = crate::test_relay::Server::http(Router::new().route(

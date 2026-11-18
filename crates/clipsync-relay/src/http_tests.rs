@@ -80,7 +80,7 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
     assert_eq!(error.1 .0.code, "join_failed");
     request.device_id = DeviceId::new();
     state.pairing_mut(sid.as_str()).unwrap().expires_at =
-        chrono::Utc::now() - chrono::Duration::seconds(1);
+        clipsync_protocol::Timestamp::now() - time::Duration::seconds(1);
     let error = join_pairing(
         ConnectInfo(address),
         State(state.clone()),
@@ -92,7 +92,7 @@ async fn pairing_http_errors_preserve_protocol_expiry_busy_and_attempt_statuses(
     assert_eq!(error.0, StatusCode::GONE);
     assert_eq!(error.1 .0.code, "code_expired");
     state.pairing_mut(sid.as_str()).unwrap().expires_at =
-        chrono::Utc::now() + chrono::Duration::seconds(60);
+        clipsync_protocol::Timestamp::now() + time::Duration::seconds(60);
     let joined = join_pairing(
         ConnectInfo(address),
         State(state.clone()),
@@ -1194,14 +1194,14 @@ async fn undecodable_joins_test_no_code_and_leave_the_join_budget_to_decodable_g
 #[tokio::test]
 async fn pairing_responses_emit_one_canonical_expiry_string() {
     use crate::timestamp_shape_tests::is_canonical_utc;
+    use clipsync_protocol::Timestamp;
     use clipsync_protocol::PAIRING_TTL_SECS;
-    use std::time::SystemTime;
 
-    let ttl = Duration::from_secs(PAIRING_TTL_SECS);
+    let ttl = time::Duration::try_from(Duration::from_secs(PAIRING_TTL_SECS)).unwrap();
     let state = join_test_state();
     let (url, server) = spawn_router(router_with_state(state)).await;
     let client = loopback_client();
-    let before = SystemTime::now();
+    let before = Timestamp::now();
     let create: serde_json::Value = client
         .post(format!("{url}/v1/pairing/create"))
         .json(&CreatePairingRequest {
@@ -1218,12 +1218,12 @@ async fn pairing_responses_emit_one_canonical_expiry_string() {
         .json()
         .await
         .unwrap();
-    let after = SystemTime::now();
+    let after = Timestamp::now();
     let created = create["expires_at"].as_str().unwrap();
     assert!(is_canonical_utc(created), "{created}");
     let decoded: clipsync_protocol::CreatePairingResponse =
         serde_json::from_value(create.clone()).unwrap();
-    let expires_at = SystemTime::from(decoded.expires_at);
+    let expires_at = decoded.expires_at;
     assert!(
         before + ttl <= expires_at && expires_at <= after + ttl,
         "{created} outside [{before:?}, {after:?}] + {PAIRING_TTL_SECS}s"

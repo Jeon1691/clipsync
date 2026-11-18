@@ -1026,10 +1026,14 @@ mod tests {
         assert_eq!(offer.pairing_code.len(), 6);
         assert!(offer.pairing_code.bytes().all(|b| b.is_ascii_digit()));
         assert!(!offer.room_id.is_empty());
-        let expiry = chrono::DateTime::parse_from_rfc3339(&offer.expires_at)
+        let expiry = offer
+            .expires_at
+            .parse::<clipsync_protocol::Timestamp>()
             .unwrap()
-            .timestamp();
-        assert!((60..=130).contains(&(expiry - chrono::Utc::now().timestamp())));
+            .unix_timestamp();
+        assert!(
+            (60..=130).contains(&(expiry - clipsync_protocol::Timestamp::now().unix_timestamp()))
+        );
         assert!(client
             .join_room("not-a-valid-code".into())
             .unwrap_err()

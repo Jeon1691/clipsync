@@ -143,15 +143,16 @@ pub fn open_chunk(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use chrono::{Duration, Utc};
     use clipsync_crypto::blake3_hex as hash_hex;
+    use clipsync_protocol::Timestamp;
     use clipsync_protocol::{
         DeviceId, ItemKind, MessageId, Recipient, RoomId, ENVELOPE_VERSION_AUTHENTICATED,
         ENVELOPE_VERSION_LEGACY,
     };
+    use time::Duration;
 
     fn routing(version: u16) -> RoutingHeader {
-        let now = Utc::now();
+        let now = Timestamp::now();
         RoutingHeader {
             version,
             message_id: MessageId::new(),

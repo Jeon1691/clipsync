@@ -72,8 +72,8 @@ fn authenticated_aad(routing: &RoutingHeader, frame: EnvelopeFrame) -> Vec<u8> {
         }
     }
     for at in [routing.sent_at, routing.expires_at] {
-        aad.extend_from_slice(&at.timestamp().to_be_bytes());
-        aad.extend_from_slice(&at.timestamp_subsec_nanos().to_be_bytes());
+        aad.extend_from_slice(&at.unix_timestamp().to_be_bytes());
+        aad.extend_from_slice(&at.subsec_nanos().to_be_bytes());
     }
     aad.push(match routing.item_kind {
         ItemKind::Text => KIND_TEXT,
@@ -103,11 +103,11 @@ fn put_field(aad: &mut Vec<u8>, value: &str) {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::{DeviceId, MessageId, RoomId, TransferId};
-    use chrono::{Duration, TimeZone, Utc};
+    use crate::{DeviceId, MessageId, RoomId, Timestamp, TransferId};
+    use time::Duration;
 
     fn header(version: u16) -> RoutingHeader {
-        let sent_at = Utc.timestamp_opt(1_700_000_000, 123_456_789).unwrap();
+        let sent_at = Timestamp::from_unix(1_700_000_000, 123_456_789).unwrap();
         RoutingHeader {
             version,
             message_id: MessageId::from("message"),

@@ -4,7 +4,7 @@
 //! reaches every live socket of a member (daemon plus CLI one-shot commands),
 //! up to a per-member cap.
 
-use chrono::Utc;
+use clipsync_protocol::Timestamp;
 use clipsync_protocol::{
     AckStatus, ClientRole, ControlMessage, CreatePairingRequest, CreatePairingResponse, DeviceId,
     ItemKind, JoinPairingRequest, JoinPairingResponse, MessageId, PairingSessionId, Recipient,
@@ -279,7 +279,7 @@ fn pairing_hello(
 }
 
 fn text(room: &RoomId, sender: &DeviceId, ciphertext: &str) -> ControlMessage {
-    let sent_at = Utc::now();
+    let sent_at = Timestamp::now();
     ControlMessage::TextEnvelope {
         routing: RoutingHeader {
             version: PROTOCOL_VERSION,
@@ -289,7 +289,7 @@ fn text(room: &RoomId, sender: &DeviceId, ciphertext: &str) -> ControlMessage {
             sender_device_id: sender.clone(),
             recipient: Recipient::Broadcast,
             sent_at,
-            expires_at: sent_at + chrono::Duration::seconds(TEXT_LIFETIME_SECS),
+            expires_at: sent_at + time::Duration::seconds(TEXT_LIFETIME_SECS),
             item_kind: ItemKind::Text,
             seq: 1,
         },
