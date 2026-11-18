@@ -120,6 +120,7 @@ fn pairing_file_expiry_is_kept_verbatim() {
                 sas: None,
                 peer_device_name: None,
                 sas_decision: None,
+                sas_protection: None,
             })
             .unwrap();
         let loaded = store.load_pairing_wait().unwrap().unwrap();
