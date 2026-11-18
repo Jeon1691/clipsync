@@ -378,3 +378,8 @@ pub use ws::WsOut;
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "http_tests.rs"]
 mod http_tests;
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "timestamp_shape_tests.rs"]
+mod timestamp_shape_tests;

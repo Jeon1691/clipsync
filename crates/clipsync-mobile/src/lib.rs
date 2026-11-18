@@ -803,6 +803,82 @@ mod tests {
         client
     }
 
+    /// A relay that answers `create` with `expires_at` and then holds the
+    /// pairing WebSocket open without a joiner.
+    fn scripted_create_relay(client: &ClipSyncClient, expires_at: &'static str) -> String {
+        use axum::extract::ws::WebSocketUpgrade;
+        use axum::routing::{get, post};
+        let listener = client
+            .rt
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new()
+            .route(
+                "/v1/pairing/create",
+                post(move || async move {
+                    axum::Json(serde_json::json!({
+                        "room_id": clipsync_protocol::RoomId::new(),
+                        "pairing_code": "246810",
+                        "pairing_token": "scripted-pairing-token",
+                        "expires_at": expires_at,
+                        "ws_path": "/v1/ws",
+                    }))
+                }),
+            )
+            .route(
+                "/v1/ws",
+                get(|ws: WebSocketUpgrade| async move {
+                    ws.on_upgrade(|mut socket| async move {
+                        while let Some(Ok(_)) = socket.recv().await {}
+                    })
+                }),
+            );
+        client.rt.spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{address}")
+    }
+
+    /// The FFI offer carries the relay's expiry as RFC 3339 with `+00:00`,
+    /// which native apps parse; pin the exact strings.
+    #[test]
+    fn pairing_offer_expiry_strings_are_pinned() {
+        const VECTORS: &[(&str, &str)] = &[
+            ("2099-01-02T03:04:05Z", "2099-01-02T03:04:05+00:00"),
+            (
+                "2099-01-02T03:04:05.123456789Z",
+                "2099-01-02T03:04:05.123456789+00:00",
+            ),
+            ("2099-01-02T03:04:05.120Z", "2099-01-02T03:04:05.120+00:00"),
+            (
+                "2099-01-02T03:04:05.123456Z",
+                "2099-01-02T03:04:05.123456+00:00",
+            ),
+            (
+                "2099-01-02T12:04:05.1234+09:00",
+                "2099-01-02T03:04:05.123400+00:00",
+            ),
+            ("2098-12-31T23:59:60.5Z", "2098-12-31T23:59:60.500+00:00"),
+            ("+10000-01-01T00:00:00Z", "+10000-01-01T00:00:00+00:00"),
+        ];
+        for (relay_value, offered) in VECTORS {
+            let root = tempfile::tempdir().unwrap();
+            let client = client_at(
+                root.path(),
+                "mobile-expiry-device",
+                13,
+                "http://127.0.0.1:0",
+            );
+            let relay = scripted_create_relay(&client, relay_value);
+            let mut cfg = client.app.store.load_config().unwrap();
+            cfg.relay_url = relay;
+            client.app.store.save_config(&cfg).unwrap();
+            let offer = client.create_room().unwrap();
+            assert_eq!(offer.expires_at, *offered, "{relay_value}");
+        }
+    }
+
     fn secret_files(client: &ClipSyncClient) -> usize {
         std::fs::read_dir(&client.app.store.paths.data_dir)
             .unwrap()

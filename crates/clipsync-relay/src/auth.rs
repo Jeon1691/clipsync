@@ -87,6 +87,59 @@ mod tests {
         assert_eq!(verify_token(&[18; 32], token).unwrap_err(), "bad signature");
     }
 
+    /// Sign claims with an explicit `exp`, read from `SystemTime` rather than
+    /// through [`issue_token`], so the boundary test does not depend on the
+    /// date-time library.
+    fn token_expiring_at(secret: &[u8], exp: i64) -> String {
+        let claims = TokenClaims {
+            typ: "device".into(),
+            rid: RoomId::new(),
+            did: DeviceId::new(),
+            role: DeviceRole::Owner,
+            sid: None,
+            exp,
+        };
+        let payload = serde_json::to_vec(&claims).unwrap();
+        let mut mac = HmacSha256::new_from_slice(secret).unwrap();
+        mac.update(&payload);
+        let codec = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        format!(
+            "{}.{}",
+            codec.encode(&payload),
+            codec.encode(mac.finalize().into_bytes())
+        )
+    }
+
+    fn unix_now_secs() -> i64 {
+        let since_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        i64::try_from(since_epoch.as_secs()).unwrap()
+    }
+
+    /// `exp` is the last second a token is valid: a token whose `exp` is the
+    /// current second is accepted, one a second older is expired.
+    #[test]
+    fn token_is_valid_through_its_exp_second() {
+        // An attempt is conclusive only when the clock stays within one
+        // second across both verifications. Each attempt takes microseconds,
+        // so a tick spoils at most one of them; a third covers a clock step.
+        const ATTEMPTS: usize = 3;
+        let secret = [17; 32];
+        for _ in 0..ATTEMPTS {
+            let now = unix_now_secs();
+            let current = verify_token(&secret, &token_expiring_at(&secret, now));
+            let stale = verify_token(&secret, &token_expiring_at(&secret, now - 1));
+            if unix_now_secs() != now {
+                continue;
+            }
+            assert_eq!(current.map(|claims| claims.exp), Ok(now));
+            assert_eq!(stale.unwrap_err(), "expired");
+            return;
+        }
+        panic!("the clock ticked over during every attempt");
+    }
+
     #[test]
     fn malformed_or_expired_tokens_fail_at_the_correct_validation_boundary() {
         let secret = [17; 32];

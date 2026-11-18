@@ -8,6 +8,9 @@ mod coverage_expansion;
 #[path = "envelope_security.rs"]
 mod envelope_security;
 
+#[path = "timestamp_vectors.rs"]
+mod timestamp_vectors;
+
 use super::*;
 use crate::envelope::EnvelopePolicy;
 use crate::{App, AppPaths};

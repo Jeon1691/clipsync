@@ -2606,3 +2606,124 @@ mod liveness {
         server.abort();
     }
 }
+
+/// A queued text keeps the sender's header instants exactly. The relay caps
+/// how long it retains the envelope, not the `expires_at` the receiver checks,
+/// and it re-emits every instant in the canonical `Z` spelling.
+#[tokio::test]
+async fn queued_text_relays_header_instants_unchanged_and_canonical() {
+    // (sender spelling, spelling the queued copy carries).
+    const VECTORS: &[(&str, &str)] = &[
+        ("2099-01-02T03:04:05Z", "2099-01-02T03:04:05Z"),
+        (
+            "2099-01-02T03:04:05.123456789Z",
+            "2099-01-02T03:04:05.123456789Z",
+        ),
+        ("2099-01-02T12:04:05.5+09:00", "2099-01-02T03:04:05.500Z"),
+        ("2099-01-02t03:04:05.120z", "2099-01-02T03:04:05.120Z"),
+        ("2098-12-31T23:59:60.25Z", "2098-12-31T23:59:60.250Z"),
+        (
+            "+262142-12-31T23:59:59.999999999Z",
+            "+262142-12-31T23:59:59.999999999Z",
+        ),
+    ];
+    let state = state();
+    let (rid, owner, member, token, _) = room(&state);
+    let (tx, mut rx) = mpsc::channel(32);
+    let mut ctx = None;
+    handle_control(&state, &tx, &mut ctx, hello(&owner, &rid, &token), None)
+        .await
+        .unwrap();
+    receive(&mut rx).await;
+    for (sent, relayed) in VECTORS {
+        let wire = serde_json::json!({
+            "type": "text_envelope",
+            "routing": {
+                "version": clipsync_protocol::PROTOCOL_VERSION,
+                "message_id": MessageId::new(),
+                "transfer_id": TransferId::new(),
+                "room_id": rid,
+                "sender_device_id": owner,
+                "recipient": "broadcast",
+                "sent_at": "2023-11-14T22:13:20.5+00:00",
+                "expires_at": sent,
+                "item_kind": "text",
+                "seq": 1,
+            },
+            "nonce": "opaque-nonce",
+            "ciphertext": "opaque-ciphertext",
+        })
+        .to_string();
+        let envelope = ControlMessage::decode(&wire).unwrap();
+        handle_control(&state, &tx, &mut ctx, envelope, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            receive(&mut rx).await,
+            ControlMessage::Ack {
+                status: AckStatus::Accepted,
+                ..
+            }
+        ));
+        let queued = state.take_queue(rid.as_str(), member.as_str()).unwrap();
+        let routing = serde_json::to_value(&queued.routing).unwrap();
+        assert_eq!(routing["sent_at"], "2023-11-14T22:13:20.500Z", "{sent}");
+        assert_eq!(routing["expires_at"], *relayed, "{sent}");
+    }
+}
+
+/// Each webhook body stamps `ts` with `to_rfc3339`'s UTC spelling: `+00:00`
+/// and the shortest exact 0, 3, 6 or 9 digit fraction, taken when the event
+/// happens. Webhook consumers parse this string, so its shape is pinned
+/// separately from the protocol's `Z` spelling.
+#[tokio::test]
+async fn webhook_events_stamp_ts_in_the_pinned_utc_offset_spelling() {
+    use crate::timestamp_shape_tests::{is_utc_timestamp, UTC_OFFSET_SUFFIX};
+    use std::time::SystemTime;
+
+    let state = state();
+    let (rid, owner, member, token, _) = room(&state);
+    let (tx, mut rx) = mpsc::channel(32);
+    let mut ctx = None;
+    let before = SystemTime::now();
+    handle_control(&state, &tx, &mut ctx, hello(&owner, &rid, &token), None)
+        .await
+        .unwrap();
+    receive(&mut rx).await;
+    let routing = RoutingHeader {
+        version: clipsync_protocol::PROTOCOL_VERSION,
+        message_id: MessageId::new(),
+        transfer_id: TransferId::new(),
+        room_id: rid.clone(),
+        sender_device_id: owner,
+        recipient: Recipient::Broadcast,
+        sent_at: chrono::Utc::now(),
+        expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+        item_kind: ItemKind::Text,
+        seq: 1,
+    };
+    let text = ControlMessage::TextEnvelope {
+        routing,
+        nonce: "opaque-nonce".into(),
+        ciphertext: "opaque-ciphertext".into(),
+    };
+    handle_control(&state, &tx, &mut ctx, text, None)
+        .await
+        .unwrap();
+    receive(&mut rx).await;
+    let revoke = ControlMessage::Revoke { device_id: member };
+    handle_control(&state, &tx, &mut ctx, revoke, None)
+        .await
+        .unwrap();
+    let after = SystemTime::now();
+
+    let events = state.webhook_events.lock().unwrap().clone();
+    let kinds: Vec<_> = events.iter().map(|event| event["type"].clone()).collect();
+    assert_eq!(kinds, ["device.joined", "clip.received", "room.revoked"]);
+    for event in &events {
+        let ts = event["ts"].as_str().unwrap();
+        assert!(is_utc_timestamp(ts, UTC_OFFSET_SUFFIX), "{event}");
+        let at = SystemTime::from(chrono::DateTime::parse_from_rfc3339(ts).unwrap());
+        assert!(before <= at && at <= after, "{event}");
+    }
+}

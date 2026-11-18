@@ -1187,3 +1187,56 @@ async fn undecodable_joins_test_no_code_and_leave_the_join_budget_to_decodable_g
     );
     task.abort();
 }
+
+/// The pairing responses carry `expires_at` in the canonical spelling, set
+/// to [`PAIRING_TTL_SECS`] after the request was served, and the joiner sees
+/// exactly the creator's string.
+#[tokio::test]
+async fn pairing_responses_emit_one_canonical_expiry_string() {
+    use crate::timestamp_shape_tests::is_canonical_utc;
+    use clipsync_protocol::PAIRING_TTL_SECS;
+    use std::time::SystemTime;
+
+    let ttl = Duration::from_secs(PAIRING_TTL_SECS);
+    let state = join_test_state();
+    let (url, server) = spawn_router(router_with_state(state)).await;
+    let client = loopback_client();
+    let before = SystemTime::now();
+    let create: serde_json::Value = client
+        .post(format!("{url}/v1/pairing/create"))
+        .json(&CreatePairingRequest {
+            protocol_version: PROTOCOL_VERSION,
+            pairing_session_id: PairingSessionId::new(),
+            device_id: DeviceId::new(),
+            device_name: "owner".into(),
+            os: "test".into(),
+            ttl_secs: None,
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let after = SystemTime::now();
+    let created = create["expires_at"].as_str().unwrap();
+    assert!(is_canonical_utc(created), "{created}");
+    let decoded: clipsync_protocol::CreatePairingResponse =
+        serde_json::from_value(create.clone()).unwrap();
+    let expires_at = SystemTime::from(decoded.expires_at);
+    assert!(
+        before + ttl <= expires_at && expires_at <= after + ttl,
+        "{created} outside [{before:?}, {after:?}] + {PAIRING_TTL_SECS}s"
+    );
+    let join: serde_json::Value = client
+        .post(format!("{url}/v1/pairing/join"))
+        .json(&join_request(create["pairing_code"].as_str().unwrap()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(join["expires_at"].as_str(), Some(created), "{join}");
+    server.abort();
+}
