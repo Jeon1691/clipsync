@@ -274,7 +274,7 @@ fn initialized_identity_and_paired_devices_are_visible_in_both_output_modes() {
         room_id: RoomId::new(),
         epoch: 3,
         role: DeviceRole::Owner,
-        created_at: chrono::Utc::now(),
+        created_at: clipsync_protocol::Timestamp::now(),
         device_token: "synthetic fixture token".into(),
         peers: vec![peer.clone()],
     };

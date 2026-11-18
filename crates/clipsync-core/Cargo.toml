@@ -13,7 +13,6 @@ description = "ClipSync sync engine, pairing flow, and domain client"
 [dependencies]
 base64.workspace = true
 blake3.workspace = true
-chrono.workspace = true
 hex.workspace = true
 clipsync-clipboard.workspace = true
 clipsync-crypto.workspace = true
@@ -30,6 +29,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+time.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 ulid.workspace = true

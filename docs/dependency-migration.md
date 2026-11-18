@@ -101,7 +101,7 @@ Local validation on 2026-11-15 used Rust 1.100.0, with an actual Rust 1.95.0 che
   compilation/runtime was not performed here.
 - `cargo audit --json` and `cargo audit --file fuzz/Cargo.lock --json` both report
   `vulnerabilities.count = 0` and `warnings = {}`. Neither audit used ignores at
-  the time; the later chrono exception is recorded in
+  the time; the later, since retired, chrono exception is recorded in
   [security alerts](security-alerts.md#unmaintained-time-crates).
   The fuzz workspace does not depend on the desktop/mobile stack and its lockfile
   remains unchanged.

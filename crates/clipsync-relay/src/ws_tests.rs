@@ -410,8 +410,8 @@ async fn text_queues_offline_but_binary_requires_an_online_peer() {
         room_id: rid.clone(),
         sender_device_id: owner,
         recipient: Recipient::Broadcast,
-        sent_at: chrono::Utc::now(),
-        expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+        sent_at: clipsync_protocol::Timestamp::now(),
+        expires_at: clipsync_protocol::Timestamp::now() + time::Duration::seconds(60),
         item_kind: ItemKind::Text,
         seq: 1,
     };
@@ -535,7 +535,7 @@ async fn missing_peers_and_pairing_abort_report_explicit_control_outcomes() {
         .unwrap();
     receive(&mut rx).await;
     assert!(state.revoke(rid.as_str(), member.as_str()));
-    let now = chrono::Utc::now();
+    let now = clipsync_protocol::Timestamp::now();
     let routing = RoutingHeader {
         version: clipsync_protocol::PROTOCOL_VERSION,
         message_id: MessageId::new(),
@@ -544,7 +544,7 @@ async fn missing_peers_and_pairing_abort_report_explicit_control_outcomes() {
         sender_device_id: owner,
         recipient: Recipient::Broadcast,
         sent_at: now,
-        expires_at: now + chrono::Duration::seconds(60),
+        expires_at: now + time::Duration::seconds(60),
         item_kind: ItemKind::Text,
         seq: 1,
     };
@@ -835,8 +835,8 @@ async fn unauthenticated_forwarding_and_absent_pairing_peers_fail_without_invent
                 room_id: offer.room_id.clone(),
                 sender_device_id: owner.clone(),
                 recipient: Recipient::Broadcast,
-                sent_at: chrono::Utc::now(),
-                expires_at: chrono::Utc::now(),
+                sent_at: clipsync_protocol::Timestamp::now(),
+                expires_at: clipsync_protocol::Timestamp::now(),
                 item_kind: ItemKind::Files,
                 seq: 1,
             },
@@ -1077,7 +1077,7 @@ async fn regression_f88_revoked_network_peer_is_closed_cannot_send_and_cannot_re
         .unwrap()
         .unwrap();
     assert!(matches!(closed, ClientMessage::Close(_)));
-    let now = chrono::Utc::now();
+    let now = clipsync_protocol::Timestamp::now();
     let forbidden = ControlMessage::TextEnvelope {
         routing: RoutingHeader {
             version: clipsync_protocol::PROTOCOL_VERSION,
@@ -1087,7 +1087,7 @@ async fn regression_f88_revoked_network_peer_is_closed_cannot_send_and_cannot_re
             sender_device_id: member.clone(),
             recipient: Recipient::Broadcast,
             sent_at: now,
-            expires_at: now + chrono::Duration::seconds(60),
+            expires_at: now + time::Duration::seconds(60),
             item_kind: ItemKind::Text,
             seq: 1,
         },
@@ -1436,7 +1436,7 @@ async fn regression_f98_expiry_discards_pending_spake_and_prevents_admission_or_
     );
     // Advance the existing session's expiry boundary without a two-minute test.
     state.pairing_mut(sid.as_str()).unwrap().expires_at =
-        chrono::Utc::now() - chrono::Duration::seconds(1);
+        clipsync_protocol::Timestamp::now() - time::Duration::seconds(1);
     assert_eq!(
         handle_control(&state, &member_tx, &mut member_ctx, early, None)
             .await
@@ -1488,8 +1488,8 @@ async fn text_for_an_offline_peer_is_acked_peer_offline_when_the_queue_is_full()
         room_id: rid.clone(),
         sender_device_id: owner,
         recipient: Recipient::Broadcast,
-        sent_at: chrono::Utc::now(),
-        expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+        sent_at: clipsync_protocol::Timestamp::now(),
+        expires_at: clipsync_protocol::Timestamp::now() + time::Duration::seconds(60),
         item_kind: ItemKind::Text,
         seq: 1,
     };
@@ -1755,8 +1755,8 @@ async fn regression_a_client_with_many_rooms_gets_only_its_share_of_the_offline_
             room_id: rid,
             sender_device_id: owner,
             recipient: Recipient::Broadcast,
-            sent_at: chrono::Utc::now(),
-            expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+            sent_at: clipsync_protocol::Timestamp::now(),
+            expires_at: clipsync_protocol::Timestamp::now() + time::Duration::seconds(60),
             item_kind: ItemKind::Text,
             seq: 1,
         };
@@ -1871,7 +1871,7 @@ async fn regression_a_valid_hello_on_a_full_queue_never_blocks() {
     // although its replies cannot be queued.
     let (sid, greeting) = pairing_hello(&state);
     state.pairing_mut(sid.as_str()).unwrap().expires_at =
-        chrono::Utc::now() + chrono::Duration::from_std(PAIRING_LEFT).unwrap();
+        clipsync_protocol::Timestamp::now() + time::Duration::try_from(PAIRING_LEFT).unwrap();
     let slot = state.acquire_connection(TEST_CLIENT).unwrap();
     let (tx, _rx) = full_queue();
     let requests = vec![text(&greeting), text(&ControlMessage::Ping { ts: 1 })];
@@ -2097,7 +2097,7 @@ async fn a_pairing_socket_stalled_on_its_peer_closes_at_its_deadline() {
     let state = state();
     let (sid, requests, _unread) = pairing_with_stalled_peer(&state);
     state.pairing_mut(sid.as_str()).unwrap().expires_at =
-        chrono::Utc::now() + chrono::Duration::from_std(PAIRING_LEFT).unwrap();
+        clipsync_protocol::Timestamp::now() + time::Duration::try_from(PAIRING_LEFT).unwrap();
     let slot = state.acquire_connection(TEST_CLIENT).unwrap();
     let (tx, _rx) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
     let mut stream = futures_util::stream::iter(requests).chain(futures_util::stream::pending());
@@ -2196,7 +2196,7 @@ async fn a_silent_pairing_socket_is_closed_after_the_read_idle_limit() {
     });
     let (sid, greeting) = pairing_hello(&state);
     state.pairing_mut(sid.as_str()).unwrap().expires_at =
-        chrono::Utc::now() + chrono::Duration::from_std(PAIRING_LEFT).unwrap();
+        clipsync_protocol::Timestamp::now() + time::Duration::try_from(PAIRING_LEFT).unwrap();
     let slot = state.acquire_connection(TEST_CLIENT).unwrap();
     let (tx, _rx) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
     let mut stream =
@@ -2443,8 +2443,8 @@ mod liveness {
                 room_id: room.clone(),
                 sender_device_id: sender.clone(),
                 recipient: Recipient::Broadcast,
-                sent_at: chrono::Utc::now(),
-                expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+                sent_at: clipsync_protocol::Timestamp::now(),
+                expires_at: clipsync_protocol::Timestamp::now() + time::Duration::seconds(60),
                 item_kind: ItemKind::Text,
                 seq: 1,
             },
@@ -2679,13 +2679,13 @@ async fn queued_text_relays_header_instants_unchanged_and_canonical() {
 #[tokio::test]
 async fn webhook_events_stamp_ts_in_the_pinned_utc_offset_spelling() {
     use crate::timestamp_shape_tests::{is_utc_timestamp, UTC_OFFSET_SUFFIX};
-    use std::time::SystemTime;
+    use clipsync_protocol::Timestamp;
 
     let state = state();
     let (rid, owner, member, token, _) = room(&state);
     let (tx, mut rx) = mpsc::channel(32);
     let mut ctx = None;
-    let before = SystemTime::now();
+    let before = Timestamp::now();
     handle_control(&state, &tx, &mut ctx, hello(&owner, &rid, &token), None)
         .await
         .unwrap();
@@ -2697,8 +2697,8 @@ async fn webhook_events_stamp_ts_in_the_pinned_utc_offset_spelling() {
         room_id: rid.clone(),
         sender_device_id: owner,
         recipient: Recipient::Broadcast,
-        sent_at: chrono::Utc::now(),
-        expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+        sent_at: Timestamp::now(),
+        expires_at: Timestamp::now() + time::Duration::seconds(60),
         item_kind: ItemKind::Text,
         seq: 1,
     };
@@ -2715,7 +2715,7 @@ async fn webhook_events_stamp_ts_in_the_pinned_utc_offset_spelling() {
     handle_control(&state, &tx, &mut ctx, revoke, None)
         .await
         .unwrap();
-    let after = SystemTime::now();
+    let after = Timestamp::now();
 
     let events = state.webhook_events.lock().unwrap().clone();
     let kinds: Vec<_> = events.iter().map(|event| event["type"].clone()).collect();
@@ -2723,7 +2723,7 @@ async fn webhook_events_stamp_ts_in_the_pinned_utc_offset_spelling() {
     for event in &events {
         let ts = event["ts"].as_str().unwrap();
         assert!(is_utc_timestamp(ts, UTC_OFFSET_SUFFIX), "{event}");
-        let at = SystemTime::from(chrono::DateTime::parse_from_rfc3339(ts).unwrap());
+        let at: Timestamp = ts.parse().unwrap();
         assert!(before <= at && at <= after, "{event}");
     }
 }

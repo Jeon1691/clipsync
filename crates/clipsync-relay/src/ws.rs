@@ -20,7 +20,7 @@ use tracing::{debug, warn};
 
 use clipsync_protocol::{
     AckStatus, ClientRole, ControlMessage, DeviceId, DeviceRole, ErrorBody, ItemKind, MessageId,
-    PeerInfo, QueuedEnvelope, FRAME_HARD_CAP,
+    PeerInfo, QueuedEnvelope, Timestamp, FRAME_HARD_CAP,
 };
 
 use crate::auth::verify_token;
@@ -137,7 +137,7 @@ struct PairingArrival {
     /// Frames the peer sent before this socket arrived, in send order: the
     /// commitment always precedes the SPAKE message it commits to.
     pending: Vec<ControlMessage>,
-    expires_at: chrono::DateTime<chrono::Utc>,
+    expires_at: Timestamp,
 }
 
 fn register_pairing_connection(
@@ -154,7 +154,7 @@ fn register_pairing_connection(
     if session.room_id.as_str() != conn.room_id {
         return Err("pairing room mismatch".into());
     }
-    if session.expires_at < chrono::Utc::now() {
+    if session.expires_at < Timestamp::now() {
         session.clear_pending();
         return Err("pairing expired".into());
     }
@@ -566,9 +566,9 @@ async fn handle_control_from(
             };
             if claims.typ == "pair" {
                 let arrival = register_pairing_connection(state, &mut conn, tx, role)?;
-                let remaining = (arrival.expires_at - chrono::Utc::now())
-                    .to_std()
-                    .unwrap_or_default();
+                // A session already past its expiry has no time left.
+                let remaining =
+                    Duration::try_from(arrival.expires_at - Timestamp::now()).unwrap_or_default();
                 conn.pairing_deadline = Some(tokio::time::Instant::now() + remaining);
                 let hello_ok = ControlMessage::HelloOk {
                     room_id: claims.rid.clone(),
@@ -627,7 +627,7 @@ async fn handle_control_from(
                     "device_id": conn.device_id,
                     "item_kind": null,
                     "status": "ok",
-                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "ts": Timestamp::now().to_rfc3339(),
                 }));
             }
             *ctx = Some(conn);
@@ -724,7 +724,7 @@ async fn handle_control_from(
                 "item_kind": "text",
                 "encrypted_size": ciphertext.len(),
                 "status": "ok",
-                "ts": chrono::Utc::now().to_rfc3339(),
+                "ts": Timestamp::now().to_rfc3339(),
             }));
             Ok(())
         }
@@ -783,7 +783,7 @@ async fn handle_control_from(
                 "room_id": c.room_id,
                 "device_id": device_id.as_str(),
                 "status": "ok",
-                "ts": chrono::Utc::now().to_rfc3339(),
+                "ts": Timestamp::now().to_rfc3339(),
             }));
             Ok(())
         }
@@ -836,7 +836,7 @@ async fn forward_pairing_or_peer(
             if session.room_id.as_str() != c.room_id {
                 return Err("pairing room mismatch".into());
             }
-            if session.expires_at < chrono::Utc::now() {
+            if session.expires_at < Timestamp::now() {
                 session.clear_pending();
                 return Err("pairing expired".into());
             }

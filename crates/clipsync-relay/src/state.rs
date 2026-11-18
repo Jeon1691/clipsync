@@ -5,7 +5,7 @@ use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use chrono::{DateTime, Utc};
+use clipsync_protocol::Timestamp;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use rand::Rng;
@@ -46,7 +46,7 @@ const ROOM_EVICTION_ATTEMPTS: usize = 4;
 /// One offline text envelope, charged to the client that sent it.
 struct QueuedText {
     envelope: QueuedEnvelope,
-    expires_at: DateTime<Utc>,
+    expires_at: Timestamp,
     /// The sender's client key (see [`client_key`]).
     sender: IpAddr,
 }
@@ -165,7 +165,7 @@ pub struct PairingSession {
     pub session_id: PairingSessionId,
     pub room_id: RoomId,
     pub code: String,
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
     pub attempts: u32,
     pub creator: PeerInfo,
     pub joiner: Option<PeerInfo>,
@@ -202,7 +202,7 @@ pub struct Room {
     pub epoch: u64,
     pub default_ttl: u64,
     /// When the device tokens issued for this room expire.
-    pub tokens_expire_at: DateTime<Utc>,
+    pub tokens_expire_at: Timestamp,
     /// When the room was last used, on the relay's activity clock: a device
     /// registering, sending or leaving.
     pub(crate) last_active: AtomicU64,
@@ -394,7 +394,7 @@ impl RelayState {
         if !self.has_pairing_capacity() {
             // Expired sessions linger until the next GC pass; never let them
             // refuse a creation.
-            self.prune_pairings(Utc::now());
+            self.prune_pairings(Timestamp::now());
         }
         while self.pairing_by_code.len() < MAX_ACTIVE_PAIRING_SESSIONS
             && !self.has_pairing_capacity()
@@ -411,7 +411,7 @@ impl RelayState {
             return Err(CreateError::Full);
         };
         let room_id = RoomId::new();
-        let expires_at = Utc::now() + chrono::Duration::seconds(PAIRING_TTL_SECS as i64);
+        let expires_at = Timestamp::now() + time::Duration::seconds(PAIRING_TTL_SECS as i64);
         let session = PairingSession {
             session_id: req.pairing_session_id.clone(),
             room_id: room_id.clone(),
@@ -575,7 +575,7 @@ impl RelayState {
             .pairing_by_code
             .get_mut(&req.pairing_code)
             .ok_or(JoinError::NotFound)?;
-        if session.expires_at < Utc::now() {
+        if session.expires_at < Timestamp::now() {
             return Err(JoinError::Expired);
         }
         if session.completed {
@@ -661,7 +661,7 @@ impl RelayState {
         if expected_room.is_some_and(|room| room != session.room_id.as_str()) {
             return None;
         }
-        if session.expires_at < Utc::now() {
+        if session.expires_at < Timestamp::now() {
             session.clear_pending();
             return None;
         }
@@ -718,8 +718,8 @@ impl RelayState {
                 epoch: 1,
                 default_ttl: session.ttl_secs,
                 // Read after both tokens were issued, so neither outlives it.
-                tokens_expire_at: Utc::now()
-                    + chrono::Duration::seconds(DEVICE_TOKEN_TTL_SECS + TOKEN_EXPIRY_GRACE_SECS),
+                tokens_expire_at: Timestamp::now()
+                    + time::Duration::seconds(DEVICE_TOKEN_TTL_SECS + TOKEN_EXPIRY_GRACE_SECS),
                 last_active: AtomicU64::new(self.next_activity()),
             },
         );
@@ -879,12 +879,12 @@ impl RelayState {
         room_id: &str,
         device_id: &str,
         env: QueuedEnvelope,
-        expires_at: DateTime<Utc>,
+        expires_at: Timestamp,
         sender: IpAddr,
     ) -> bool {
         let sender = client_key(sender);
-        let now = Utc::now();
-        let expires_at = expires_at.min(now + chrono::Duration::seconds(QUEUE_TTL_SECS as i64));
+        let now = Timestamp::now();
+        let expires_at = expires_at.min(now + time::Duration::seconds(QUEUE_TTL_SECS as i64));
         let key = member_key(room_id, device_id);
         let replaced_sender = self.queue.get(&key).map(|queued| queued.sender);
         if replaced_sender != Some(sender)
@@ -930,7 +930,7 @@ impl RelayState {
     pub fn take_queue(&self, room_id: &str, device_id: &str) -> Option<QueuedEnvelope> {
         let (_, queued) = self.queue.remove(&member_key(room_id, device_id))?;
         self.uncharge_sender(queued.sender);
-        if queued.expires_at < Utc::now() {
+        if queued.expires_at < Timestamp::now() {
             self.expired.fetch_add(1, Ordering::Relaxed);
             None
         } else {
@@ -972,7 +972,7 @@ impl RelayState {
     }
 
     pub fn gc(&self) {
-        let now = Utc::now();
+        let now = Timestamp::now();
         self.prune_pairings(now);
         self.join_budget
             .prune(self.join_limits.client_fail_window());
@@ -983,7 +983,7 @@ impl RelayState {
     }
 
     /// Drop expired and completed pairing sessions from both indexes.
-    fn prune_pairings(&self, now: DateTime<Utc>) {
+    fn prune_pairings(&self, now: Timestamp) {
         let mut removed = Vec::new();
         self.pairing_by_code.retain(|code, session| {
             let keep = session.expires_at > now && !session.completed;
@@ -1002,7 +1002,7 @@ impl RelayState {
     /// Drop rooms nobody can use again: every device revoked, or every device
     /// token expired while no device is still connected. Tokens are only
     /// issued at pairing, so neither kind of room can be re-entered.
-    fn prune_rooms(&self, now: DateTime<Utc>) {
+    fn prune_rooms(&self, now: Timestamp) {
         self.rooms.retain(|room_id, room| {
             let any_active = room.devices.values().any(|device| !device.revoked);
             let tokens_valid = room.tokens_expire_at > now;
@@ -1010,7 +1010,7 @@ impl RelayState {
         });
     }
 
-    fn prune_queue(&self, now: DateTime<Utc>) {
+    fn prune_queue(&self, now: Timestamp) {
         let mut expired = Vec::new();
         self.queue.retain(|_, queued| {
             let keep = queued.expires_at > now;

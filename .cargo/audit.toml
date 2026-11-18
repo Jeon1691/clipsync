@@ -8,13 +8,5 @@
 # every entry below is a single, time-boxed advisory exception.
 
 [advisories]
-ignore = [
-    # RUSTSEC-2026-0543: chrono is unmaintained (all versions; no patched release).
-    # Reason: no maintained drop-in replacement exists, and replacing chrono
-    #   touches the RFC 3339 timestamps in the wire-format and persisted serde
-    #   types, so it needs its own reviewed PR with migration test vectors.
-    # Owner: maintainer.
-    # Review by: 2027-02-15 (remove this entry or renew it with a new date).
-    # Tracking: https://github.com/Jeon1691/clipsync/issues/38
-    "RUSTSEC-2026-0543",
-]
+# No advisory is currently ignored (the chrono exception, #38, is retired).
+ignore = []

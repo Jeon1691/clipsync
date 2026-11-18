@@ -34,7 +34,9 @@ async fn deliver_event(
     event: serde_json::Value,
 ) -> anyhow::Result<()> {
     let body = serde_json::to_vec(&event)?;
-    let ts = chrono::Utc::now().timestamp().to_string();
+    let ts = clipsync_protocol::Timestamp::now()
+        .unix_timestamp()
+        .to_string();
     let event_id = ulid::Ulid::generate().to_string();
     let mut mac =
         HmacSha256::new_from_slice(secret.as_bytes()).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -278,7 +280,7 @@ mod tests {
             assert_eq!(header("content-type:"), "application/json");
             let timestamp = header("x-clipsync-timestamp:");
             let seconds: i64 = timestamp.parse().unwrap();
-            assert!((chrono::Utc::now().timestamp() - seconds).abs() < 10);
+            assert!((clipsync_protocol::Timestamp::now().unix_timestamp() - seconds).abs() < 10);
             let event_id = header("x-clipsync-event-id:");
             assert!(ulid::Ulid::from_string(&event_id).is_ok());
             let mut mac = HmacSha256::new_from_slice(b"synthetic webhook secret").unwrap();

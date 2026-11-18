@@ -152,7 +152,7 @@ impl HandshakeTracker {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use clipsync_protocol::Timestamp;
     use clipsync_protocol::{DeviceRole, RoomId};
 
     const CAPS: &[u8] = br#"{"envelope_versions":[1,2]}"#;
@@ -166,7 +166,7 @@ mod tests {
             room_id: RoomId::new(),
             epoch: 1,
             role: DeviceRole::Owner,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
             device_token: "token".into(),
             peers: peers
                 .iter()
