@@ -24,7 +24,6 @@ axum.workspace = true
 axum-server = { version = "0.9.2", default-features = false, features = ["tls-rustls-ring"] }
 clap.workspace = true
 base64.workspace = true
-chrono.workspace = true
 clipsync-protocol.workspace = true
 dashmap.workspace = true
 futures-util.workspace = true
@@ -39,6 +38,7 @@ serde_json.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
+time.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 tracing.workspace = true

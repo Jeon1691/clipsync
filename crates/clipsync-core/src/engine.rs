@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{Duration as ChronoDuration, Utc};
 use parking_lot::Mutex;
+use time::Duration as TimeDuration;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
@@ -20,8 +20,8 @@ use clipsync_daemon::{
 use clipsync_protocol::{
     decode_chunk_frame, envelope_aad, AckStatus, ClientRole, ControlMessage, DeviceId,
     EnvelopeFrame, FileManifest, HandshakeCapabilities, ImageManifest, ItemKind, ManifestPlain,
-    MessageId, PeerInfo, Recipient, RoutingHeader, TransferId, ENVELOPE_VERSION_AUTHENTICATED,
-    ENVELOPE_VERSION_LEGACY, PROTOCOL_VERSION,
+    MessageId, PeerInfo, Recipient, RoutingHeader, Timestamp, TransferId,
+    ENVELOPE_VERSION_AUTHENTICATED, ENVELOPE_VERSION_LEGACY, PROTOCOL_VERSION,
 };
 use clipsync_storage::{LocalStore, RoomRecord};
 use clipsync_transfer::{
@@ -470,8 +470,8 @@ async fn send_item(
 ) -> Result<(), CoreError> {
     let transfer_id = TransferId::new();
     let message_id = MessageId::new();
-    let now = Utc::now();
-    let ttl = ChronoDuration::seconds(clipsync_protocol::DEFAULT_TTL_SECS as i64);
+    let now = Timestamp::now();
+    let ttl = TimeDuration::seconds(clipsync_protocol::DEFAULT_TTL_SECS as i64);
     let routing = RoutingHeader {
         version: stamp.version,
         message_id,
@@ -635,7 +635,7 @@ impl EnvelopeStamp {
         policy: EnvelopePolicy,
     ) -> Result<Self, CoreError> {
         let (seq, authenticated) =
-            store.reserve_send_as(&room.room_id, sequence_floor(Utc::now()), |state| {
+            store.reserve_send_as(&room.room_id, sequence_floor(Timestamp::now()), |state| {
                 version_for_room_state(Some(state), room, local, policy)
                     == ENVELOPE_VERSION_AUTHENTICATED
             })?;
@@ -675,7 +675,7 @@ impl Inbound<'_> {
             self.room,
             self.local,
             Some(ItemKind::Text),
-            Utc::now(),
+            Timestamp::now(),
         )?;
         check_version(self.store, routing, self.policy)?;
         let item = open_text(self.epoch_key, routing, nonce_hex, ct_hex)?;
@@ -693,7 +693,7 @@ impl Inbound<'_> {
         nonce_hex: &str,
         ct_hex: &str,
     ) -> Result<ManifestPlain, CoreError> {
-        check_header(routing, self.room, self.local, None, Utc::now())?;
+        check_header(routing, self.room, self.local, None, Timestamp::now())?;
         check_version(self.store, routing, self.policy)?;
         let manifest = open_manifest(self.epoch_key, routing, nonce_hex, ct_hex)?;
         if manifest.item_kind != routing.item_kind {

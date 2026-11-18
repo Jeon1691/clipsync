@@ -1,6 +1,6 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
-use chrono::Utc;
+use clipsync_protocol::Timestamp;
 use clipsync_protocol::{DeviceRole, RoomId};
 use clipsync_storage::{AppConfig, AppPaths, LocalStore, RoomRecord, StateFile};
 
@@ -20,7 +20,7 @@ fn room() -> RoomRecord {
         room_id: RoomId::new(),
         epoch: 1,
         role: DeviceRole::Owner,
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
         device_token: "synthetic-device-token".into(),
         peers: vec![],
     }
