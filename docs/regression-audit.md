@@ -1,6 +1,6 @@
-# Six-month regression-test audit — 2026-11-16
+# Six-month regression-test audit — 2026-11-18
 
-The complete ledger now registers **62 of 108 distinct corrected defects (57.41%)**,
+The complete ledger now registers **85 of 134 distinct corrected defects (63.43%)**,
 meeting the Silver requirement of at least 50%. [The machine-readable ledger](regressions.json)
 and [CI checker](../scripts/check-regressions.py) preserve the full denominator
 and derive credit from concrete test references, not a manually entered Boolean.
@@ -9,15 +9,18 @@ that an assertion reproduces a historical defect.
 
 ## Scope and counting rules
 
-- Follow-up window: 2026-05-16 through 2026-11-16. The original frozen baseline
-  used 2026-05-15 through 2026-11-15; no rows leave the denominator because the
+- Follow-up window: 2026-05-18 through 2026-11-18. The previous follow-up used
+  2026-05-16 through 2026-11-16 and the original frozen baseline used 2026-05-15
+  through 2026-11-15; no rows leave the denominator because the
   project began on 2026-09-16. The
   baseline reviewed all 61 non-merge commits through
   `639000d60f1af1cc856fe20c61b60c84f9b2ab7b` and PR #16's five commits through
   `3faac58836d94457c16e890f4d1380151236e5ea`. The source-history additions below
   also register the public PR #21 publication corrections and the integrated
   reconstruction, relay revocation/FIFO, and mobile fixture corrections through
-  `2e42f06061a636a5f58b3aaf96a40d48fd75e00c`. Documentation confirmations,
+  `2e42f06061a636a5f58b3aaf96a40d48fd75e00c`. The November security series
+  adds merged PRs #25–#42 through `5ca77de29a74141da8df24be9e12d2330df960bb`;
+  those rows cite the PR merge commits. Documentation confirmations,
   coverage expansions, compatibility features and release bumps add no defects.
   IDs follow ledger append order, not commit chronology; a cherry-pick does not
   create an additional defect.
@@ -41,9 +44,9 @@ that an assertion reproduces a historical defect.
 
 | Scope | Registered defects | Complete defects | Fraction |
 | --- | ---: | ---: | ---: |
-| Broad ledger | 62 | 108 | 57.41% |
-| Project runtime/security | 48 | 62 | 77.42% |
-| All project-authored corrections | 62 | 95 | 65.26% |
+| Broad ledger | 85 | 134 | 63.43% |
+| Project runtime/security | 71 | 86 | 82.56% |
+| All project-authored corrections | 85 | 121 | 70.25% |
 
 The original baseline increased from **24/84 (28.57%)** to **44/84 (52.38%)** without
 removing defects or treating test variants as extra bugs. The newly covered rows
@@ -158,6 +161,50 @@ behind the Proxmox Cloudflare Tunnel and an opaque client-written
 `X-Forwarded-For` hop. Both have focused tests but are not separate defects,
 because no released code contained them. The complete total is
 **62/108 (57.41%)**.
+
+The November security series (PRs #25–#42) adds F109–F134. Each PR deferred
+its ledger edit so parallel branches would not collide on IDs and counts, and
+listed its regression tests instead. Every listed name was checked against the
+merged source and the compiled test inventory, with its package, target and
+platform scope. Rows follow PR order, one per distinct corrected invariant:
+
+- #25: room routes bound to authenticated members per room (F109), silent and
+  stalled member sockets (F110), transfer commit atomicity (F111), names the
+  filesystem folds together (F112) and unchecked manifest size sums (F113).
+- #27: authenticated envelope headers with expiry/addressing checks (F114) and
+  replay state that survives restarts (F115).
+- #28: the out-of-band verification code (F116), raw relay-supplied text (F117),
+  identity reads that rewrote the configuration (F118), storage reads and
+  replaces racing removal or Windows sharing (F119), and the transport close
+  handshake (F120).
+- #29: pairing-creation budgets (F121), bounded relay state (F122) and
+  WebSocket connection caps with read-loop deadlines (F123).
+- #30 `/metrics` access (F124), #31 private identity/pairing/log files (F125),
+  #32 plaintext relay URLs (F126), #33 notification injection (F127), #34
+  wire-identifier validation (F128), #35 the SPAKE2 commitment (F129) and
+  explicit boolean configuration values (F130), #36 with #40 macOS quarantine
+  (F131), #37 the live-presence fixture (F132), #39 the `--ttl` overflow panic
+  (F133) and #42 listener-fixture port races (F134).
+
+Review findings on the same unmerged change remain variants of their row, as for
+F108. A fix to code already merged in this series counts when it corrects a
+distinct invariant: F129 closes a search the merged F116 code allowed. #40 closes
+a gap in #36's quarantine invariant and shares F131. #26 is F108, which its own
+PR registered. #41 only adds coverage pins, registered as extra F123 checks, and
+#43's timestamp vectors are a coverage expansion. In #39, removing the
+unmaintained `humantime` and time-boxing the `chrono` advisory are dependency
+maintenance; only the overflow panic is a defect. F118 is a plausible product
+cause of the F94 fixture symptom; F94 is unchanged.
+
+Three rows stay **uncredited**. F120's reset is load-dependent and has no
+deterministic focused transport regression. F132 and F134 are intermittent
+fixture races (4/200 runs and 12/480 stressed runs before their fixes). The
+tests their PRs proposed are the affected tests themselves, and those usually
+pass on the old fixtures, so the F94/F101 rule applies. The other 23 rows carry
+197 checks. On macOS, `--verify-tests` discovers all 194 macOS-scoped checks as
+compiled non-ignored tests; the three Windows-only checks belong to the Windows
+CI job. Unix pty, POSIX-mode and macOS quarantine tests are scoped to those
+platforms. The complete total is **85/134 (63.43%)**.
 
 The scope table is derived from the ledger: runtime/security includes the
 `Runtime` and `Runtime-PR16` rows; project-authored corrections include every
@@ -302,10 +349,7 @@ whether the assertion meaningfully protects the stated behavior.
 | F95 | Runtime | [a0022e6](https://github.com/Jeon1691/clipsync/commit/a0022e65146742d61bfe45fb6e3a91218db0dbe7) | Linux backend metadata always identified xclip | **Registered** — [isolated backend/session contracts](../crates/clipsync-clipboard/src/detect.rs) reproduce old metadata errors on Linux. |
 | F96 | Runtime | [a0022e6](https://github.com/Jeon1691/clipsync/commit/a0022e65146742d61bfe45fb6e3a91218db0dbe7) | Native clipboard file reads blocked on writer-less FIFOs | **Registered** — [arboard file reader](../crates/clipsync-clipboard/src/detect.rs) and [AppKit reader](../crates/clipsync-clipboard/src/macos.rs) have bounded real FIFO regressions, macOS. |
 | F97 | Build/CI | [8488848](https://github.com/Jeon1691/clipsync/commit/8488848b10d6cdcdf2b99391b0507fddbbb6472e) | Coverage source classification accepted noncanonical aliases and duplicate build roots | **Registered** — [adversarial report fixtures](../scripts/tests/test_product_coverage.py) reject test aliases and duplicate product files without changing valid real totals, Linux/macOS. |
-
 | F98 | Runtime | [4cca45c](https://github.com/Jeon1691/clipsync/commit/4cca45c6937226657d32b484f0d2b8e0c3a72e65) | Early joiner socket lost creator presence and its first SPAKE message | **Registered** — [actual WebSocket ordering](../crates/clipsync-relay/tests/pairing_order.rs) and [full Core exchange/persisted keys](../crates/clipsync-relay/src/ws_tests.rs) use deterministic fences and private credentials, all three CI platforms. |
-
-
 | F99 | Runtime | [c335d3c](https://github.com/Jeon1691/clipsync/commit/c335d3cca102d177b36eb457b8f18627ea52039f) | Linux ignored malformed configured extra CA roots | **Registered** — [isolated single/mixed certificate fixtures](../crates/clipsync-transport/src/tls.rs) now reject every invalid trust anchor before client construction; valid private-CA, hostname and issuer contracts remain, all platforms. |
 | F100 | Build/CI | [c335d3c](https://github.com/Jeon1691/clipsync/commit/c335d3cca102d177b36eb457b8f18627ea52039f) | Windows deadline fixture assumed nanosecond SystemTime precision | **Uncredited** — a representable microsecond step fixes the fixture while preserving the exact production boundary; no independent fixture regression is claimed. |
 | F101 | Build/CI | 5294762, 248fc9e, 4cca45c | Loopback fixtures closed sockets before consumers received queued terminal frames | **Uncredited** — consumer fences preserve existing product assertions; no deterministic isolated old-fixture regression is claimed. |
@@ -313,10 +357,35 @@ whether the assertion meaningfully protects the stated behavior.
 | F103 | Dependency | [276c37c](https://github.com/Jeon1691/clipsync/commit/276c37c92f975ee745fc91c7a126165e34e5b341) | UniFFI randomized descendant-check emission prevented reproducible build output | **Uncredited by this inventory** — [three macro regressions](../vendor/uniffi_internal_macros/src/node.rs) and [two semantic contracts](../vendor/uniffi_internal_macros/tests/node_descendants.rs) run in the separate locked upstream workspace; actual RED/GREEN expansion and binary comparison evidence is retained. |
 | F104 | Build/CI | [276c37c](https://github.com/Jeon1691/clipsync/commit/276c37c92f975ee745fc91c7a126165e34e5b341) | Independent-container failure cleanup discarded differing binary bytes | **Registered** — [actual publication-wrapper diagnostic lifecycle](../scripts/tests/test_build_reconstruction.py) preserves both differing payloads and bounded diagnostics without success markers, Linux/macOS; synthetic orchestration is not build reproducibility proof. |
 | F105 | Build/CI | [8e63e94](https://github.com/Jeon1691/clipsync/commit/8e63e94894cc5a752627df975cdfc3429966fe43) | Process-locale decoding rejected valid UTF-8 regression sources on Windows | **Registered** — [strict UTF-8 evidence contracts](../scripts/tests/test_regression_policy.py) cover real ASCII-locale subprocesses, Windows1252 simulation and malformed-source rejection without modifying source bytes, all platforms. |
-
 | F106 | Build/CI | [7f6e976](https://github.com/Jeon1691/clipsync/commit/7f6e9767a28a5989c41fde1811924c2fa8058101) | Root-owned exported directories broke host cleanup after matching builds | **Registered** — [caller ownership and malformed-ID contracts](../scripts/tests/test_build_reconstruction.py), plus separate real Docker permission RED/GREEN; modes and payload hashes stay unchanged, Linux/macOS orchestration. |
 | F107 | Runtime | [bfccecc](https://github.com/Jeon1691/clipsync/commit/bfccecc794d00618efdfe877c615b61bc4613d3d) | Blocking pairing credential persistence triggered the live-connection watchdog under native keychain load | **Uncredited** — old-source concurrent e2e failure and corrected 30-test pass are retained; macOS CI runs the bounded workload, but scheduler/keychain timing is not a deterministic focused fixture. |
 | F108 | Runtime | [4512d85](https://github.com/Jeon1691/clipsync/commit/4512d852324b94b0a88e942b3128d33c1cad3461) | Uncounted failed pairing joins allowed sweeping the 6-digit SPAKE2 password space within one pairing TTL | **Registered** — [one-client sweep refusing the correct code](../crates/clipsync-relay/src/http_tests.rs) failed on unchanged `76c63f9`; [relay-wide budget across many addresses](../crates/clipsync-relay/src/state_tests.rs), all platforms. |
+| F109 | Runtime | [22671a1](https://github.com/Jeon1691/clipsync/commit/22671a15e1c76124b42232842cf279a57eaadc2f) | Relay routes and queued text keyed only by device ID let a pairing socket or another room take over a member's route | **Registered** — [pairing-token takeover, cross-room shadowing, room-scoped queue, completed pairing socket and multi-socket/revocation routing](../crates/clipsync-relay/tests/connection_registry.rs) and [real one-shot push/pull during daemon reconnect](../crates/clipsync-relay/tests/e2e.rs), all platforms. |
+| F110 | Runtime | [22671a1](https://github.com/Jeon1691/clipsync/commit/22671a15e1c76124b42232842cf279a57eaadc2f) | Silent or stalled member sockets kept a member online and lost or blocked delivery | **Registered** — [silent-socket queueing, bounded stall delay and evicted full-queue close](../crates/clipsync-relay/src/ws_tests.rs) failed at `a5875f9`, all platforms. |
+| F111 | Runtime | [22671a1](https://github.com/Jeon1691/clipsync/commit/22671a15e1c76124b42232842cf279a57eaadc2f) | Concurrent or retried commits of one transfer ID mixed, stranded or retired each other's files | **Registered** — [concurrent receivers, retry and cancelled commit](../crates/clipsync-transfer/tests/regressions.rs) and [publish lock, interrupted replacement, staging reclaim and blocked destinations](../crates/clipsync-transfer/src/staging.rs), all platforms; symlinked lock on Unix. |
+| F112 | Runtime | [22671a1](https://github.com/Jeon1691/clipsync/commit/22671a15e1c76124b42232842cf279a57eaadc2f) | Manifest names folded to one entry by the filesystem overwrote each other | **Registered** — [case-only and Unicode-normalization collisions](../crates/clipsync-transfer/tests/regressions.rs) failed on APFS before the fix, all platforms. |
+| F113 | Runtime | [22671a1](https://github.com/Jeon1691/clipsync/commit/22671a15e1c76124b42232842cf279a57eaadc2f) | Overflowing manifest file sizes panicked instead of failing integrity | **Registered** — [wrapping size sum](../crates/clipsync-transfer/tests/regressions.rs) failed with an overflow panic, all platforms. |
+| F114 | Runtime | [2431cc3](https://github.com/Jeon1691/clipsync/commit/2431cc30bcb7bc4a9f30ce68c670f1f7f61a9615) | Envelope routing headers were unauthenticated and expiry/addressing unchecked | **Registered** — [relay-rewritten, expired, misaddressed and downgrade envelopes](../crates/clipsync-core/tests/support/engine_behavior.rs), [AAD field binding](../crates/clipsync-protocol/src/envelope.rs), [chunk headers](../crates/clipsync-transfer/src/lib.rs) and [handshake attribution](../crates/clipsync-core/src/handshake.rs), all platforms. |
+| F115 | Runtime | [2431cc3](https://github.com/Jeon1691/clipsync/commit/2431cc30bcb7bc4a9f30ce68c670f1f7f61a9615) | In-memory 120-second replay cache allowed replay after the window or a restart | **Registered** — [replay within a session and after restart](../crates/clipsync-core/tests/support/engine_behavior.rs) and [persisted, monotonic, cross-process replay state](../crates/clipsync-storage/src/replay.rs), all platforms. |
+| F116 | Runtime | [6662fff](https://github.com/Jeon1691/clipsync/commit/6662fff05d94456b286049bf8e97ae869583f5d8) | Pairing committed without an out-of-band verification code (relay MITM, silent code guess) | **Registered** — [SAS derivation and vectors](../crates/clipsync-crypto/src/pairing.rs), [commit only after confirmation](../crates/clipsync-core/src/pairing.rs), [CLI prompts](../crates/clipsync-cli/src/sas_prompt.rs) and [pty type-ahead/piped answers](../crates/clipsync-cli/tests/background_create.rs) (Unix), [desktop](../crates/clipsync-desktop/src/main.rs), [mobile](../crates/clipsync-mobile/src/lib.rs) and [real-relay e2e](../crates/clipsync-relay/tests/e2e.rs); console flush on Windows. |
+| F117 | Runtime | [6662fff](https://github.com/Jeon1691/clipsync/commit/6662fff05d94456b286049bf8e97ae869583f5d8) | Relay-supplied names, error text, codes and IDs were unvalidated and printed raw | **Registered** — [inert display and column bound](../crates/clipsync-core/src/untrusted_text.rs), [pinned peer identity and refused codes/IDs](../crates/clipsync-core/src/pairing.rs), [CLI code-line isolation](../crates/clipsync-cli/src/sas_prompt.rs) and [pty hostile name](../crates/clipsync-cli/tests/sas_terminal.rs) (Unix), desktop and mobile. |
+| F118 | Runtime | [6662fff](https://github.com/Jeon1691/clipsync/commit/6662fff05d94456b286049bf8e97ae869583f5d8) | Identity reads re-saved config.toml and undid a concurrent pairing's sync setting | **Registered** — [identity read leaves configuration untouched](../crates/clipsync-core/src/lib.rs) failed on `b30977d`, all platforms. |
+| F119 | Runtime | [6662fff](https://github.com/Jeon1691/clipsync/commit/6662fff05d94456b286049bf8e97ae869583f5d8) | Storage reads/replaces failed on a removed or in-use file (exists-then-read race, Windows sharing) | **Registered** — [removed pairing file](../crates/clipsync-storage/src/store.rs) and [retry helper](../crates/clipsync-storage/src/sharing.rs) on all platforms; [replace-while-open](../crates/clipsync-storage/src/secrets.rs) and delete-pending bounds on Windows. |
+| F120 | Runtime | [6662fff](https://github.com/Jeon1691/clipsync/commit/6662fff05d94456b286049bf8e97ae869583f5d8) | Closing relay connection dropped its socket right after Close and could lose the preceding frame | **Uncredited** — load-dependent reset; pairing rejection tests improved 5/96 failures to 0/96 but no deterministic focused transport regression exists. |
+| F121 | Runtime | [0937556](https://github.com/Jeon1691/clipsync/commit/0937556e9b0f975b1abff78e89b23d9947b40828) | Unlimited pairing creation could exhaust the 6-digit code space | **Registered** — [per-client, /48 and relay-wide budgets and session cap](../crates/clipsync-relay/src/state_tests.rs), all platforms. |
+| F122 | Runtime | [0937556](https://github.com/Jeon1691/clipsync/commit/0937556e9b0f975b1abff78e89b23d9947b40828) | pairing_by_id, rooms and the offline queue grew without bound | **Registered** — [GC, room-cap eviction and queue shares](../crates/clipsync-relay/src/state_tests.rs) and [per-client queue share](../crates/clipsync-relay/src/ws_tests.rs), all platforms. |
+| F123 | Runtime | [0937556](https://github.com/Jeon1691/clipsync/commit/0937556e9b0f975b1abff78e89b23d9947b40828) | Unlimited WebSocket connections; never-reading pre-hello sockets outlived the hello deadline | **Registered** — [connection caps and eviction](../crates/clipsync-relay/src/http_tests.rs), [read-loop deadlines (including #41 pins)](../crates/clipsync-relay/src/ws_tests.rs) and [member reserve](../crates/clipsync-relay/src/connection_limits_tests.rs), all platforms. |
+| F124 | Runtime | [c8d8434](https://github.com/Jeon1691/clipsync/commit/c8d8434857afeddda926933d38e8463597d07498) | /metrics was served unauthenticated on the client listener | **Registered** — [disabled by default and bearer-only](../crates/clipsync-relay/src/http_tests.rs) and [real relay binary](../crates/clipsync-relay/tests/binary_contract.rs), all platforms. |
+| F125 | Runtime | [ebd6f5e](https://github.com/Jeon1691/clipsync/commit/ebd6f5e434b372dbab2eb24bea8cf68fb302ca58) | Restored identity, pairing wait and worker log were written non-privately; the log held the code | **Registered** — [restored identity](../crates/clipsync-storage/src/secrets.rs), [pairing wait](../crates/clipsync-storage/src/store.rs) and [background log](../crates/clipsync-cli/tests/background_create.rs) failed on `76c63f9`, Unix. |
+| F126 | Runtime | [2664eca](https://github.com/Jeon1691/clipsync/commit/2664eca66854f266e12734b0cc53be77c0a8e1af) | Plaintext/scheme-less non-loopback relay URLs, redirects and ambient proxies were accepted | **Registered** — [URL policy](../crates/clipsync-transport/tests/relay_url_policy.rs), [no ws:// downgrade](../crates/clipsync-transport/tests/url_contract.rs), [CLI refusal](../crates/clipsync-cli/tests/local_commands.rs) and [no redirects/proxies](../crates/clipsync-core/src/pairing.rs), all platforms. |
+| F127 | Runtime | [1a62572](https://github.com/Jeon1691/clipsync/commit/1a62572737d4c592d7dc9a8fc87befb5419f8fd5) | Notification text was interpolated into script source and notify-send options | **Registered** — [constant AppleScript/PowerShell and `--` argv builders](../crates/clipsync-core/src/notify.rs), all platforms. |
+| F128 | Runtime | [5348f35](https://github.com/Jeon1691/clipsync/commit/5348f35fddc644a64c6611d910d74db0cdf6fc19) | Wire identifiers were not validated at decode and could reach routing and key paths | **Registered** — [decode-time ID rules](../crates/clipsync-protocol/tests/id_contract.rs), [room-key paths](../crates/clipsync-storage/src/store.rs) and [relay 400s](../crates/clipsync-relay/src/http_tests.rs), all platforms. |
+| F129 | Runtime | [ae09ad2](https://github.com/Jeon1691/clipsync/commit/ae09ad283ae9d52a91f8909b760a5cf81af5d673) | A relay could see the creator's SPAKE2 message first and search for matching codes | **Registered** — [commitment binding and vectors](../crates/clipsync-crypto/src/pairing.rs), [commit-before-reveal ordering](../crates/clipsync-core/src/pairing.rs), [relay buffering](../crates/clipsync-relay/tests/pairing_order.rs), [REDUCED gate](../crates/clipsync-cli/tests/confirm_protection.rs) and UI notices; pty gate on Unix. |
+| F130 | Runtime | [ae09ad2](https://github.com/Jeon1691/clipsync/commit/ae09ad283ae9d52a91f8909b760a5cf81af5d673) | config set stored false for any unrecognized boolean value | **Registered** — [explicit booleans only](../crates/clipsync-storage/tests/config_contract.rs), all platforms. |
+| F131 | Runtime | [d94556a](https://github.com/Jeon1691/clipsync/commit/d94556aaefee181abdfee4797b79a67e7740741d), [c97bc11](https://github.com/Jeon1691/clipsync/commit/c97bc110eb43c39c4e4d5dbcb092523c5469559d) | Received files, pull output and pasteboard sidecars lacked the macOS quarantine attribute | **Registered** — [inbox and rollback](../crates/clipsync-transfer/src/staging.rs), [attribute helper](../crates/clipsync-transfer/src/quarantine.rs), [pull output](../crates/clipsync-core/tests/support/engine_behavior.rs) and [sidecar](../crates/clipsync-clipboard/src/stage.rs) on macOS; rollback ordering on all platforms. |
+| F132 | Build/CI | [298b7a0](https://github.com/Jeon1691/clipsync/commit/298b7a0b63efc2abe4e8416d13b71e5eff45cb36) | Live-presence fixture closed its scripted relay with a heartbeat unread | **Uncredited** — 4/200 stochastic reproduction; the affected test is not a deterministic focused regression. |
+| F133 | Runtime | [9a24217](https://github.com/Jeon1691/clipsync/commit/9a242177ff5b64f0395adde5e99697bef347dca3) | Overflowing --ttl durations panicked | **Registered** — [parser overflow](../crates/clipsync-cli/src/duration.rs) on all platforms and [CLI exit code](../crates/clipsync-cli/tests/local_commands.rs) on Unix. |
+| F134 | Build/CI | [9705c9b](https://github.com/Jeon1691/clipsync/commit/9705c9bb408dcaf7f16b58bd84b72ee417753cf4) | Listener fixtures reserved and dropped ports before the relay bound them | **Uncredited** — 12/480 old vs 0/480 new under load; the affected tests are not a deterministic focused regression. |
 
 The [official Silver criterion](https://www.bestpractices.dev/en/criteria/1#regression_tests_added50)
 defines the badge requirement. This ledger's defect taxonomy and conservative
