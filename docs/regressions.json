@@ -3733,7 +3733,7 @@
       ],
       "description": "A closing relay connection dropped its socket immediately after its Close frame, so a reset caused by unread input could discard frames sent just before, such as a pairing abort error",
       "checks": [],
-      "notes": "CI showed a peer that saw the SAS rejection notice but no error frame (macOS) or a connection reset (Windows). The connection now reads until the peer answers the close, bounded by CLOSE_HANDSHAKE_WAIT. The same commit was carried into #35 as 09049e9; a cherry-pick is not another defect. No run count isolates this fix: the 5-of-96 rejection failures #35 measured belong to its separate commitment-abort flush. No deterministic focused transport regression has been added, so this row is conservatively uncredited."
+      "notes": "CI showed a peer that saw the SAS rejection notice but no error frame (macOS) or a connection reset (Windows). The connection now reads until the peer answers the close, bounded by CLOSE_HANDSHAKE_WAIT. The same commit was carried into #35 as 09049e9; a cherry-pick is not another defect. No run count isolates this fix: the 5-of-96 rejection failures #35 measured belong to its separate commitment-abort flush. No deterministic focused transport regression has been added, so this row is conservatively uncredited, as the load-dependent Runtime row F107 is."
     },
     {
       "id": "F121",
