@@ -18,7 +18,7 @@ mod untrusted_text;
 mod test_relay;
 
 /// Number of digits in a verification code (SAS).
-pub use clipsync_crypto::SAS_DIGITS;
+pub use clipsync_crypto::{SasProtection, SAS_DIGITS};
 pub use engine::{
     oneshot_pull as engine_oneshot_pull, oneshot_push as engine_oneshot_push, run_daemon,
     SyncHandle,
@@ -26,8 +26,9 @@ pub use engine::{
 pub use envelope::EnvelopeRejection;
 pub use error::{CoreError, ExitCode};
 pub use pairing::{
-    begin_create_room, create_room, display_sas, join_room, leave_room, normalize_sas, parse_sas,
-    PendingCreate, RoomOffer, SasCheck, SasDecision,
+    begin_create_room, create_room, display_sas, join_room, leave_room, normalize_sas,
+    parse_protection, parse_sas, protection_name, protection_notice, PendingCreate, RoomOffer,
+    SasCheck, SasDecision, COMMITMENT_WAIT,
 };
 pub use untrusted_text::{
     is_plain_identifier, sanitize_untrusted, shown_identifier, MAX_PEER_NAME_COLUMNS,
@@ -142,6 +143,7 @@ impl App {
             sas: None,
             peer_device_name: None,
             sas_decision: None,
+            sas_protection: None,
         };
         let _ = self.store.save_pairing_wait(&wait_file);
         print_code(&pending.offer);
@@ -334,7 +336,13 @@ impl App {
         };
         let mut cfg = self.store.load_config()?;
         if !cfg.set(key, value) {
-            return Err(CoreError::Message(format!("unknown config key {key}")));
+            // `get` knows every settable key, so a refused `set` of a known
+            // key means the value was invalid.
+            return Err(CoreError::Message(if cfg.get(key).is_some() {
+                format!("invalid value for config key {key}")
+            } else {
+                format!("unknown config key {key}")
+            }));
         }
         self.store.save_config(&cfg)?;
         Ok(())

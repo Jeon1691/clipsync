@@ -3,6 +3,9 @@
 //! Real relay binary with ephemeral CA/identity fixtures. No host trust-store,
 //! clipboard, keychain or persistent user configuration is used.
 
+mod support;
+
+use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -19,9 +22,13 @@ use rcgen::{
 use rustls::pki_types::ServerName;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tokio_rustls::TlsConnector;
-use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message, Connector};
+use tokio_tungstenite::{
+    client_async_tls_with_config, tungstenite::Message, Connector, MaybeTlsStream, WebSocketStream,
+};
+
+use support::{Relay, EPHEMERAL_LOOPBACK_BIND};
 
 struct Identity {
     directory: tempfile::TempDir,
@@ -76,14 +83,14 @@ impl Identity {
         )
     }
 
-    fn command(&self, port: u16) -> Command {
+    fn command(&self) -> Command {
         let mut command = isolated_command(self.directory.path());
-        command.args(["--bind", &format!("127.0.0.1:{port}")]);
+        command.args(["--bind", EPHEMERAL_LOOPBACK_BIND]);
         command
     }
 
-    fn tls_command(&self, port: u16) -> Command {
-        let mut command = self.command(port);
+    fn tls_command(&self) -> Command {
+        let mut command = self.command();
         command
             .arg("--tls-cert-file")
             .arg(self.directory.path().join("cert.pem"))
@@ -123,29 +130,45 @@ fn isolated_command(home: &Path) -> Command {
     command
 }
 
-fn unused_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// Per-request bound for loopback clients, so a misbehaving relay fails the
+/// test instead of hanging it; loopback requests normally finish in
+/// milliseconds.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// HTTP client whose `localhost` resolves only to the spawned relay's
+/// address. System resolution may prefer `::1`, where an unrelated process
+/// can hold the same port number as the relay's IPv4 listener.
+fn pinned_client(tls: Option<&rustls::ClientConfig>, relay: SocketAddr) -> reqwest::Client {
+    let builder = reqwest::Client::builder()
+        .no_proxy()
+        .resolve("localhost", relay)
+        .timeout(REQUEST_TIMEOUT);
+    match tls {
+        Some(tls) => builder.use_preconfigured_tls(tls.clone()),
+        None => builder,
+    }
+    .build()
+    .unwrap()
 }
 
-async fn wait_for_server(child: &mut Child, port: u16) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            assert!(
-                child.try_wait().unwrap().is_none(),
-                "relay exited before listening"
-            );
-            if TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
+/// WSS handshake over a TCP connection to the spawned relay, verifying the
+/// certificate against `host` without resolving it. The handshake error is
+/// rendered to text: callers only report it or assert that it occurred.
+async fn pinned_wss(
+    host: &str,
+    relay: SocketAddr,
+    tls: Arc<rustls::ClientConfig>,
+) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, String> {
+    let socket = TcpStream::connect(relay).await.unwrap();
+    client_async_tls_with_config(
+        format!("wss://{host}:{}/v1/ws", relay.port()),
+        socket,
+        None,
+        Some(Connector::Rustls(tls)),
+    )
     .await
-    .unwrap();
+    .map(|(ws, _)| ws)
+    .map_err(|error| error.to_string())
 }
 
 async fn rejection(mut command: Command, expected: &str) {
@@ -176,7 +199,7 @@ async fn token_secret_fifo_without_a_writer_is_rejected_before_listening() {
     let identity = Identity::new();
     let path = identity.directory.path().join("token.fifo");
     make_fifo(&path);
-    let mut command = identity.command(unused_port());
+    let mut command = identity.command();
     command
         .env_remove("CLIPSYNC_RELAY_TOKEN_SECRET")
         .env("CLIPSYNC_RELAY_TOKEN_SECRET_FILE", path)
@@ -191,7 +214,7 @@ async fn tls_key_fifo_without_a_writer_is_rejected_before_listening() {
     let path = identity.directory.path().join("key.pem");
     std::fs::remove_file(&path).unwrap();
     make_fifo(&path);
-    rejection(identity.tls_command(unused_port()), "regular file").await;
+    rejection(identity.tls_command(), "regular file").await;
 }
 
 #[cfg(unix)]
@@ -201,7 +224,7 @@ async fn tls_certificate_fifo_without_a_writer_is_rejected_before_listening() {
     let path = identity.directory.path().join("cert.pem");
     std::fs::remove_file(&path).unwrap();
     make_fifo(&path);
-    rejection(identity.tls_command(unused_port()), "regular file").await;
+    rejection(identity.tls_command(), "regular file").await;
 }
 
 #[cfg(unix)]
@@ -227,45 +250,39 @@ async fn verified_https_keeps_certificate_and_private_key_symlink_support() {
         std::fs::Permissions::from_mode(0o640),
     )
     .unwrap();
-    let port = unused_port();
-    let mut child = identity.tls_command(port).spawn().unwrap();
-    wait_for_server(&mut child, port).await;
-    let tls = identity.client_config(false);
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .use_preconfigured_tls(tls.as_ref().clone())
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
+    let relay = Relay::spawn(identity.tls_command()).await;
+    let client = pinned_client(Some(&identity.client_config(false)), relay.address);
     assert!(client
-        .get(format!("https://localhost:{port}/healthz"))
+        .get(format!(
+            "https://localhost:{}/healthz",
+            relay.address.port()
+        ))
         .send()
         .await
         .unwrap()
         .status()
         .is_success());
-    child.kill().await.unwrap();
-    child.wait().await.unwrap();
+    relay.stop().await;
 }
 
 #[tokio::test]
 async fn default_and_incomplete_tls_configuration_fail_closed() {
     let identity = Identity::new();
-    rejection(identity.command(unused_port()), "TLS is required").await;
-    let mut cert_only = identity.command(unused_port());
+    rejection(identity.command(), "TLS is required").await;
+    let mut cert_only = identity.command();
     cert_only
         .arg("--tls-cert-file")
         .arg(identity.directory.path().join("cert.pem"));
     rejection(cert_only, "configure both").await;
-    let mut key_only = identity.command(unused_port());
+    let mut key_only = identity.command();
     key_only
         .arg("--tls-key-file")
         .arg(identity.directory.path().join("key.pem"));
     rejection(key_only, "configure both").await;
-    let mut ambiguous = identity.tls_command(unused_port());
+    let mut ambiguous = identity.tls_command();
     ambiguous.arg("--allow-http");
     rejection(ambiguous, "cannot be combined").await;
-    let mut invalid_bool = identity.command(unused_port());
+    let mut invalid_bool = identity.command();
     invalid_bool.env("CLIPSYNC_RELAY_ALLOW_HTTP", "invalid");
     rejection(invalid_bool, "--allow-http").await;
 }
@@ -274,36 +291,20 @@ async fn default_and_incomplete_tls_configuration_fail_closed() {
 async fn malformed_missing_mismatched_and_public_private_keys_fail_closed() {
     let identity = Identity::new();
     std::fs::remove_file(identity.directory.path().join("cert.pem")).unwrap();
-    rejection(
-        identity.tls_command(unused_port()),
-        "CLIPSYNC_RELAY_TLS_CERT_FILE",
-    )
-    .await;
+    rejection(identity.tls_command(), "CLIPSYNC_RELAY_TLS_CERT_FILE").await;
     std::fs::write(identity.directory.path().join("cert.pem"), "malformed").unwrap();
-    rejection(
-        identity.tls_command(unused_port()),
-        "contains no certificates",
-    )
-    .await;
+    rejection(identity.tls_command(), "contains no certificates").await;
     let identity = Identity::new();
     private_file(&identity.directory.path().join("key.pem"), b"malformed");
-    rejection(
-        identity.tls_command(unused_port()),
-        "no valid PEM private key",
-    )
-    .await;
+    rejection(identity.tls_command(), "no valid PEM private key").await;
     let identity = Identity::new();
     private_file(
         &identity.directory.path().join("key.pem"),
         KeyPair::generate().unwrap().serialize_pem().as_bytes(),
     );
-    rejection(
-        identity.tls_command(unused_port()),
-        "must be valid and match",
-    )
-    .await;
+    rejection(identity.tls_command(), "must be valid and match").await;
     let identity = Identity::new();
-    let mut insecure_url = identity.tls_command(unused_port());
+    let mut insecure_url = identity.tls_command();
     insecure_url.args(["--public-url", "http://localhost"]);
     rejection(insecure_url, "must use https://").await;
     #[cfg(unix)]
@@ -315,28 +316,17 @@ async fn malformed_missing_mismatched_and_public_private_keys_fail_closed() {
             std::fs::Permissions::from_mode(0o644),
         )
         .unwrap();
-        rejection(
-            identity.tls_command(unused_port()),
-            "private credential permissions",
-        )
-        .await;
+        rejection(identity.tls_command(), "private credential permissions").await;
     }
 }
 
 #[tokio::test]
 async fn verified_https_wss_and_pairing_keep_peer_info_and_token_authentication() {
     let identity = Identity::new();
-    let port = unused_port();
-    let mut child = identity.tls_command(port).spawn().unwrap();
-    wait_for_server(&mut child, port).await;
+    let relay = Relay::spawn(identity.tls_command()).await;
     let tls = identity.client_config(false);
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .use_preconfigured_tls(tls.as_ref().clone())
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
-    let base = format!("https://localhost:{port}");
+    let client = pinned_client(Some(&tls), relay.address);
+    let base = format!("https://localhost:{}", relay.address.port());
     assert!(client
         .get(format!("{base}/healthz"))
         .send()
@@ -382,14 +372,7 @@ async fn verified_https_wss_and_pairing_keep_peer_info_and_token_authentication(
         joined.status().is_success(),
         "TLS pairing must retain ConnectInfo"
     );
-    let (mut ws, _) = connect_async_tls_with_config(
-        format!("wss://localhost:{port}/v1/ws"),
-        None,
-        false,
-        Some(Connector::Rustls(tls)),
-    )
-    .await
-    .unwrap();
+    let mut ws = pinned_wss("localhost", relay.address, tls).await.unwrap();
     let hello = |token: String| ControlMessage::Hello {
         protocol_version: PROTOCOL_VERSION,
         device_id: device.clone(),
@@ -429,15 +412,13 @@ async fn verified_https_wss_and_pairing_keep_peer_info_and_token_authentication(
         ControlMessage::HelloOk { .. }
     ));
     ws.close(None).await.unwrap();
-    child.kill().await.unwrap();
-    child.wait().await.unwrap();
+    relay.stop().await;
 }
 
 #[tokio::test]
 async fn tls12_and_tls13_verify_issuer_hostname_and_reject_plaintext() {
     let identity = Identity::new();
-    let port = unused_port();
-    let mut command = identity.command(port);
+    let mut command = identity.command();
     command
         .env(
             "CLIPSYNC_RELAY_TLS_CERT_FILE",
@@ -447,11 +428,11 @@ async fn tls12_and_tls13_verify_issuer_hostname_and_reject_plaintext() {
             "CLIPSYNC_RELAY_TLS_KEY_FILE",
             identity.directory.path().join("key.pem"),
         );
-    let mut child = command.spawn().unwrap();
-    wait_for_server(&mut child, port).await;
+    let relay = Relay::spawn(command).await;
+    let port = relay.address.port();
     for tls12_only in [true, false] {
         let connector = TlsConnector::from(identity.client_config(tls12_only));
-        let socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let socket = TcpStream::connect(relay.address).await.unwrap();
         let stream = connector
             .connect(ServerName::try_from("localhost").unwrap(), socket)
             .await
@@ -470,62 +451,37 @@ async fn tls12_and_tls13_verify_issuer_hostname_and_reject_plaintext() {
         ("127.0.0.1", identity.client_config(false)),
         ("localhost", unrelated.client_config(false)),
     ] {
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(5))
-            .use_preconfigured_tls(config.as_ref().clone())
-            .build()
-            .unwrap();
+        let client = pinned_client(Some(&config), relay.address);
         assert!(client
             .get(format!("https://{host}:{port}/healthz"))
             .send()
             .await
             .unwrap_err()
             .is_connect());
-        assert!(connect_async_tls_with_config(
-            format!("wss://{host}:{port}/v1/ws"),
-            None,
-            false,
-            Some(Connector::Rustls(config))
-        )
-        .await
-        .is_err());
+        assert!(pinned_wss(host, relay.address, config).await.is_err());
     }
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
-    assert!(client
+    assert!(pinned_client(None, relay.address)
         .get(format!("http://127.0.0.1:{port}/healthz"))
         .send()
         .await
         .is_err());
-    child.kill().await.unwrap();
-    child.wait().await.unwrap();
+    relay.stop().await;
 }
 
 #[tokio::test]
 async fn plaintext_requires_explicit_opt_in_and_stalled_tls_handshakes_expire() {
     let identity = Identity::new();
-    let port = unused_port();
-    let mut command = identity.command(port);
+    let mut command = identity.command();
     command.env("CLIPSYNC_RELAY_ALLOW_HTTP", "true");
-    let mut child = command.spawn().unwrap();
-    wait_for_server(&mut child, port).await;
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
-    assert!(client
-        .get(format!("http://127.0.0.1:{port}/healthz"))
+    let relay = Relay::spawn(command).await;
+    assert!(pinned_client(None, relay.address)
+        .get(format!("http://{}/healthz", relay.address))
         .send()
         .await
         .unwrap()
         .status()
         .is_success());
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/v1/ws"))
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}/v1/ws", relay.address))
         .await
         .unwrap();
     ws.send(Message::Text(
@@ -543,12 +499,9 @@ async fn plaintext_requires_explicit_opt_in_and_stalled_tls_handshakes_expire() 
         ControlMessage::Pong { ts: 73 }
     ));
     ws.close(None).await.unwrap();
-    child.kill().await.unwrap();
-    child.wait().await.unwrap();
-    let port = unused_port();
-    let mut child = identity.tls_command(port).spawn().unwrap();
-    wait_for_server(&mut child, port).await;
-    let mut stalled = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    relay.stop().await;
+    let relay = Relay::spawn(identity.tls_command()).await;
+    let mut stalled = TcpStream::connect(relay.address).await.unwrap();
     let mut byte = [0];
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(7), stalled.read(&mut byte))
@@ -557,8 +510,7 @@ async fn plaintext_requires_explicit_opt_in_and_stalled_tls_handshakes_expire() 
             .unwrap(),
         0
     );
-    child.kill().await.unwrap();
-    child.wait().await.unwrap();
+    relay.stop().await;
 }
 
 #[tokio::test]

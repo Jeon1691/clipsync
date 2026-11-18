@@ -25,7 +25,7 @@ use clipsync_protocol::{
 
 use crate::auth::verify_token;
 use crate::connection_limits::{ConnectionRefused, ConnectionSlot};
-use crate::state::{LiveConnection, MemberRegistration, RoomPresence};
+use crate::state::{LiveConnection, MemberRegistration, PendingSpake, RoomPresence};
 use crate::RelayState;
 
 /// Outbound messages queued per socket before senders wait for its writer.
@@ -125,10 +125,18 @@ fn is_member(ctx: &Option<ConnCtx>) -> bool {
 // A protocol-v1 Ed25519 SPAKE message is 33 bytes (44 in base64). Retain only
 // its first public message while the authenticated peer opens its WebSocket.
 const PAIRING_SPAKE_MAX_BYTES: usize = 1024;
+// A commitment is one SHA-256 digest: 32 bytes, 44 characters of base64.
+// Leave room for padding variants, refuse anything that could carry more.
+const PAIRING_COMMIT_MAX_BYTES: usize = 64;
+// Pairing side of the joiner (role B); side 0 is the creator. Only the
+// joiner sends a commitment.
+const JOINER_SIDE: usize = 1;
 
 struct PairingArrival {
     joined: Option<(mpsc::Sender<WsOut>, PeerInfo)>,
-    pending: Option<ControlMessage>,
+    /// Frames the peer sent before this socket arrived, in send order: the
+    /// commitment always precedes the SPAKE message it commits to.
+    pending: Vec<ControlMessage>,
     expires_at: Timestamp,
 }
 
@@ -147,7 +155,7 @@ fn register_pairing_connection(
         return Err("pairing room mismatch".into());
     }
     if session.expires_at < Timestamp::now() {
-        session.pending_spake = [None, None];
+        session.clear_pending();
         return Err("pairing expired".into());
     }
     if session.completed {
@@ -172,7 +180,7 @@ fn register_pairing_connection(
     // Registration, presence and the pending-message take share the session
     // lock with forwarding, so an arriving peer cannot miss an early SPAKE.
     if session.pairing_senders[side].is_some() {
-        session.pending_spake = [None, None];
+        session.clear_pending();
     }
     // Pairing tokens are issued without authentication for any device ID, so
     // a pairing socket is routed only within its session and never becomes a
@@ -191,16 +199,23 @@ fn register_pairing_connection(
     } else {
         None
     };
-    let pending = if peer_online {
-        session.pending_spake[1 - side]
-            .take()
-            .map(|message| ControlMessage::Spake2Msg {
-                pairing_session_id: session.session_id.clone(),
-                message,
-            })
-    } else {
-        None
-    };
+    let mut pending = Vec::new();
+    if peer_online {
+        let pairing_session_id = session.session_id.clone();
+        if let Some(commitment) = session.pending_commit[1 - side].take() {
+            pending.push(ControlMessage::Spake2Commit {
+                pairing_session_id: pairing_session_id.clone(),
+                commitment,
+            });
+        }
+        if let Some(spake) = session.pending_spake[1 - side].take() {
+            pending.push(ControlMessage::Spake2Msg {
+                pairing_session_id,
+                message: spake.message,
+                after_commitment: spake.after_commitment,
+            });
+        }
+    }
     Ok(PairingArrival {
         joined,
         pending,
@@ -281,7 +296,7 @@ async fn forget_socket(state: &Arc<RelayState>, tx: &mpsc::Sender<WsOut>, c: &Co
                 .is_some_and(|sender| sender.same_channel(tx))
             {
                 session.pairing_senders[side] = None;
-                session.pending_spake = [None, None];
+                session.clear_pending();
             }
         }
     }
@@ -293,14 +308,16 @@ async fn forget_socket(state: &Arc<RelayState>, tx: &mpsc::Sender<WsOut>, c: &Co
 /// per-member socket cap, or a stalled outbound queue). Returns the context,
 /// if any, for cleanup.
 ///
-/// A socket that is not a room member (before `hello`, or holding a pairing
-/// token) has a fixed deadline: the hello deadline, then its pairing
-/// session's expiry. No message extends it. It stays evictable, and its
-/// messages are handled under that deadline and eviction, so a client that
-/// never reads cannot stall the loop past either. `hello` itself never waits
-/// (see `handle_control_from`), so cancelling a handler never leaves a
+/// A socket that is not a room member stays evictable and has a deadline.
+/// Before `hello` it is the hello deadline, which no message extends. A
+/// pairing-token socket is closed after `read_idle` of silence or when its
+/// pairing session expires, whichever comes first; a message restarts only
+/// the silence limit. Its messages are handled under that deadline and
+/// eviction, so a client that never reads, or a peer that stopped reading,
+/// cannot stall the loop past either. `hello` itself never waits (see
+/// `handle_control_from`), so cancelling a handler never leaves a
 /// half-registered socket. A member socket is closed after `read_idle` of
-/// silence instead.
+/// silence and is never evicted this way.
 async fn read_loop<S>(
     stream: &mut S,
     state: &Arc<RelayState>,
@@ -567,8 +584,8 @@ async fn handle_control_from(
                 if let Some((creator, device)) = arrival.joined {
                     try_send_msg(&creator, &ControlMessage::PeerJoined { device });
                 }
-                if let Some(pending) = arrival.pending {
-                    try_send_msg(tx, &pending);
+                for pending in &arrival.pending {
+                    try_send_msg(tx, pending);
                 }
             } else {
                 conn.member_conn =
@@ -620,7 +637,8 @@ async fn handle_control_from(
             reply(tx, is_member(ctx), &ControlMessage::Pong { ts }).await;
             Ok(())
         }
-        ControlMessage::Spake2Msg { .. }
+        ControlMessage::Spake2Commit { .. }
+        | ControlMessage::Spake2Msg { .. }
         | ControlMessage::KeyConfirm { .. }
         | ControlMessage::DeviceBind { .. }
         | ControlMessage::NoiseHandshake { .. } => {
@@ -796,7 +814,10 @@ async fn forward_pairing_or_peer(
             .pairing_side
             .ok_or("authenticated pairing hello required")?;
         let message_sid = match &msg {
-            ControlMessage::Spake2Msg {
+            ControlMessage::Spake2Commit {
+                pairing_session_id, ..
+            }
+            | ControlMessage::Spake2Msg {
                 pairing_session_id, ..
             }
             | ControlMessage::KeyConfirm {
@@ -816,7 +837,7 @@ async fn forward_pairing_or_peer(
                 return Err("pairing room mismatch".into());
             }
             if session.expires_at < Timestamp::now() {
-                session.pending_spake = [None, None];
+                session.clear_pending();
                 return Err("pairing expired".into());
             }
             if session.completed {
@@ -828,20 +849,47 @@ async fn forward_pairing_or_peer(
             {
                 return Err("pairing connection replaced".into());
             }
-            if let ControlMessage::Spake2Msg { message, .. } = &msg {
+            let peer_online = session.pairing_senders[1 - side]
+                .as_ref()
+                .is_some_and(|sender| !sender.is_closed());
+            if let ControlMessage::Spake2Commit { commitment, .. } = &msg {
+                if side != JOINER_SIDE {
+                    return Err("only the joiner sends a pairing commitment".into());
+                }
+                if commitment.len() > PAIRING_COMMIT_MAX_BYTES {
+                    return Err("pairing commitment too large".into());
+                }
+                if !peer_online {
+                    match &session.pending_commit[side] {
+                        Some(first) if first != commitment => {
+                            return Err("pairing commitment already pending".into())
+                        }
+                        Some(_) => {}
+                        None => session.pending_commit[side] = Some(commitment.clone()),
+                    }
+                    return Ok(());
+                }
+            }
+            if let ControlMessage::Spake2Msg {
+                message,
+                after_commitment,
+                ..
+            } = &msg
+            {
                 if message.len() > PAIRING_SPAKE_MAX_BYTES {
                     return Err("pairing SPAKE message too large".into());
                 }
-                if !session.pairing_senders[1 - side]
-                    .as_ref()
-                    .is_some_and(|sender| !sender.is_closed())
-                {
+                if !peer_online {
+                    let spake = PendingSpake {
+                        message: message.clone(),
+                        after_commitment: *after_commitment,
+                    };
                     match &session.pending_spake[side] {
-                        Some(first) if first != message => {
+                        Some(first) if *first != spake => {
                             return Err("pairing SPAKE already pending".into())
                         }
                         Some(_) => {}
-                        None => session.pending_spake[side] = Some(message.clone()),
+                        None => session.pending_spake[side] = Some(spake),
                     }
                     return Ok(());
                 }
@@ -875,6 +923,11 @@ async fn forward_pairing_or_peer(
             }
         }
         return Ok(());
+    }
+    // Commitments exist only inside a pairing session; unlike the legacy
+    // frames they are never fanned out to room members.
+    if matches!(msg, ControlMessage::Spake2Commit { .. }) {
+        return Err("pairing session required".into());
     }
     if !owns_member_route(state, c) {
         return Err(MEMBER_CONNECTION_REQUIRED.into());

@@ -151,9 +151,22 @@ pub enum ControlMessage {
     PeerLeft {
         device_id: DeviceId,
     },
+    /// The joiner's commitment to its SPAKE2 message, sent before the
+    /// message itself (see `docs/protocol.md`, "Commitment round"). Peers
+    /// and relays that predate it drop the frame as unknown.
+    Spake2Commit {
+        pairing_session_id: PairingSessionId,
+        /// Base64 SHA-256 commitment.
+        commitment: String,
+    },
     Spake2Msg {
         pairing_session_id: PairingSessionId,
         message: String,
+        /// Set by a creator that received the joiner's commitment before it
+        /// sent this message. Absent on the wire when false, so older peers
+        /// see an unchanged frame and an older relay forwards it unset.
+        #[serde(default, skip_serializing_if = "is_false")]
+        after_commitment: bool,
     },
     KeyConfirm {
         pairing_session_id: PairingSessionId,
@@ -261,6 +274,10 @@ pub struct JoinPairingResponse {
 pub struct ErrorBody {
     pub code: String,
     pub message: String,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl ControlMessage {

@@ -56,6 +56,7 @@ fn pairing_confirmation_matches_python_hmac_fixture() {
         pairing_wrap_key: [4; 32],
         room_root_key: [5; 32],
         sas_key: [6; 32],
+        committed_sas_key: [7; 32],
     };
     for (role, expected) in [
         (
