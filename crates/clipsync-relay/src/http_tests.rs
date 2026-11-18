@@ -928,7 +928,27 @@ async fn websocket_connections_past_the_client_and_relay_caps_are_refused() {
             ..Default::default()
         })
         .await;
+        let metrics = || async {
+            reqwest::Client::new()
+                .get(format!("http://{address}/metrics"))
+                .bearer_auth(METRICS_TEST_TOKEN)
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap()
+        };
         let mut held = connect_as(address, "192.0.2.1").await.unwrap();
+        // The slot is taken before the upgrade completes, so the socket is
+        // counted at once; it has no valid `hello` yet.
+        let before_hello = metrics().await;
+        for line in ["clipsync_ws_sockets 1", "clipsync_ws_connections 0"] {
+            assert!(
+                before_hello.lines().any(|l| l == line),
+                "{line} in {before_hello}"
+            );
+        }
         held.send(ClientMessage::Text(member_hello(&state).into()))
             .await
             .unwrap();
@@ -946,15 +966,7 @@ async fn websocket_connections_past_the_client_and_relay_caps_are_refused() {
             connect_as(address, "192.0.2.2").await.err(),
             Some(StatusCode::SERVICE_UNAVAILABLE)
         );
-        let metrics = reqwest::Client::new()
-            .get(format!("http://{address}/metrics"))
-            .bearer_auth(METRICS_TEST_TOKEN)
-            .send()
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap();
+        let metrics = metrics().await;
         let refused = metrics
             .lines()
             .find_map(|line| line.strip_prefix("clipsync_ws_refused "))

@@ -128,12 +128,19 @@ device A asks in the same terminal instead of `room confirm`.
 
 For scripts, `clipsync room confirm <CODE>` takes the 6 digits shown on the
 other device and checks them against this device's code; `yes` is refused
-there, because that command has shown nothing to compare. Likewise, when
-`room join` reads its answer from a pipe instead of a terminal, only the
-digits confirm. `--insecure-skip-sas` on `room create` / `room join` skips the
-comparison and removes that protection; use it only for test setups on a relay
-you trust. Devices on a version without verification codes still pair, but
-cannot show a code to compare.
+there, because that command has shown nothing to compare. Likewise, when `room
+join` reads its answer from a pipe instead of a terminal, only the digits
+confirm. Both print this device's protection line, and under `protection:
+REDUCED` they refuse unless you also pass `--accept-reduced-protection` (use
+it only with a relay you trust). `--insecure-skip-sas` on `room create` /
+`room join` skips the comparison and removes that protection; use it only for
+test setups on a relay you trust. Devices on a version without verification
+codes still pair, but cannot show a code to compare. Each code is shown with
+its protection: `protection: full` when this device ran the commitment round,
+`protection: REDUCED` otherwise. Trust matching codes only when both devices
+show `protection: full`; otherwise pair only through a relay you trust. Run
+`clipsync config set pairing.require_commitment true` on the devices you
+create rooms from to refuse pairings without the round.
 
 `clipsync init` is optional. Identity is created on Homebrew install and on
 first use.
@@ -243,7 +250,7 @@ clipsync room create
 
 - SPAKE2 balanced PAKE; the 6-digit code is only a one-time password
 - Mutual key confirmation bound to protocol version, session, device IDs, and SPAKE2 transcript
-- 6-digit verification code compared on both devices before anything is stored; it catches a guessed code or a relay in the middle, except a relay that searches offline for matching codes (see docs/security.md)
+- 6-digit verification code compared on both devices before anything is stored; it catches a guessed code or a relay in the middle. A commitment round keeps a relay from searching offline for matching codes when both devices show `protection: full`; without it (an older device or relay) the screen says `protection: REDUCED`, and `pairing.require_commitment` refuses such pairings (see docs/security.md)
 - AES-256-GCM payloads, HKDF-SHA-256, X25519 device identity
 - Noise `KK` handshake on reconnect
 - Text latest-one in-memory queue, 60s TTL; images/files are online-only 256 KiB chunks

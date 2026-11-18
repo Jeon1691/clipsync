@@ -783,7 +783,16 @@ fn app_commands_use_real_ipc_and_persist_pause_config_and_status() {
         );
         let unchanged = std::fs::read(app.store.paths.config_file()).unwrap();
         assert!(app.config_set("sync.direction", "invalid").is_err());
-        assert!(app.config_set("unknown", "value").is_err());
+        let invalid = app
+            .config_set("pairing.require_commitment", "maybe")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            invalid.contains("invalid value") && invalid.contains("pairing.require_commitment"),
+            "{invalid}"
+        );
+        let unknown = app.config_set("unknown", "value").unwrap_err().to_string();
+        assert!(unknown.contains("unknown config key"), "{unknown}");
         assert_eq!(
             std::fs::read(app.store.paths.config_file()).unwrap(),
             unchanged
