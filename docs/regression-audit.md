@@ -162,9 +162,10 @@ behind the Proxmox Cloudflare Tunnel and an opaque client-written
 because no released code contained them. The complete total is
 **62/108 (57.41%)**.
 
-The November security series (PRs #25–#42) adds F109–F134. Each PR deferred
+The November security series (PRs #25–#42; #38 is an issue, not a PR) adds
+F109–F134. Each PR deferred
 its ledger edit so parallel branches would not collide on IDs and counts, and
-listed its regression tests instead. Every listed name was checked against the
+listed its regression tests instead. Every named test was checked against the
 merged source and the compiled test inventory, with its package, target and
 platform scope. Rows follow PR order, one per distinct corrected invariant:
 

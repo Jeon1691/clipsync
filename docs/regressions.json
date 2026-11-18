@@ -3733,7 +3733,7 @@
       ],
       "description": "A closing relay connection dropped its socket immediately after its Close frame, so a reset caused by unread input could discard frames sent just before, such as a pairing abort error",
       "checks": [],
-      "notes": "CI showed a peer that saw the SAS rejection notice but no error frame (macOS) or a connection reset (Windows). The connection now reads until the peer answers the close, bounded by CLOSE_HANDSHAKE_WAIT. The same commit was carried into #35 as 09049e9; a cherry-pick is not another defect. Under parallel load the rejection test failed 5 of 96 runs before the related flush and 96 of 96 passed after, but no deterministic focused transport regression has been added, so this row is conservatively uncredited."
+      "notes": "CI showed a peer that saw the SAS rejection notice but no error frame (macOS) or a connection reset (Windows). The connection now reads until the peer answers the close, bounded by CLOSE_HANDSHAKE_WAIT. The same commit was carried into #35 as 09049e9; a cherry-pick is not another defect. No run count isolates this fix: the 5-of-96 rejection failures #35 measured belong to its separate commitment-abort flush. No deterministic focused transport regression has been added, so this row is conservatively uncredited."
     },
     {
       "id": "F121",
@@ -4715,7 +4715,7 @@
           ]
         }
       ],
-      "notes": "The regression failed on unchanged code (sync.enabled accepted an empty string). Boolean keys accept only explicit true/false spellings and a rejected value leaves the configuration unchanged; the extended round-trip contract covers the new keys."
+      "notes": "The regression failed on unchanged code (sync.enabled accepted an empty string). Boolean keys accept only explicit true/false spellings and a rejected value leaves the configuration unchanged; the extended round-trip contract covers the new keys. #35 also extended the broad engine test app_commands_use_real_ipc_and_persist_pause_config_and_status (listed there without a name) to report an invalid boolean as an invalid value; it is not separately registered because the focused contract test covers the defect."
     },
     {
       "id": "F131",
