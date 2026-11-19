@@ -21,16 +21,11 @@ alone does not establish their results.
 ## Deliberate exceptions
 
 The remaining exceptions use `#[expect(..., reason = "...")]` on the affected
-functions, the public `App` implementation, and two transport enums. Legacy macOS filename pasteboard reads also document
+functions and two transport enums. Legacy macOS filename pasteboard reads also document
 their compatibility reason at the deprecated API use. Unlike an
 unconditional allowance, an expectation warns when the reviewed lint no longer
 occurs, so changes to these choices require another review.
 
-- `result_large_err`: the public `TransportError::Ws` retains the upstream
-  WebSocket error, and public `CoreError` retains that transport error and its
-  conversions. Boxing these values changes the public variants. Preserve the
-  current API and accept its error-path copy cost; revisit representation as
-  an explicit API/performance change.
 - `large_enum_variant`: `Incoming` and `Outgoing` carry control messages inline
   in queues bounded to 256 entries. Preserve the public incoming representation
   and avoid a new allocation for each control message. Their existing bounded
@@ -68,7 +63,7 @@ requires addressing warnings and permits accepting some after review.
 
 | Historical group | Union | Current disposition |
 | --- | ---: | --- |
-| `result_large_err` | 50 | Reviewed representation retained through the local expectations described above. |
+| `result_large_err` | 50 | Resolved upstream: tungstenite 0.28 boxed its large error variants, shrinking `tungstenite::Error` from 136 to 32 bytes. With the tokio-tungstenite 0.29 upgrade, `TransportError` and `CoreError` fell below the lint threshold, Clippy reported every local expectation as unfulfilled, and they were removed without changing either public error type. |
 | `large_enum_variant` | 2 | Reviewed bounded queue layout retained through enum-specific expectations. |
 | `too_many_arguments` | 1 | Explicit session-state handling retained through a function-specific expectation. |
 | Other Clippy style diagnostics | 19 | Removed redundant returns, borrows, formatting, and a manual default implementation; used the supported I/O error constructor. |
