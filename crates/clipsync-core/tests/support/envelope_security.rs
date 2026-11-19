@@ -222,10 +222,6 @@ fn inbound_for(peer: &Peer) -> (RoomRecord, LocalStore) {
     (store.current_room().unwrap(), store)
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 fn admit_text(
     peer: &Peer,
     routing: &RoutingHeader,
@@ -234,10 +230,6 @@ fn admit_text(
     admit_text_with(peer, routing, text, EnvelopePolicy::Negotiate)
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 fn admit_text_with(
     peer: &Peer,
     routing: &RoutingHeader,
@@ -261,10 +253,6 @@ fn admit_text_with(
     .text(routing, &nonce, &ciphertext)
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 fn admit_manifest(peer: &Peer, routing: &RoutingHeader) -> Result<ManifestPlain, CoreError> {
     let (room, store) = inbound_for(peer);
     let (nonce, ciphertext) =

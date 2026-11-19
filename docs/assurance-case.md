@@ -55,8 +55,9 @@ administrators can access local clipboard contents and keys.
 
 - **Fail-safe defaults:** missing/invalid credentials fail; pairing confirmation
   failures do not establish room credentials; an absent relay signing secret is
-  generated from OsRng, while an explicitly weak secret is rejected. Production
-  clients default to HTTPS. The relay refuses to bind without a matching TLS
+  generated from the OS CSPRNG (rand `SysRng` over getrandom), while an
+  explicitly weak secret is rejected. Production clients default to HTTPS. The
+  relay refuses to bind without a matching TLS
   certificate/key pair unless HTTP is explicitly enabled for a TLS proxy or
   local development. Direct TLS permits only TLS 1.2/1.3, limits incomplete
   handshakes to 128 and five seconds each, and retains real TCP peer metadata.

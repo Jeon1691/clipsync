@@ -54,10 +54,6 @@ pub struct App {
     pub store: LocalStore,
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 impl App {
     pub fn open() -> Result<Self, CoreError> {
         Ok(Self {
@@ -394,10 +390,6 @@ pub struct PullResult {
     pub files: Vec<PathBuf>,
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 pub fn maybe_start_daemon(store: &LocalStore) -> Result<(), CoreError> {
     if std::env::var("CLIPSYNC_NO_DAEMON").ok().as_deref() == Some("1") {
         return Ok(());
@@ -407,10 +399,6 @@ pub fn maybe_start_daemon(store: &LocalStore) -> Result<(), CoreError> {
     Ok(())
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 async fn load_push_item(
     r#type: Option<&str>,
     files: &[PathBuf],
@@ -452,10 +440,6 @@ async fn load_push_item(
     .await
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 async fn load_push_input(
     r#type: Option<&str>,
     from_clipboard: bool,
@@ -498,10 +482,6 @@ async fn load_push_input(
 }
 
 /// Validate a relay URL for configuration and return the form to save.
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 fn checked_relay_url(url: &str) -> Result<String, CoreError> {
     clipsync_transport::check_relay_url(url)?;
     Ok(clipsync_transport::normalize_relay_url(url)?)
@@ -595,10 +575,6 @@ pub fn device_name() -> String {
         .unwrap_or_else(|| "clipsync-device".into())
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 pub fn device_id_or_new(store: &LocalStore) -> Result<DeviceId, CoreError> {
     Ok(store.secrets.load_identity()?.device_id.clone())
 }

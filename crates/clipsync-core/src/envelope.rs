@@ -101,10 +101,6 @@ impl EnvelopePolicy {
 /// Test helper: a snapshot read. Stamping an envelope decides with
 /// [`version_for_room_state`] inside the locked `seq` reservation instead.
 #[cfg(test)]
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 pub(crate) fn sending_version(
     store: &LocalStore,
     room: &RoomRecord,
@@ -238,10 +234,6 @@ pub(crate) fn check_header(
 /// delivered an authenticated v2 envelope to this device, and never in strict
 /// mode. A handshake capability advertisement alone does not refuse v1: the
 /// peer may run with `sync.legacy_envelopes`.
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 pub(crate) fn check_version(
     store: &LocalStore,
     routing: &RoutingHeader,
@@ -263,10 +255,6 @@ pub(crate) fn check_version(
 /// every earlier v2 envelope from the same sender. v1 headers are not
 /// authenticated and legacy senders restart `seq` at 1, so v1 relies on the
 /// in-memory message-ID cache and the header checks only.
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 pub(crate) fn commit_sequence(
     store: &LocalStore,
     routing: &RoutingHeader,
