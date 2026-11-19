@@ -272,9 +272,15 @@ Fallback, in which both devices derive the SAS without the round:
 - A creator that receives a plain `spake2_msg` before any commitment (an older
   joiner sends it at once) answers without `after_commitment`.
 - A creator that gets no commitment within 5 seconds (`COMMITMENT_WAIT`)
-  sends its `spake2_msg` without `after_commitment`. An older relay drops
+  sends its `spake2_msg` without `after_commitment`. The 5 seconds are a
+  minimum: frames already queued are handled first, so a stream of them can
+  postpone the fallback, though never past the overall pairing deadline. An
+  older relay drops
   `spake2_commit` as an unknown frame, so this keeps pairing through it from
-  hanging.
+  hanging. A commitment the creator's connection had already received when
+  the wait ran out still counts, so a creator that was briefly stalled (for
+  example, a suspended process) does not fall back. Only one still in transit
+  loses to the wait.
 - A joiner whose received `spake2_msg` lacks `after_commitment` (an older
   creator ignores the unknown frame; an older relay drops the frame and
   forwards `spake2_msg` without the new field) derives the SAS without the

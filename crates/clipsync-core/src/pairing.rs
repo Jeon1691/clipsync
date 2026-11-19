@@ -524,24 +524,17 @@ where
     let mut sas_confirmed = false;
 
     loop {
-        tokio::select! {
-            _ = &mut timeout => return Err(CoreError::Timeout),
-            _ = async {
-                match commitment_wait.as_mut() {
-                    Some(wait) => wait.await,
-                    None => std::future::pending().await,
-                }
-            }, if commitment_wait.is_some() => {
-                commitment_wait = None;
-                commitment_wait_over = true;
-            }
-            verdict = async {
-                match decision.as_mut() {
-                    Some(pending) => pending.await,
-                    None => std::future::pending().await,
-                }
-            }, if decision.is_some() => {
-                decision = None;
+        match next_wake(
+            timeout.as_mut(),
+            &mut decision,
+            &mut conn.incoming,
+            &mut commitment_wait,
+        )
+        .await
+        {
+            Wake::Timeout => return Err(CoreError::Timeout),
+            Wake::CommitmentWaitOver => commitment_wait_over = true,
+            Wake::Decision(verdict) => {
                 if verdict == SasDecision::Rejected {
                     // Nothing has been sent to the peer or stored yet. Tell a
                     // peer that may already have confirmed, then abort.
@@ -570,11 +563,11 @@ where
                 }
                 sas_confirmed = true;
             }
-            incoming = conn.incoming.recv() => {
+            Wake::Frame(incoming) => {
                 let Some(incoming) = incoming else {
                     return Err(CoreError::Pairing("relay closed during pairing".into()));
                 };
-                match incoming {
+                match *incoming {
                     Incoming::Control(ControlMessage::HelloOk { .. }) => {}
                     Incoming::Control(ControlMessage::PeerJoined { device }) => {
                         match &peer_id {
@@ -595,7 +588,8 @@ where
                             // connection re-registers.
                             Some(pinned)
                                 if *pinned == device.device_id
-                                    && peer_name.as_deref() == Some(device.device_name.as_str()) => {}
+                                    && peer_name.as_deref()
+                                        == Some(device.device_name.as_str()) => {}
                             // A relay running both SPAKE2 sessions knows both
                             // codes by now and could pick a name that forges
                             // a code line. The honest relay never changes the
@@ -622,7 +616,11 @@ where
                             peer_commitment = Some(b64_decode(&commitment)?);
                         }
                     }
-                    Incoming::Control(ControlMessage::Spake2Msg { message, after_commitment, .. }) => {
+                    Incoming::Control(ControlMessage::Spake2Msg {
+                        message,
+                        after_commitment,
+                        ..
+                    }) => {
                         inbound_spake = Some(b64_decode(&message)?);
                         peer_after_commitment = after_commitment;
                     }
@@ -637,7 +635,9 @@ where
                         }
                         peer_confirm = Some(b64_decode(&mac)?);
                     }
-                    Incoming::Control(ControlMessage::DeviceBind { nonce, ciphertext, .. }) => {
+                    Incoming::Control(ControlMessage::DeviceBind {
+                        nonce, ciphertext, ..
+                    }) => {
                         peer_bind = Some((nonce, ciphertext));
                     }
                     Incoming::Control(msg @ ControlMessage::PairingComplete { .. }) => {
@@ -927,6 +927,68 @@ where
             }
         }
     }
+}
+
+/// What ended one wait of the pairing loop in [`run_pairing`].
+enum Wake {
+    /// The overall pairing deadline passed.
+    Timeout,
+    /// The local user answered the SAS comparison.
+    Decision(SasDecision),
+    /// A relay frame, or `None` once the relay closed the connection. Boxed
+    /// so the other wakes stay small; a pairing sees only a few frames.
+    Frame(Option<Box<Incoming>>),
+    /// [`COMMITMENT_WAIT`] ran out without a commitment.
+    CommitmentWaitOver,
+}
+
+/// Wait for the next event of the pairing loop. A finished `decision` or
+/// `commitment_wait` is cleared, so it is never polled again.
+///
+/// When several are ready at once, which happens after the process stalled,
+/// the arms are polled in a fixed order rather than at random:
+///
+/// 1. The overall deadline, so frames arriving without pause cannot keep the
+///    pairing open past it.
+/// 2. The user's answer, so those frames cannot delay it either.
+/// 3. Relay frames already in the queue.
+/// 4. [`COMMITMENT_WAIT`] last. After a stall past the wait, a commitment the
+///    transport already queued is taken instead of falling back to reduced
+///    protection. Taking it late is sound: the creator still sends its own
+///    message only after it holds the commitment. Frames the transport has
+///    not queued yet can still lose to the wait; that is the bound working.
+async fn next_wake<F>(
+    timeout: std::pin::Pin<&mut tokio::time::Sleep>,
+    decision: &mut Option<std::pin::Pin<Box<F>>>,
+    incoming: &mut tokio::sync::mpsc::Receiver<Incoming>,
+    commitment_wait: &mut Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+) -> Wake
+where
+    F: Future<Output = SasDecision>,
+{
+    let wake = tokio::select! {
+        biased;
+        _ = timeout => Wake::Timeout,
+        verdict = async {
+            match decision.as_mut() {
+                Some(pending) => pending.await,
+                None => std::future::pending().await,
+            }
+        }, if decision.is_some() => Wake::Decision(verdict),
+        frame = incoming.recv() => Wake::Frame(frame.map(Box::new)),
+        _ = async {
+            match commitment_wait.as_mut() {
+                Some(wait) => wait.await,
+                None => std::future::pending().await,
+            }
+        }, if commitment_wait.is_some() => Wake::CommitmentWaitOver,
+    };
+    match wake {
+        Wake::Decision(_) => *decision = None,
+        Wake::CommitmentWaitOver => *commitment_wait = None,
+        Wake::Timeout | Wake::Frame(_) => {}
+    }
+    wake
 }
 
 /// Send `error` so the relay drops the pairing session, close, and keep
@@ -2113,6 +2175,115 @@ mod tests {
             store,
             directory,
         )
+    }
+
+    /// Calls per wake-priority check. Without `biased;`, Tokio's `select!`
+    /// starts at a random one of the four arms and moves on past a pending or
+    /// disabled one, so in the loop's arm order the arm a check expects can
+    /// still win from up to three of the four start points. An unbiased
+    /// select passes all 64 calls with probability at most (3/4)^64 ≈ 1e-8.
+    const PRIORITY_ROUNDS: usize = 64;
+
+    /// How far a stalled loop overshoots a deadline before it polls again.
+    const STALL_OVERSHOOT: Duration = Duration::from_millis(200);
+
+    /// A pending SAS decision of a fixed type, `Some` once the user answered.
+    type Answer = Option<std::pin::Pin<Box<std::future::Ready<SasDecision>>>>;
+
+    /// A sleep whose deadline a stalled pairing task overslept, as when the
+    /// process is parked right after arming [`COMMITMENT_WAIT`]. Needs paused
+    /// time.
+    async fn overslept(duration: Duration) -> std::pin::Pin<Box<tokio::time::Sleep>> {
+        let mut sleep = Box::pin(tokio::time::sleep(duration));
+        // Register the timer the way the pairing loop's first poll does.
+        std::future::poll_fn(|cx| {
+            let _ = sleep.as_mut().poll(cx);
+            std::task::Poll::Ready(())
+        })
+        .await;
+        tokio::time::advance(duration + STALL_OVERSHOOT).await;
+        assert!(sleep.is_elapsed(), "the stalled timer has fired");
+        sleep
+    }
+
+    /// An overall pairing deadline that is still a whole pairing away.
+    fn far_deadline() -> std::pin::Pin<Box<tokio::time::Sleep>> {
+        Box::pin(tokio::time::sleep(Duration::from_secs(
+            clipsync_protocol::PAIRING_TTL_SECS,
+        )))
+    }
+
+    /// The incoming queue with the joiner's commitment already buffered. The
+    /// sender stays open, as the transport's does.
+    fn buffered_commitment() -> (
+        tokio::sync::mpsc::Sender<Incoming>,
+        tokio::sync::mpsc::Receiver<Incoming>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tx.try_send(Incoming::Control(ControlMessage::Spake2Commit {
+            pairing_session_id: PairingSessionId::new(),
+            commitment: b64_encode(&[0; SPAKE2_COMMITMENT_LEN]),
+        }))
+        .unwrap();
+        (tx, rx)
+    }
+
+    /// The reviewer's stall: the creator armed [`COMMITMENT_WAIT`], was parked
+    /// past it, and the honest joiner's commitment reached the queue
+    /// meanwhile. The buffered commitment must win, or the creator falls back
+    /// and an honest pairing shows reduced protection.
+    #[tokio::test(start_paused = true)]
+    async fn a_buffered_commitment_beats_an_overslept_commitment_wait() {
+        for round in 0..PRIORITY_ROUNDS {
+            let (_tx, mut incoming) = buffered_commitment();
+            let mut wait = Some(overslept(COMMITMENT_WAIT).await);
+            let mut timeout = far_deadline();
+            let mut decision: Answer = None;
+            let wake = next_wake(timeout.as_mut(), &mut decision, &mut incoming, &mut wait).await;
+            let Wake::Frame(Some(frame)) = wake else {
+                panic!("round {round}: the commitment wait won over a buffered commitment");
+            };
+            assert!(
+                matches!(
+                    *frame,
+                    Incoming::Control(ControlMessage::Spake2Commit { .. })
+                ),
+                "round {round}: the buffered commitment is delivered"
+            );
+            assert!(wait.is_some(), "round {round}: the wait is still armed");
+            // With the queue drained, the wait ends as before.
+            let wake = next_wake(timeout.as_mut(), &mut decision, &mut incoming, &mut wait).await;
+            assert!(
+                matches!(wake, Wake::CommitmentWaitOver),
+                "round {round}: the wait ends once the queue is empty"
+            );
+            assert!(wait.is_none(), "round {round}: a fired wait is cleared");
+        }
+    }
+
+    /// A relay flooding frames cannot hold the pairing past its deadline, and
+    /// cannot delay the user's answer.
+    #[tokio::test(start_paused = true)]
+    async fn the_deadline_and_the_users_answer_beat_buffered_frames() {
+        for round in 0..PRIORITY_ROUNDS {
+            let (_tx, mut incoming) = buffered_commitment();
+            let mut wait = Some(overslept(COMMITMENT_WAIT).await);
+            let mut decision: Answer = Some(Box::pin(std::future::ready(SasDecision::Confirmed)));
+            let mut timeout = overslept(Duration::ZERO).await;
+            let wake = next_wake(timeout.as_mut(), &mut decision, &mut incoming, &mut wait).await;
+            assert!(
+                matches!(wake, Wake::Timeout),
+                "round {round}: a buffered frame or answer outran the deadline"
+            );
+
+            let mut timeout = far_deadline();
+            let wake = next_wake(timeout.as_mut(), &mut decision, &mut incoming, &mut wait).await;
+            assert!(
+                matches!(wake, Wake::Decision(SasDecision::Confirmed)),
+                "round {round}: a buffered frame outran the user's answer"
+            );
+            assert!(decision.is_none(), "round {round}: an answer is taken once");
+        }
     }
 
     #[tokio::test]
