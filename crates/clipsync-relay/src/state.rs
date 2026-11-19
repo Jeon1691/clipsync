@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use clipsync_protocol::Timestamp;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
-use rand::Rng;
+use rand::RngExt;
 use tokio::sync::{mpsc, Notify};
 
 use clipsync_protocol::{

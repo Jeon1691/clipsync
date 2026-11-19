@@ -1,6 +1,6 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
-use rand::rngs::OsRng;
+use rand::rngs::SysRng;
 use serde::{Deserialize, Serialize};
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -16,9 +16,9 @@ pub struct WrappedEpochKey {
 }
 
 pub fn random_epoch_key() -> [u8; KEY_LEN] {
-    use rand::TryRngCore;
+    use rand::TryRng;
     let mut key = [0u8; KEY_LEN];
-    OsRng
+    SysRng
         .try_fill_bytes(&mut key)
         .expect("operating system randomness unavailable");
     key
@@ -93,6 +93,17 @@ mod tests {
         let wrapped = wrap_epoch_key(&pk, &epoch).unwrap();
         let opened = unwrap_epoch_key(&sk, &wrapped).unwrap();
         assert_eq!(epoch, opened);
+    }
+
+    #[test]
+    fn random_epoch_keys_are_fresh_os_entropy() {
+        let first = random_epoch_key();
+        let second = random_epoch_key();
+        assert_ne!(first, [0u8; KEY_LEN], "SysRng must overwrite the buffer");
+        assert_ne!(first, second, "each epoch key must be drawn afresh");
+        let sk = StaticSecret::random();
+        let wrapped = wrap_epoch_key(&PublicKey::from(&sk), &second).unwrap();
+        assert_eq!(unwrap_epoch_key(&sk, &wrapped).unwrap(), second);
     }
 
     #[test]
