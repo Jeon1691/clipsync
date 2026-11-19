@@ -4854,6 +4854,41 @@
       "description": "secure_listener and binary_contract fixtures reserved a port and dropped it before the relay bound it, so parallel processes could take the port between readiness and use",
       "checks": [],
       "notes": "Under 4 concurrent copies of each binary plus a parallel build, the old harness failed 12 of 480 process runs (connection reset or refused after readiness) and the new port-0 harness failed 0 of 480. The tests proposed in #42 are the affected tests themselves and the race is load-dependent, so, as with F94 and F101, no deterministic focused regression is credited. A mutation of --bind precedence fails relay_binary_honors_bind_and_serves_health_before_shutdown, which pins the binary contract rather than the race."
+    },
+    {
+      "id": "F135",
+      "kind": "Runtime",
+      "fixes": [
+        "a9aa06a73231a7fb13a9381529346434599e9d98"
+      ],
+      "description": "The pairing loop's unbiased select could take the commitment-wait fallback over a commitment already queued after a creator stall, so an honest pairing showed reduced protection and require_commitment refused it",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::a_buffered_commitment_beats_an_overslept_commitment_wait",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::the_deadline_and_the_users_answer_beat_buffered_frames",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Review of #53 reproduced the downgrade by parking the creator for COMMITMENT_WAIT plus 200 ms right after it armed the wait: 4 of 12 honest committing joiners got a creator message without after_commitment. With the select factored into next_wake, both focused paused-time checks fail in round 0-2 of 64 on the unbiased order and pass with the biased order (overall deadline, user answer, queued frames, commitment wait). The second check pins that a stream of queued frames can neither outlast the overall deadline nor delay the user's answer. A commitment still in the socket when the wait ends still loses to it; that is the documented bound, not a defect."
     }
   ]
 }

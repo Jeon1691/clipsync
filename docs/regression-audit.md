@@ -1,6 +1,6 @@
 # Six-month regression-test audit — 2026-11-18
 
-The complete ledger now registers **85 of 134 distinct corrected defects (63.43%)**,
+The complete ledger now registers **86 of 135 distinct corrected defects (63.70%)**,
 meeting the Silver requirement of at least 50%. [The machine-readable ledger](regressions.json)
 and [CI checker](../scripts/check-regressions.py) preserve the full denominator
 and derive credit from concrete test references, not a manually entered Boolean.
@@ -44,9 +44,9 @@ that an assertion reproduces a historical defect.
 
 | Scope | Registered defects | Complete defects | Fraction |
 | --- | ---: | ---: | ---: |
-| Broad ledger | 85 | 134 | 63.43% |
-| Project runtime/security | 71 | 86 | 82.56% |
-| All project-authored corrections | 85 | 121 | 70.25% |
+| Broad ledger | 86 | 135 | 63.70% |
+| Project runtime/security | 72 | 87 | 82.76% |
+| All project-authored corrections | 86 | 122 | 70.49% |
 
 The original baseline increased from **24/84 (28.57%)** to **44/84 (52.38%)** without
 removing defects or treating test variants as extra bugs. The newly covered rows
@@ -206,7 +206,18 @@ applies. The other 23 rows carry
 197 checks. On macOS, `--verify-tests` discovers all 194 macOS-scoped checks as
 compiled non-ignored tests; the three Windows-only checks belong to the Windows
 CI job. Unix pty, POSIX-mode and macOS quarantine tests are scoped to those
-platforms. The complete total is **85/134 (63.43%)**.
+platforms. That series totals **85/134 (63.43%)**.
+
+F135 records a pairing downgrade found in review of #53. The creator's
+pairing loop polled its `select!` arms in random order, so after a stall past
+`COMMITMENT_WAIT` it could take the fallback even though the joiner's
+commitment was already queued; an honest pairing then showed reduced
+protection, and `pairing.require_commitment` refused it. The
+[fix](https://github.com/Jeon1691/clipsync/commit/a9aa06a73231a7fb13a9381529346434599e9d98) polls the overall
+deadline, the user's answer, queued frames and the commitment wait in that
+order. Both [paused-time wake-order checks](../crates/clipsync-core/src/pairing.rs)
+fail on the unbiased order and are registered. The complete total is
+**86/135 (63.70%)**.
 
 The scope table is derived from the ledger: runtime/security includes the
 `Runtime` and `Runtime-PR16` rows; project-authored corrections include every
@@ -388,6 +399,7 @@ whether the assertion meaningfully protects the stated behavior.
 | F132 | Build/CI | [298b7a0](https://github.com/Jeon1691/clipsync/commit/298b7a0b63efc2abe4e8416d13b71e5eff45cb36) | Live-presence fixture closed its scripted relay with a heartbeat unread | **Uncredited** — 4/200 stochastic reproduction; the affected test is not a deterministic focused regression. |
 | F133 | Runtime | [9a24217](https://github.com/Jeon1691/clipsync/commit/9a242177ff5b64f0395adde5e99697bef347dca3) | Overflowing --ttl durations panicked | **Registered** — [parser overflow](../crates/clipsync-cli/src/duration.rs) on all platforms and [CLI exit code](../crates/clipsync-cli/tests/local_commands.rs) on Unix. |
 | F134 | Build/CI | [9705c9b](https://github.com/Jeon1691/clipsync/commit/9705c9bb408dcaf7f16b58bd84b72ee417753cf4) | Listener fixtures reserved and dropped ports before the relay bound them | **Uncredited** — 12/480 old vs 0/480 new under load; the affected tests are not a deterministic focused regression. |
+| F135 | Runtime | [a9aa06a](https://github.com/Jeon1691/clipsync/commit/a9aa06a73231a7fb13a9381529346434599e9d98) | A creator stalled past the commitment wait could fall back although the commitment was already queued | **Registered** — [queued commitment beats the overslept wait; deadline and answer beat queued frames](../crates/clipsync-core/src/pairing.rs), paused time, all platforms. |
 
 The [official Silver criterion](https://www.bestpractices.dev/en/criteria/1#regression_tests_added50)
 defines the badge requirement. This ledger's defect taxonomy and conservative
