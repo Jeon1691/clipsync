@@ -4863,10 +4863,45 @@
       ],
       "description": "pairing::tests wall-clock budgets wrapped real macOS keychain writes, so the commitment-order and SAS-commit tests timed out when securityd stalled",
       "checks": [],
-      "notes": "A macOS CI run failed creator_sends_spake2_only_after_the_joiners_commitment with pairing outlived its budget after a ~16 s stall in which no clipsync-core lib test finished; the budget covered SecretStore::save_named mirroring room keys into the login keychain. A keyring backend whose set_secret blocks for 16 s reproduces the exact message on unchanged code. Under a parallel release build, the old tests failed 50 of 50 stressed runs and the corrected tests 0 of 50; the tests now use the keyring mock backend, so they also stop leaking keychain items. F136 later replaced that process-wide mock with a test-build feature that covers every test binary. The proposed checks (creator_sends_spake2_only_after_the_joiners_commitment, older_joiners_and_old_relays_pair_with_reduced_protection_shown and pairing_commits_only_after_the_user_confirms_a_matching_sas) are the affected tests themselves and the old tests usually pass on CI, so, as with F132, F134, F94 and F101, no deterministic focused regression is credited. F107 is the related product-side keychain-latency defect; this row is a test-harness correction only."
+      "notes": "A macOS CI run failed creator_sends_spake2_only_after_the_joiners_commitment with pairing outlived its budget after a ~16 s stall in which no clipsync-core lib test finished; the budget covered SecretStore::save_named mirroring room keys into the login keychain. A keyring backend whose set_secret blocks for 16 s reproduces the exact message on unchanged code. Under a parallel release build, the old tests failed 50 of 50 stressed runs and the corrected tests 0 of 50; the tests now use the keyring mock backend, so they also stop leaking keychain items. F137 later replaced that process-wide mock with a test-build feature that covers every test binary. The proposed checks (creator_sends_spake2_only_after_the_joiners_commitment, older_joiners_and_old_relays_pair_with_reduced_protection_shown and pairing_commits_only_after_the_user_confirms_a_matching_sas) are the affected tests themselves and the old tests usually pass on CI, so, as with F132, F134, F94 and F101, no deterministic focused regression is credited. F107 is the related product-side keychain-latency defect; this row is a test-harness correction only."
     },
     {
       "id": "F136",
+      "kind": "Runtime",
+      "fixes": [
+        "a9aa06a73231a7fb13a9381529346434599e9d98"
+      ],
+      "description": "The pairing loop's unbiased select could take the commitment-wait fallback over a commitment already queued after a creator stall, so an honest pairing showed reduced protection and require_commitment refused it",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::a_buffered_commitment_beats_an_overslept_commitment_wait",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::the_deadline_and_the_users_answer_beat_buffered_frames",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Review of #53 reproduced the downgrade by parking the creator for COMMITMENT_WAIT plus 200 ms right after it armed the wait: 4 of 12 honest committing joiners got a creator message without after_commitment. With the select factored into next_wake, both focused paused-time checks fail in round 0-2 of 64 on the unbiased order and pass with the biased order (overall deadline, user answer, queued frames, commitment wait). The second check pins that a stream of queued frames can neither outlast the overall deadline nor delay the user's answer. A commitment still in the socket when the wait ends still loses to it; that is the documented bound, not a defect."
+    },
+    {
+      "id": "F137",
       "kind": "Build/CI",
       "fixes": [
         "f8ad08ceaf0cb3653fe02a6bbac16e4921e26f6f"

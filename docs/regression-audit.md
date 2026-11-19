@@ -1,6 +1,6 @@
 # Six-month regression-test audit — 2026-11-18
 
-The complete ledger now registers **86 of 136 distinct corrected defects (63.24%)**,
+The complete ledger now registers **87 of 137 distinct corrected defects (63.50%)**,
 meeting the Silver requirement of at least 50%. [The machine-readable ledger](regressions.json)
 and [CI checker](../scripts/check-regressions.py) preserve the full denominator
 and derive credit from concrete test references, not a manually entered Boolean.
@@ -44,9 +44,9 @@ that an assertion reproduces a historical defect.
 
 | Scope | Registered defects | Complete defects | Fraction |
 | --- | ---: | ---: | ---: |
-| Broad ledger | 86 | 136 | 63.24% |
-| Project runtime/security | 71 | 86 | 82.56% |
-| All project-authored corrections | 86 | 123 | 69.92% |
+| Broad ledger | 87 | 137 | 63.50% |
+| Project runtime/security | 72 | 87 | 82.76% |
+| All project-authored corrections | 87 | 124 | 70.16% |
 
 The original baseline increased from **24/84 (28.57%)** to **44/84 (52.38%)** without
 removing defects or treating test variants as extra bugs. The newly covered rows
@@ -217,10 +217,21 @@ code. Under a parallel release build the old tests failed 50 of 50 stressed runs
 and the corrected tests 0 of 50. The tests now use the keyring mock backend. The
 proposed checks are the affected tests themselves and usually pass on the old
 code in CI, so, like F132 and F134, the row stays **uncredited** under the F94/F101
-rule. F107 is the related product-side keychain-latency defect. The complete
-total is **85/135 (62.96%)**.
+rule. F107 is the related product-side keychain-latency defect. That series
+totals **85/135 (62.96%)**.
 
-F136 is also registered by its own fix PR and cites the fix commit. F135's
+F136 records a pairing downgrade found in review of #53. The creator's
+pairing loop polled its `select!` arms in random order, so after a stall past
+`COMMITMENT_WAIT` it could take the fallback even though the joiner's
+commitment was already queued; an honest pairing then showed reduced
+protection, and `pairing.require_commitment` refused it. The
+[fix](https://github.com/Jeon1691/clipsync/commit/a9aa06a73231a7fb13a9381529346434599e9d98) polls the overall
+deadline, the user's answer, queued frames and the commitment wait in that
+order. Both [paused-time wake-order checks](../crates/clipsync-core/src/pairing.rs)
+fail on the unbiased order and are registered. The complete total is
+**86/136 (63.24%)**.
+
+F137 is also registered by its own fix PR and cites the fix commit. F135's
 keyring mock was selected process-wide, but only by `pairing::tests`, and the
 other test binaries kept mirroring secrets into the real keychain. On unchanged
 `d540e70` (macOS) each run added 4 login-keychain items for the `clipsync-core`
@@ -238,7 +249,7 @@ the macOS concurrency harness still use the native keychain, under a separate
 fail on the old code when run alone, because a removed secret is restored from
 the keychain, and pass with the fix. They are scoped to macOS and Windows (Linux
 has no mirror), so the row is **registered**. The complete total is
-**86/136 (63.24%)**.
+**87/137 (63.50%)**.
 
 The scope table is derived from the ledger: runtime/security includes the
 `Runtime` and `Runtime-PR16` rows; project-authored corrections include every
@@ -421,7 +432,8 @@ whether the assertion meaningfully protects the stated behavior.
 | F133 | Runtime | [9a24217](https://github.com/Jeon1691/clipsync/commit/9a242177ff5b64f0395adde5e99697bef347dca3) | Overflowing --ttl durations panicked | **Registered** — [parser overflow](../crates/clipsync-cli/src/duration.rs) on all platforms and [CLI exit code](../crates/clipsync-cli/tests/local_commands.rs) on Unix. |
 | F134 | Build/CI | [9705c9b](https://github.com/Jeon1691/clipsync/commit/9705c9bb408dcaf7f16b58bd84b72ee417753cf4) | Listener fixtures reserved and dropped ports before the relay bound them | **Uncredited** — 12/480 old vs 0/480 new under load; the affected tests are not a deterministic focused regression. |
 | F135 | Build/CI | [35cd5c5](https://github.com/Jeon1691/clipsync/commit/35cd5c5dddbbd33c82bbc7c2d4f4cc819205a77a) | Pairing test budgets wrapped real macOS keychain writes and timed out when securityd stalled | **Uncredited** — 50/50 old vs 0/50 new stressed runs; the affected tests are not a deterministic focused regression. |
-| F136 | Build/CI | [f8ad08c](https://github.com/Jeon1691/clipsync/commit/f8ad08ceaf0cb3653fe02a6bbac16e4921e26f6f) | Test builds mirrored secrets into the real OS keychain, and core lib isolation depended on test order | **Registered** — [core store probe](../crates/clipsync-core/src/lib.rs) and [relay e2e probe](../crates/clipsync-relay/tests/e2e.rs) on macOS and Windows. |
+| F136 | Runtime | [a9aa06a](https://github.com/Jeon1691/clipsync/commit/a9aa06a73231a7fb13a9381529346434599e9d98) | A creator stalled past the commitment wait could fall back although the commitment was already queued | **Registered** — [queued commitment beats the overslept wait; deadline and answer beat queued frames](../crates/clipsync-core/src/pairing.rs), paused time, all platforms. |
+| F137 | Build/CI | [f8ad08c](https://github.com/Jeon1691/clipsync/commit/f8ad08ceaf0cb3653fe02a6bbac16e4921e26f6f) | Test builds mirrored secrets into the real OS keychain, and core lib isolation depended on test order | **Registered** — [core store probe](../crates/clipsync-core/src/lib.rs) and [relay e2e probe](../crates/clipsync-relay/tests/e2e.rs) on macOS and Windows. |
 
 The [official Silver criterion](https://www.bestpractices.dev/en/criteria/1#regression_tests_added50)
 defines the badge requirement. This ledger's defect taxonomy and conservative

@@ -213,7 +213,7 @@ dynamic-analysis coverage.
 ## Regression policy and remaining higher-tier work
 
 The [full audit](regression-audit.md) and [machine-readable ledger](regressions.json)
-now register **86/136 (63.24%)** distinct corrected defects, exceeding the 50%
+now register **87/137 (63.50%)** distinct corrected defects, exceeding the 50%
 Silver regression requirement. The checker validates real test references and
 the full denominator in all three CI platform jobs; future fixes must update
 the ledger and cannot silently delete uncovered cases. This fraction is separate
