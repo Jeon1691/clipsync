@@ -50,7 +50,7 @@ url.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
-rcgen = "0.13"
+rcgen = "0.14"
 # Paused time keeps the read-loop deadline tests fast and deterministic.
 tokio = { workspace = true, features = ["test-util"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
