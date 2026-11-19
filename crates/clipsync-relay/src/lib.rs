@@ -104,7 +104,7 @@ fn token_secret_from_env() -> anyhow::Result<Vec<u8>> {
         Ok(secret)
     } else {
         let mut secret = vec![0u8; 32];
-        rand::TryRngCore::try_fill_bytes(&mut rand::rngs::OsRng, &mut secret)
+        rand::TryRng::try_fill_bytes(&mut rand::rngs::SysRng, &mut secret)
             .map_err(|error| anyhow::anyhow!("operating system randomness unavailable: {error}"))?;
         Ok(secret)
     }

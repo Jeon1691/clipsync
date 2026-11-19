@@ -17,7 +17,8 @@ use clipsync_protocol::{
 };
 use futures_util::{SinkExt, StreamExt};
 use rcgen::{
-    BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+    BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose,
 };
 use rustls::pki_types::ServerName;
 use tokio::io::AsyncReadExt;
@@ -30,6 +31,12 @@ use tokio_tungstenite::{
 
 use support::{Relay, EPHEMERAL_LOOPBACK_BIND};
 
+/// Backdating `notBefore` by a day keeps the fixtures valid on hosts whose
+/// clock is slightly behind the one that minted them.
+const CERTIFICATE_BACKDATE: Duration = Duration::from_secs(24 * 60 * 60);
+/// A week comfortably outlives any test run while staying short-lived.
+const CERTIFICATE_LIFETIME: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
 struct Identity {
     directory: tempfile::TempDir,
     root: rustls::pki_types::CertificateDer<'static>,
@@ -37,21 +44,24 @@ struct Identity {
 
 impl Identity {
     fn new() -> Self {
-        let mut ca = CertificateParams::new(Vec::<String>::new()).unwrap();
-        ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let now = SystemTime::now();
-        ca.not_before = (now - Duration::from_secs(86_400)).into();
-        ca.not_after = (now + Duration::from_secs(7 * 86_400)).into();
+        ca_params.not_before = (now - CERTIFICATE_BACKDATE).into();
+        ca_params.not_after = (now + CERTIFICATE_LIFETIME).into();
         let ca_key = KeyPair::generate().unwrap();
-        let ca = ca.self_signed(&ca_key).unwrap();
+        let ca = ca_params.self_signed(&ca_key).unwrap();
+        // The issuer takes its subject name, key identifier method and key
+        // usages from the same parameters that produced the root above.
+        let issuer = Issuer::from_params(&ca_params, &ca_key);
         let mut leaf = CertificateParams::new(vec!["localhost".into()]).unwrap();
         leaf.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-        leaf.not_before = (now - Duration::from_secs(86_400)).into();
-        leaf.not_after = (now + Duration::from_secs(7 * 86_400)).into();
+        leaf.not_before = (now - CERTIFICATE_BACKDATE).into();
+        leaf.not_after = (now + CERTIFICATE_LIFETIME).into();
         let key = KeyPair::generate().unwrap();
-        let leaf = leaf.signed_by(&key, &ca, &ca_key).unwrap();
+        let leaf = leaf.signed_by(&key, &issuer).unwrap();
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("cert.pem"), leaf.pem()).unwrap();
         private_file(
