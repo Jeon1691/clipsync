@@ -95,7 +95,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"]
 ulid = { version = "3", features = ["serde"] }
 uniffi = "0.32.2"
 url = "2"
-which = "7"
+which = "8"
 x25519-dalek = { version = "3", features = ["static_secrets", "getrandom", "zeroize"] }
 zeroize = { version = "1", features = ["zeroize_derive"] }
 
