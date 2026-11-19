@@ -1088,6 +1088,26 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// Open a store in `directory` whose credentials never reach the OS
+    /// keychain.
+    ///
+    /// `SecretStore` writes every secret to its private file first and then
+    /// mirrors it to the macOS or Windows keychain, best effort (Linux has no
+    /// mirror). That mirror is a call into a system daemon whose latency no
+    /// test controls: on a loaded macOS runner it stalled a committed pairing
+    /// past its budget, and each run left entries behind in the developer's
+    /// login keychain. The keyring crate's memory-only backend keeps the
+    /// mirror call but not the daemon. The backend is chosen process-wide;
+    /// that is safe for every test in this binary because the store reads the
+    /// file before the keychain, so the outcome is the one Linux CI checks.
+    fn open_store(directory: &tempfile::TempDir) -> LocalStore {
+        static MEMORY_KEYCHAIN: std::sync::Once = std::sync::Once::new();
+        MEMORY_KEYCHAIN.call_once(|| {
+            keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+        });
+        LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap()
+    }
+
     /// What the scripted joiner does once both key confirmations passed.
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Joiner {
@@ -1477,8 +1497,7 @@ mod tests {
     async fn pairing_commits_only_after_the_user_confirms_a_matching_sas() {
         for script in [Joiner::BindsAfterUs, Joiner::BindsFirst] {
             let directory = tempfile::TempDir::new().unwrap();
-            let store =
-                LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+            let store = open_store(&directory);
             let identity = DeviceIdentity::from_bytes("sas-confirm-local".into(), [36; 32]);
             let sid = PairingSessionId::new();
             let room = clipsync_protocol::RoomId::new();
@@ -1541,11 +1560,12 @@ mod tests {
                 assert!(secret_files(&store).is_empty());
                 answer.send(SasDecision::Confirmed).unwrap();
             };
-            let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
-                tokio::join!(pairing, driver)
-            })
-            .await
-            .unwrap();
+            // The relay script shares this deadline, so a pairing cannot
+            // usefully outlive it.
+            let (result, ()) =
+                tokio::time::timeout(SCRIPT_DEADLINE, async { tokio::join!(pairing, driver) })
+                    .await
+                    .unwrap();
             result.unwrap();
             assert!(matches!(
                 frame.await.unwrap().as_slice(),
@@ -1564,8 +1584,7 @@ mod tests {
     async fn rejected_sas_sends_no_binding_and_stores_no_room_keys_or_credentials() {
         for script in [Joiner::BindsAfterUs, Joiner::BindsFirst] {
             let directory = tempfile::TempDir::new().unwrap();
-            let store =
-                LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+            let store = open_store(&directory);
             let identity = DeviceIdentity::from_bytes("sas-reject-local".into(), [37; 32]);
             let sid = PairingSessionId::new();
             let room = clipsync_protocol::RoomId::new();
@@ -1635,8 +1654,7 @@ mod tests {
             ),
         ] {
             let directory = tempfile::TempDir::new().unwrap();
-            let store =
-                LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+            let store = open_store(&directory);
             let identity = DeviceIdentity::from_bytes("sas-peer-rejects-local".into(), [39; 32]);
             let sid = PairingSessionId::new();
             let room = clipsync_protocol::RoomId::new();
@@ -1690,8 +1708,7 @@ mod tests {
     #[tokio::test]
     async fn unanswered_sas_prompt_times_out_without_storing_anything() {
         let directory = tempfile::TempDir::new().unwrap();
-        let store =
-            LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+        let store = open_store(&directory);
         let identity = DeviceIdentity::from_bytes("sas-timeout-local".into(), [38; 32]);
         let sid = PairingSessionId::new();
         let room = clipsync_protocol::RoomId::new();
@@ -1753,8 +1770,7 @@ mod tests {
     async fn a_relay_cannot_rename_the_peer_after_spake2_started() {
         for new_id in [false, true] {
             let directory = tempfile::TempDir::new().unwrap();
-            let store =
-                LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+            let store = open_store(&directory);
             let identity = DeviceIdentity::from_bytes("sas-rename-local".into(), [37; 32]);
             let sid = PairingSessionId::new();
             let room = clipsync_protocol::RoomId::new();
@@ -1830,6 +1846,10 @@ mod tests {
 
     /// How long a script listens for a frame the client must not send yet.
     const EARLY_FRAME_PROBE: Duration = Duration::from_millis(300);
+    // [`JoinerWire::CommitsLate`] commits only once this probe ends, so the
+    // probe must end before the creator's own fallback fires; the difference
+    // is how far a slow runner may lag before that commitment is late.
+    const _: () = assert!(EARLY_FRAME_PROBE.as_nanos() < COMMITMENT_WAIT.as_nanos());
 
     /// Scripted relay plus honest creator (role A) for a client joining as
     /// role B. With `rename`, the relay announces the creator under a forged
@@ -1938,8 +1958,7 @@ mod tests {
     async fn joiner_shows_the_creator_name_inert_and_refuses_a_late_rename() {
         for rename in [false, true] {
             let directory = tempfile::TempDir::new().unwrap();
-            let store =
-                LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+            let store = open_store(&directory);
             let identity = DeviceIdentity::from_bytes("sas-joiner-local".into(), [38; 32]);
             let creator = DeviceId::from("sas-creator-remote");
             let sid = PairingSessionId::new();
@@ -2023,12 +2042,17 @@ mod tests {
         tempfile::TempDir,
     ) {
         let directory = tempfile::TempDir::new().unwrap();
-        let store =
-            LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+        let store = open_store(&directory);
         let identity =
             DeviceIdentity::from_bytes(format!("commit-local-{seed}").into(), [seed; 32]);
         let sid = PairingSessionId::new();
         let room = clipsync_protocol::RoomId::new();
+        // A hang guard, not a speed claim: a creator behind an old relay sits
+        // out `COMMITMENT_WAIT`, and the rest is the budget of a scripted relay
+        // that answers at once. What else runs inside it is loopback round
+        // trips and the file store's writes, well under a second; the OS
+        // keychain, which a loaded runner stalls for longer than the whole
+        // budget, is kept out by `open_store`.
         let budget = COMMITMENT_WAIT + SCRIPT_DEADLINE;
         let (mut server, peer_sas, frame, release) = scripted_joiner(
             identity.device_id.clone(),
@@ -2218,8 +2242,7 @@ mod tests {
             (CreatorWire::Legacy, CommitmentPolicy::Require, None),
         ] {
             let directory = tempfile::TempDir::new().unwrap();
-            let store =
-                LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+            let store = open_store(&directory);
             let identity = DeviceIdentity::from_bytes("commit-joiner-local".into(), [46; 32]);
             let creator = DeviceId::from("commit-creator-remote");
             let sid = PairingSessionId::new();
@@ -2436,8 +2459,7 @@ mod tests {
         // that runs the suite.
         std::env::remove_var(clipsync_transport::ALLOW_INSECURE_RELAY_ENV);
         let directory = tempfile::TempDir::new().unwrap();
-        let store =
-            LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+        let store = open_store(&directory);
         let identity = DeviceIdentity::from_bytes("plaintext-relay".into(), [41; 32]);
         for relay_url in ["http://192.0.2.1:7600", "relay.example.test"] {
             let cfg = AppConfig {
@@ -2503,8 +2525,7 @@ mod tests {
             .await
         };
         let directory = tempfile::TempDir::new().unwrap();
-        let store =
-            LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+        let store = open_store(&directory);
         let identity = DeviceIdentity::from_bytes("redirecting-relay".into(), [43; 32]);
         for target in [
             format!("{}/steal", capture.url),
@@ -2563,8 +2584,7 @@ mod tests {
     async fn http_pairing_failures_preserve_relay_details_and_expired_code_guidance() {
         use axum::{http::StatusCode, routing::post, Router};
         let directory = tempfile::TempDir::new().unwrap();
-        let store =
-            LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+        let store = open_store(&directory);
         let identity = DeviceIdentity::from_bytes("http-failure".into(), [31; 32]);
         for (status, body) in [
             (StatusCode::CONFLICT, "code_invalid"),
@@ -2641,8 +2661,7 @@ mod tests {
         )
         .await;
         let directory = tempfile::TempDir::new().unwrap();
-        let store =
-            LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+        let store = open_store(&directory);
         let cfg = AppConfig {
             relay_url: server.url.clone(),
             ..Default::default()
@@ -2708,8 +2727,7 @@ mod tests {
             (good_room.clone(), peer(".."), PAIRING_RESPONSE),
         ];
         let directory = tempfile::TempDir::new().unwrap();
-        let store =
-            LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+        let store = open_store(&directory);
         let identity = DeviceIdentity::from_bytes("malformed-ids".into(), [39; 32]);
         for (pairing_code, room_id, what) in creates {
             let created = CreatePairingResponse {
@@ -2777,8 +2795,7 @@ mod tests {
     #[tokio::test]
     async fn a_completion_for_another_room_stores_nothing() {
         let directory = tempfile::TempDir::new().unwrap();
-        let store =
-            LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+        let store = open_store(&directory);
         let identity = DeviceIdentity::from_bytes("sas-other-room".into(), [40; 32]);
         let sid = PairingSessionId::new();
         // The relay completes into a room other than the one it announced.
@@ -2847,8 +2864,7 @@ mod tests {
             })
             .await;
             let directory = tempfile::TempDir::new().unwrap();
-            let store =
-                LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+            let store = open_store(&directory);
             let identity = DeviceIdentity::from_bytes("interrupted".into(), [33; 32]);
             let connection = RelayConnection::connect(&join_ws(&server.url, "/v1/ws"))
                 .await
@@ -2897,8 +2913,7 @@ mod tests {
         )
         .await;
         let directory = tempfile::tempdir().unwrap();
-        let store =
-            LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+        let store = open_store(&directory);
         let identity = DeviceIdentity::from_bytes("pairing-timeout".into(), [35; 32]);
         let connection = RelayConnection::connect(&join_ws(&server.url, "/v1/ws"))
             .await
@@ -2948,8 +2963,7 @@ mod tests {
             "ciphertext",
         ] {
             let directory = tempfile::TempDir::new().unwrap();
-            let store =
-                LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+            let store = open_store(&directory);
             let identity = DeviceIdentity::from_bytes("hostile-peer-local".into(), [34; 32]);
             let peer = DeviceId::from("hostile-peer-remote");
             let sid = PairingSessionId::new();

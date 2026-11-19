@@ -1,6 +1,6 @@
 # Six-month regression-test audit — 2026-11-18
 
-The complete ledger now registers **85 of 134 distinct corrected defects (63.43%)**,
+The complete ledger now registers **85 of 135 distinct corrected defects (62.96%)**,
 meeting the Silver requirement of at least 50%. [The machine-readable ledger](regressions.json)
 and [CI checker](../scripts/check-regressions.py) preserve the full denominator
 and derive credit from concrete test references, not a manually entered Boolean.
@@ -44,9 +44,9 @@ that an assertion reproduces a historical defect.
 
 | Scope | Registered defects | Complete defects | Fraction |
 | --- | ---: | ---: | ---: |
-| Broad ledger | 85 | 134 | 63.43% |
+| Broad ledger | 85 | 135 | 62.96% |
 | Project runtime/security | 71 | 86 | 82.56% |
-| All project-authored corrections | 85 | 121 | 70.25% |
+| All project-authored corrections | 85 | 122 | 69.67% |
 
 The original baseline increased from **24/84 (28.57%)** to **44/84 (52.38%)** without
 removing defects or treating test variants as extra bugs. The newly covered rows
@@ -207,6 +207,18 @@ applies. The other 23 rows carry
 compiled non-ignored tests; the three Windows-only checks belong to the Windows
 CI job. Unix pty, POSIX-mode and macOS quarantine tests are scoped to those
 platforms. The complete total is **85/134 (63.43%)**.
+
+F135 is registered by its own fix PR (#53), as F108 was, and cites the fix
+commit. The `pairing::tests` wall-clock budgets wrapped `SecretStore::save_named`,
+which mirrors room keys into the real macOS keychain, so a `securityd` stall of
+about 16 s on a CI runner timed out the commitment-order test. A keyring backend
+whose `set_secret` blocks that long reproduces the exact failure on unchanged
+code. Under a parallel release build the old tests failed 50 of 50 stressed runs
+and the corrected tests 0 of 50. The tests now use the keyring mock backend. The
+proposed checks are the affected tests themselves and usually pass on the old
+code in CI, so, like F132 and F134, the row stays **uncredited** under the F94/F101
+rule. F107 is the related product-side keychain-latency defect. The complete
+total is **85/135 (62.96%)**.
 
 The scope table is derived from the ledger: runtime/security includes the
 `Runtime` and `Runtime-PR16` rows; project-authored corrections include every
@@ -388,6 +400,7 @@ whether the assertion meaningfully protects the stated behavior.
 | F132 | Build/CI | [298b7a0](https://github.com/Jeon1691/clipsync/commit/298b7a0b63efc2abe4e8416d13b71e5eff45cb36) | Live-presence fixture closed its scripted relay with a heartbeat unread | **Uncredited** — 4/200 stochastic reproduction; the affected test is not a deterministic focused regression. |
 | F133 | Runtime | [9a24217](https://github.com/Jeon1691/clipsync/commit/9a242177ff5b64f0395adde5e99697bef347dca3) | Overflowing --ttl durations panicked | **Registered** — [parser overflow](../crates/clipsync-cli/src/duration.rs) on all platforms and [CLI exit code](../crates/clipsync-cli/tests/local_commands.rs) on Unix. |
 | F134 | Build/CI | [9705c9b](https://github.com/Jeon1691/clipsync/commit/9705c9bb408dcaf7f16b58bd84b72ee417753cf4) | Listener fixtures reserved and dropped ports before the relay bound them | **Uncredited** — 12/480 old vs 0/480 new under load; the affected tests are not a deterministic focused regression. |
+| F135 | Build/CI | [35cd5c5](https://github.com/Jeon1691/clipsync/commit/35cd5c5dddbbd33c82bbc7c2d4f4cc819205a77a) | Pairing test budgets wrapped real macOS keychain writes and timed out when securityd stalled | **Uncredited** — 50/50 old vs 0/50 new stressed runs; the affected tests are not a deterministic focused regression. |
 
 The [official Silver criterion](https://www.bestpractices.dev/en/criteria/1#regression_tests_added50)
 defines the badge requirement. This ledger's defect taxonomy and conservative
