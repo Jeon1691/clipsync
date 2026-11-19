@@ -1000,7 +1000,6 @@ dependencies = [
  "hex",
  "hostname",
  "infer",
- "keyring",
  "parking_lot 0.13.0",
  "rand 0.9.5",
  "reqwest",
@@ -1124,7 +1123,6 @@ dependencies = [
  "hmac 0.13.0",
  "image",
  "ipnet",
- "keyring",
  "libc",
  "rand 0.9.5",
  "rcgen",
@@ -1153,6 +1151,7 @@ version = "0.2.0"
 dependencies = [
  "clipsync-crypto",
  "clipsync-protocol",
+ "clipsync-storage",
  "directories",
  "hex",
  "keyring",

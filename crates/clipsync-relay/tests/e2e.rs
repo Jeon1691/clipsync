@@ -290,6 +290,31 @@ async fn healthz_ok() {
     assert_eq!(body["ok"], true);
 }
 
+/// These fixtures never mirror a secret into the OS keychain: once the
+/// private files are gone, neither the identity nor a named secret (the
+/// way pairing stores room keys) can be restored.
+#[test]
+fn e2e_stores_never_mirror_secrets_into_the_os_keychain() {
+    let dir = TempDir::new().unwrap();
+    let app = App::open_from(AppPaths::from_root(dir.path().to_path_buf())).unwrap();
+    app.init(None).unwrap();
+    app.store
+        .secrets
+        .save_named("keychain-probe", "synthetic")
+        .unwrap();
+    std::fs::remove_file(app.store.paths.identity_file()).unwrap();
+    std::fs::remove_file(app.store.paths.data_dir.join("keychain-probe.secret")).unwrap();
+    let data_dir = app.store.paths.data_dir.display();
+    assert!(
+        app.store.secrets.load_named("keychain-probe").is_err(),
+        "a named secret for {data_dir} was restored from the OS keychain"
+    );
+    assert!(
+        app.store.secrets.load_identity().is_err(),
+        "the identity for {data_dir} was restored from the OS keychain"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pairing_and_text_push_pull() {
     let (relay, _h) = start_relay().await;

@@ -62,8 +62,10 @@ class PairingConcurrencyTests(unittest.TestCase):
 
     def test_runs_three_complete_suites_with_ten_threads(self):
         binary = self.executable(
-            "import sys\n"
-            "assert sys.argv[1:] == ['--nocapture', '--test-threads=10']\n"
+            "import os, sys\n"
+            "assert sys.argv[1:] == ['--nocapture', '--test-threads=10', '--skip', "
+            "'e2e_stores_never_mirror_secrets_into_the_os_keychain']\n"
+            "assert os.environ['CLIPSYNC_TEST_NATIVE_KEYCHAIN'] == '1'\n"
             "print('all ten tests ran')\n"
         )
         completed, report = self.invoke(binary)
@@ -73,6 +75,28 @@ class PairingConcurrencyTests(unittest.TestCase):
         self.assertEqual([copy["exit_code"] for copy in report["copies"]], [0, 0, 0])
         for copy in report["copies"]:
             self.assertIn("all ten tests ran", Path(copy["log"]).read_text())
+
+    @unittest.skipUnless(sys.platform == "darwin", "only macOS runs use the native keychain")
+    def test_removes_every_test_service_entry_and_nothing_else(self):
+        calls = self.base / "security-calls"
+        # Two entries exist; the third deletion finds none and fails, as security does.
+        self.executable(
+            "import sys\n"
+            f"log = open({str(calls)!r}, 'a')\n"
+            "log.write(' '.join(sys.argv[1:]) + '\\n')\n"
+            "log.close()\n"
+            f"sys.exit(0 if len(open({str(calls)!r}).readlines()) <= 2 else 44)\n",
+            name="security",
+        )
+        binary = self.executable("print('suite ran')\n")
+        env = dict(os.environ, PATH=str(self.base) + os.pathsep + os.environ["PATH"])
+        completed, report = self.invoke(binary, env=env)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(report["test_keychain_entries_removed"], 2)
+        self.assertEqual(
+            calls.read_text().splitlines(),
+            ["delete-generic-password -s dev.clipsync.test"] * 3,
+        )
 
     def test_timeout_kills_and_reaps_all_three_children(self):
         binary = self.executable("import time\ntime.sleep(60)\n")

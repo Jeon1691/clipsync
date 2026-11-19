@@ -1128,23 +1128,14 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// Open a store in `directory` whose credentials never reach the OS
-    /// keychain.
+    /// Open a store in `directory`.
     ///
-    /// `SecretStore` writes every secret to its private file first and then
-    /// mirrors it to the macOS or Windows keychain, best effort (Linux has no
-    /// mirror). That mirror is a call into a system daemon whose latency no
-    /// test controls: on a loaded macOS runner it stalled a committed pairing
-    /// past its budget, and each run left entries behind in the developer's
-    /// login keychain. The keyring crate's memory-only backend keeps the
-    /// mirror call but not the daemon. The backend is chosen process-wide;
-    /// that is safe for every test in this binary because the store reads the
-    /// file before the keychain, so the outcome is the one Linux CI checks.
+    /// Its credentials never reach the OS keychain: this crate's test builds
+    /// enable `clipsync-storage/test-isolated-keychain`, so every secret stays
+    /// in its private file, as on Linux. The keychain mirror is a call into a
+    /// system daemon whose latency no test controls; on a loaded macOS runner
+    /// it stalled a committed pairing past its budget (F135).
     fn open_store(directory: &tempfile::TempDir) -> LocalStore {
-        static MEMORY_KEYCHAIN: std::sync::Once = std::sync::Once::new();
-        MEMORY_KEYCHAIN.call_once(|| {
-            keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
-        });
         LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap()
     }
 

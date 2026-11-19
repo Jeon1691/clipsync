@@ -151,12 +151,6 @@ fn app_at(root: &Path, relay: &str, name: &str, secret: u8) -> (App, DeviceIdent
     (app, identity)
 }
 
-fn private_backend() {
-    // This changes only this filtered child process. No OS credential entry is
-    // constructed before selecting the library's memory-only test backend.
-    keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
-}
-
 #[test]
 fn readonly_status_reports_corrupt_identity_and_missing_room_credentials_without_repair() {
     const NAME: &str = "facade_behavior::readonly_status_reports_corrupt_identity_and_missing_room_credentials_without_repair";
@@ -164,7 +158,6 @@ fn readonly_status_reports_corrupt_identity_and_missing_room_credentials_without
         worker(NAME, None, "success");
         return;
     }
-    private_backend();
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         let root = std::env::var_os("CLIPSYNC_HOME").unwrap();
         let (app, _) = app_at(Path::new(&root), "http://127.0.0.1:0", "status-fixture", 64);
@@ -215,7 +208,6 @@ fn explicit_pairing_without_auto_sync_returns_matching_rooms_and_installs_no_ser
         worker(NAME, None, "success");
         return;
     }
-    private_backend();
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         tokio::time::timeout(Duration::from_secs(20), async {
             let config = clipsync_relay::RelayConfig {
@@ -331,7 +323,6 @@ fn ipc_copy_uses_only_the_selected_private_command_and_keeps_the_payload_on_writ
         worker(NAME, None, "fail");
         return;
     }
-    private_backend();
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         let root = std::env::var_os("CLIPSYNC_HOME").unwrap();
         let (app, _) = app_at(Path::new(&root), "http://127.0.0.1:0", "copy-fixture", 68);
@@ -457,7 +448,6 @@ fn doctor_preserves_bad_metadata_and_reports_private_clipboard_caps_and_health_f
         }
         return;
     }
-    private_backend();
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         let root = std::env::var_os("CLIPSYNC_HOME").unwrap();
         let url = std::env::var("CLIPSYNC_RELAY_URL").unwrap();

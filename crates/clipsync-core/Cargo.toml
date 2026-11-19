@@ -39,7 +39,8 @@ url.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 clipsync-relay = { path = "../clipsync-relay" }
-keyring.workspace = true
+# Test builds never mirror secrets into the OS keychain (see clipsync-storage).
+clipsync-storage = { workspace = true, features = ["test-isolated-keychain"] }
 rand.workspace = true
 tempfile.workspace = true
 tracing-subscriber.workspace = true

@@ -606,6 +606,31 @@ pub fn device_id_or_new(store: &LocalStore) -> Result<DeviceId, CoreError> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod regression_tests {
+    /// A test store never mirrors a secret into the OS keychain, whatever
+    /// test ran first in this binary: once the private files are gone,
+    /// neither the identity nor a named secret can be restored.
+    #[test]
+    fn test_stores_never_mirror_secrets_into_the_os_keychain() {
+        let root = tempfile::tempdir().unwrap();
+        let app = crate::App::open_from(super::AppPaths::from_root(root.path().into())).unwrap();
+        app.init(None).unwrap();
+        app.store
+            .secrets
+            .save_named("keychain-probe", "synthetic")
+            .unwrap();
+        std::fs::remove_file(app.store.paths.identity_file()).unwrap();
+        std::fs::remove_file(app.store.paths.data_dir.join("keychain-probe.secret")).unwrap();
+        let data_dir = app.store.paths.data_dir.display();
+        assert!(
+            app.store.secrets.load_named("keychain-probe").is_err(),
+            "a named secret for {data_dir} was restored from the OS keychain"
+        );
+        assert!(
+            app.store.secrets.load_identity().is_err(),
+            "the identity for {data_dir} was restored from the OS keychain"
+        );
+    }
+
     #[test]
     fn reading_the_identity_leaves_the_configuration_file_untouched() {
         // `status` and every command read the identity while a pairing or

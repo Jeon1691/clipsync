@@ -23,6 +23,8 @@ winit.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+# Test builds never mirror secrets into the OS keychain (see clipsync-storage).
+clipsync-storage = { workspace = true, features = ["test-isolated-keychain"] }
 clipsync-crypto.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
