@@ -17,6 +17,7 @@ use tokio_tungstenite::{
     tungstenite::{
         client::IntoClientRequest,
         http::{header::USER_AGENT, HeaderValue},
+        protocol::WebSocketConfig,
         Message,
     },
     Connector,
@@ -68,6 +69,25 @@ pub struct RelayConnection {
 /// stopped reading from holding the task.
 const CLOSE_HANDSHAKE_WAIT: Duration = Duration::from_secs(2);
 
+/// Largest WebSocket message the client accepts from the relay, after
+/// reassembling fragments. This is tungstenite's default from 0.26 through
+/// 0.29 (64 MiB), pinned here so a dependency upgrade cannot silently loosen
+/// the limit.
+const MAX_INCOMING_MESSAGE_BYTES: usize = 64 << 20;
+
+/// Largest single WebSocket frame the client accepts from the relay. This is
+/// tungstenite's default from 0.26 through 0.29 (16 MiB), pinned for the same
+/// reason as [`MAX_INCOMING_MESSAGE_BYTES`].
+const MAX_INCOMING_FRAME_BYTES: usize = 16 << 20;
+
+/// Client WebSocket settings: the explicit size limits above, with
+/// tungstenite's defaults for everything else (buffers, masking rules).
+fn websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(MAX_INCOMING_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_INCOMING_FRAME_BYTES))
+}
+
 #[expect(
     clippy::large_enum_variant,
     reason = "The 256-entry queue bounds inline control messages; avoid per-message allocation and preserve the public Incoming layout."
@@ -79,10 +99,6 @@ enum Outgoing {
 }
 
 impl RelayConnection {
-    #[expect(
-        clippy::result_large_err,
-        reason = "Preserve the public TransportError payload and conversions; see docs/compiler-warnings.md."
-    )]
     pub async fn connect(ws_url: &str) -> Result<Self> {
         // Re-check at connect time: configs written before this policy, or
         // `CLIPSYNC_RELAY_URL`, never went through `config set`.
@@ -96,7 +112,9 @@ impl RelayConnection {
             HeaderValue::from_static(concat!("clipsync-cli/", env!("CARGO_PKG_VERSION"))),
         );
         let connector = Connector::Rustls(tls::client_config()?);
-        let (stream, _) = connect_async_tls_with_config(req, None, false, Some(connector)).await?;
+        let (stream, _) =
+            connect_async_tls_with_config(req, Some(websocket_config()), false, Some(connector))
+                .await?;
         let (mut sink, mut stream) = stream.split();
         let (in_tx, incoming) = mpsc::channel(256);
         let (out_tx, mut out_rx) = mpsc::channel::<Outgoing>(256);
@@ -219,10 +237,6 @@ impl RelayConnection {
         })
     }
 
-    #[expect(
-        clippy::result_large_err,
-        reason = "Preserve the public TransportError payload and conversions; see docs/compiler-warnings.md."
-    )]
     pub async fn send_control(&self, msg: ControlMessage) -> Result<()> {
         self.outgoing
             .send(Outgoing::Control(msg))
@@ -230,10 +244,6 @@ impl RelayConnection {
             .map_err(|_| TransportError::Closed)
     }
 
-    #[expect(
-        clippy::result_large_err,
-        reason = "Preserve the public TransportError payload and conversions; see docs/compiler-warnings.md."
-    )]
     pub async fn send_binary(&self, bytes: Vec<u8>) -> Result<()> {
         self.outgoing
             .send(Outgoing::Binary(bytes))
@@ -714,5 +724,106 @@ mod tests {
         })
         .await
         .expect("a suspended session must reconnect after its watchdog resumes");
+    }
+
+    #[test]
+    fn websocket_config_pins_the_incoming_size_limits() {
+        let config = websocket_config();
+        let upstream = WebSocketConfig::default();
+        // The pinned limits are security controls: a relay must not be able
+        // to make the client buffer more than this per frame or per message.
+        assert_eq!(MAX_INCOMING_MESSAGE_BYTES, 64 * 1024 * 1024);
+        assert_eq!(MAX_INCOMING_FRAME_BYTES, 16 * 1024 * 1024);
+        assert_eq!(config.max_message_size, Some(MAX_INCOMING_MESSAGE_BYTES));
+        assert_eq!(config.max_frame_size, Some(MAX_INCOMING_FRAME_BYTES));
+        // Pinning kept the values the client used implicitly before; if a
+        // tungstenite upgrade changes its defaults, review the limits here.
+        assert_eq!(upstream.max_message_size, config.max_message_size);
+        assert_eq!(upstream.max_frame_size, config.max_frame_size);
+        // Every other setting stays at tungstenite's default.
+        assert_eq!(config.read_buffer_size, upstream.read_buffer_size);
+        assert_eq!(config.write_buffer_size, upstream.write_buffer_size);
+        assert_eq!(config.max_write_buffer_size, upstream.max_write_buffer_size);
+        assert!(!config.accept_unmasked_frames);
+    }
+
+    #[tokio::test]
+    async fn oversized_relay_frames_and_messages_close_the_session_undelivered() {
+        use tokio_tungstenite::tungstenite::protocol::frame::{
+            coding::{Data, OpCode},
+            Frame,
+        };
+        tokio::time::timeout(Duration::from_secs(30), async {
+            for fragmented in [false, true] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                    // A frame exactly at the limit is still delivered.
+                    socket
+                        .send(Message::Binary(vec![7; MAX_INCOMING_FRAME_BYTES].into()))
+                        .await
+                        .unwrap();
+                    if fragmented {
+                        // Every frame is within the frame limit; only the
+                        // reassembled message is one byte over its limit.
+                        let full_frames = MAX_INCOMING_MESSAGE_BYTES / MAX_INCOMING_FRAME_BYTES;
+                        for index in 0..full_frames {
+                            let opcode = if index == 0 { Data::Binary } else { Data::Continue };
+                            let _ = socket
+                                .send(Message::Frame(Frame::message(
+                                    vec![7; MAX_INCOMING_FRAME_BYTES],
+                                    OpCode::Data(opcode),
+                                    false,
+                                )))
+                                .await;
+                        }
+                        let _ = socket
+                            .send(Message::Frame(Frame::message(
+                                vec![7],
+                                OpCode::Data(Data::Continue),
+                                true,
+                            )))
+                            .await;
+                    } else {
+                        let _ = socket
+                            .send(Message::Binary(vec![7; MAX_INCOMING_FRAME_BYTES + 1].into()))
+                            .await;
+                    }
+                    // A valid frame after the oversize one must not arrive.
+                    let _ = socket
+                        .send(Message::Text(
+                            ControlMessage::PeerLeft {
+                                device_id: "after-oversize".into(),
+                            }
+                            .encode()
+                            .unwrap()
+                            .into(),
+                        ))
+                        .await;
+                    while let Some(Ok(_)) = socket.next().await {}
+                });
+                let mut connection = RelayConnection::connect(&format!("ws://{address}/v1/ws"))
+                    .await
+                    .unwrap();
+                let boundary = connection.incoming.recv().await;
+                assert!(
+                    matches!(&boundary, Some(Incoming::Binary(bytes)) if bytes.len() == MAX_INCOMING_FRAME_BYTES),
+                    "a frame at the limit must be delivered"
+                );
+                assert!(
+                    connection.incoming.recv().await.is_none(),
+                    "an oversized frame or message must end the session undelivered"
+                );
+                assert!(matches!(
+                    connection.send_binary(vec![1]).await,
+                    Err(TransportError::Closed)
+                ));
+                server.await.unwrap();
+            }
+        })
+        .await
+        .expect("oversized relay fixture exceeded its deadline");
     }
 }

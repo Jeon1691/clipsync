@@ -106,10 +106,6 @@ fn malformed(what: &str) -> CoreError {
 /// while decoding, so that failure, like any other bad body, is reported as
 /// a malformed response instead of a bare decoding error. The decoder's own
 /// message is left out: it may quote relay-chosen text.
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 async fn decode_pairing_response<T: serde::de::DeserializeOwned>(
     resp: reqwest::Response,
 ) -> Result<T, CoreError> {
@@ -120,10 +116,6 @@ async fn decode_pairing_response<T: serde::de::DeserializeOwned>(
 /// Check the values of a create or join response that the CLI prints and
 /// the store keeps before anything is shown or stored. Decoding already
 /// enforces the ID rule; this re-check covers IDs built unchecked (`From`).
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 fn check_relay_ids(
     room_id: &clipsync_protocol::RoomId,
     peer: Option<&DeviceId>,
@@ -275,10 +267,6 @@ pub struct PendingCreate {
 impl PendingCreate {
     /// Wait for a joiner, then ask `confirm` to compare the SAS before
     /// anything is sent to the peer or stored locally.
-    #[expect(
-        clippy::result_large_err,
-        reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-    )]
     pub async fn wait<C, F>(
         self,
         store: &LocalStore,
@@ -308,10 +296,6 @@ impl PendingCreate {
     }
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 pub async fn begin_create_room(
     identity: &DeviceIdentity,
     cfg: &AppConfig,
@@ -379,10 +363,6 @@ pub async fn begin_create_room(
     })
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 pub async fn create_room<C, F>(
     store: &LocalStore,
     identity: &DeviceIdentity,
@@ -404,10 +384,6 @@ where
     Ok(offer)
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 pub async fn join_room<C, F>(
     store: &LocalStore,
     identity: &DeviceIdentity,
@@ -495,10 +471,6 @@ where
 #[expect(
     clippy::too_many_arguments,
     reason = "Keep explicit borrows of the existing pairing session state; reviewed in docs/compiler-warnings.md."
-)]
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
 )]
 async fn run_pairing<C, F>(
     store: &LocalStore,
@@ -1063,10 +1035,6 @@ fn device_bind_nonce(
     clipsync_crypto::derive_nonce(key, index)
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 async fn connect_relay_ws(ws: &str) -> Result<RelayConnection, CoreError> {
     match RelayConnection::connect(ws).await {
         Ok(conn) => Ok(conn),
@@ -1085,10 +1053,6 @@ async fn connect_relay_ws(ws: &str) -> Result<RelayConnection, CoreError> {
     }
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 pub fn leave_room(store: &LocalStore) -> Result<(), CoreError> {
     match store.leave_current()? {
         Some(room) => {
@@ -1106,10 +1070,6 @@ fn b64_encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 fn b64_decode(s: &str) -> Result<Vec<u8>, CoreError> {
     base64::engine::general_purpose::STANDARD
         .decode(s)
