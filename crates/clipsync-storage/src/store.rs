@@ -1,6 +1,6 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
-use chrono::{DateTime, Utc};
+use clipsync_protocol::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use clipsync_protocol::{DeviceId, DeviceRole, RoomId};
@@ -15,7 +15,7 @@ pub struct RoomRecord {
     pub room_id: RoomId,
     pub epoch: u64,
     pub role: DeviceRole,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     // Kept in memory for callers; legacy inline credentials are migrated on load.
     #[serde(default, skip_serializing)]
     pub device_token: String,
@@ -58,6 +58,10 @@ pub struct PairingWait {
     /// The user's answer, written by `clipsync room confirm` or `room reject`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sas_decision: Option<String>,
+    /// Whether the SAS was derived after the commitment round (`committed`
+    /// or `uncommitted`), shown next to it by `clipsync room confirm`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sas_protection: Option<String>,
 }
 
 /// Exclusive lock on the pairing lock file, held until dropped.
@@ -396,6 +400,7 @@ mod failure_tests {
             sas: None,
             peer_device_name: None,
             sas_decision: None,
+            sas_protection: None,
         }
     }
 
@@ -421,7 +426,7 @@ mod failure_tests {
                 room_id: RoomId::new(),
                 epoch: 1,
                 role: DeviceRole::Owner,
-                created_at: Utc::now(),
+                created_at: Timestamp::now(),
                 device_token: "fixture".into(),
                 peers: vec![]
             })

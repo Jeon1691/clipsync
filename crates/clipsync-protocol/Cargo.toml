@@ -11,10 +11,10 @@ repository.workspace = true
 description = "ClipSync wire protocol, limits, and codecs"
 
 [dependencies]
-chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+time.workspace = true
 ulid.workspace = true
 
 [lints]

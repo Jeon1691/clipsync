@@ -1,9 +1,9 @@
 // Copyright the ClipSync contributors.
 // SPDX-License-Identifier: MIT
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{DeviceId, MessageId, PairingSessionId, RoomId, TransferId};
+use crate::Timestamp;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -57,8 +57,8 @@ pub struct RoutingHeader {
     pub room_id: RoomId,
     pub sender_device_id: DeviceId,
     pub recipient: Recipient,
-    pub sent_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
+    pub sent_at: Timestamp,
+    pub expires_at: Timestamp,
     pub item_kind: ItemKind,
     pub seq: u64,
 }
@@ -151,9 +151,22 @@ pub enum ControlMessage {
     PeerLeft {
         device_id: DeviceId,
     },
+    /// The joiner's commitment to its SPAKE2 message, sent before the
+    /// message itself (see `docs/protocol.md`, "Commitment round"). Peers
+    /// and relays that predate it drop the frame as unknown.
+    Spake2Commit {
+        pairing_session_id: PairingSessionId,
+        /// Base64 SHA-256 commitment.
+        commitment: String,
+    },
     Spake2Msg {
         pairing_session_id: PairingSessionId,
         message: String,
+        /// Set by a creator that received the joiner's commitment before it
+        /// sent this message. Absent on the wire when false, so older peers
+        /// see an unchanged frame and an older relay forwards it unset.
+        #[serde(default, skip_serializing_if = "is_false")]
+        after_commitment: bool,
     },
     KeyConfirm {
         pairing_session_id: PairingSessionId,
@@ -234,7 +247,7 @@ pub struct CreatePairingResponse {
     pub room_id: RoomId,
     pub pairing_code: String,
     pub pairing_token: String,
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
     pub ws_path: String,
 }
 
@@ -253,7 +266,7 @@ pub struct JoinPairingResponse {
     pub room_id: RoomId,
     pub pairing_token: String,
     pub peer: PeerInfo,
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
     pub ws_path: String,
 }
 
@@ -261,6 +274,10 @@ pub struct JoinPairingResponse {
 pub struct ErrorBody {
     pub code: String,
     pub message: String,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl ControlMessage {

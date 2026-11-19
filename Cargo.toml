@@ -34,7 +34,6 @@ async-trait = "0.1"
 axum = { version = "0.8", features = ["ws", "macros", "json"] }
 base64 = "0.22"
 blake3 = "1.8"
-chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 dashmap = "6"
 directories = "6"
@@ -78,6 +77,11 @@ spake2 = "0.4"
 subtle = "2"
 tempfile = "3"
 thiserror = "2"
+# UTC instants (`clipsync_protocol::Timestamp`). 0.3.47 fixes RUSTSEC-2026-0009.
+# `large-dates` covers chrono's former year range (+-262143), which released
+# peers and existing state files can contain; serde is implemented in-tree to
+# keep chrono's exact RFC 3339 spelling.
+time = { version = "0.3.47", default-features = false, features = ["std", "large-dates"] }
 tokio = { version = "1.47", features = ["full"] }
 tokio-tungstenite = { version = "0.26", features = [
     "connect",
@@ -91,7 +95,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"]
 ulid = { version = "3", features = ["serde"] }
 uniffi = "0.32.2"
 url = "2"
-which = "7"
+which = "8"
 x25519-dalek = { version = "3", features = ["static_secrets", "getrandom", "zeroize"] }
 zeroize = { version = "1", features = ["zeroize_derive"] }
 

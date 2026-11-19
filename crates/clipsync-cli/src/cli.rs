@@ -96,6 +96,14 @@ pub enum RoomCmd {
         /// use it only for scripted setups on a network and relay you trust.
         #[arg(long)]
         insecure_skip_sas: bool,
+        /// Accept a matching verification code when this device shows
+        /// `protection: REDUCED` (no commitment round) and the answer does
+        /// not come from a person at a terminal that just showed that line.
+        /// A malicious relay can then search for matching codes; use it only
+        /// with a relay you trust. `pairing.require_commitment` still refuses.
+        /// Background mode answers with `room confirm`, so pass it there.
+        #[arg(long, requires = "foreground")]
+        accept_reduced_protection: bool,
     },
     /// Join with a 6-digit code, then confirm the verification code both devices show
     Join {
@@ -107,6 +115,13 @@ pub enum RoomCmd {
         /// use it only for scripted setups on a network and relay you trust.
         #[arg(long)]
         insecure_skip_sas: bool,
+        /// Accept a matching verification code when this device shows
+        /// `protection: REDUCED` (no commitment round) and the answer does
+        /// not come from a person at a terminal that just showed that line.
+        /// A malicious relay can then search for matching codes; use it only
+        /// with a relay you trust. `pairing.require_commitment` still refuses.
+        #[arg(long)]
+        accept_reduced_protection: bool,
     },
     /// Confirm the verification code of a background `room create`
     Confirm {
@@ -114,6 +129,13 @@ pub enum RoomCmd {
         /// device's code ("yes" is not accepted here). Omit it to see this
         /// device's code and answer at a prompt.
         code: Option<String>,
+        /// Accept a matching verification code when this device shows
+        /// `protection: REDUCED` (no commitment round) and the answer does
+        /// not come from a person at a terminal that just showed that line.
+        /// A malicious relay can then search for matching codes; use it only
+        /// with a relay you trust. `pairing.require_commitment` still refuses.
+        #[arg(long)]
+        accept_reduced_protection: bool,
     },
     /// Reject a background `room create` whose verification code does not match
     Reject,

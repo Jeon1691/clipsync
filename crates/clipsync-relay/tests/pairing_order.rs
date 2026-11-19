@@ -262,6 +262,7 @@ async fn regression_f98_joiner_websocket_before_creator_delivers_presence_and_ty
             ControlMessage::Spake2Msg {
                 pairing_session_id: pairing.sid.clone(),
                 message: early.clone(),
+                after_commitment: false,
             },
         )
         .await;
@@ -284,6 +285,7 @@ async fn regression_f98_joiner_websocket_before_creator_delivers_presence_and_ty
                 ControlMessage::Spake2Msg {
                     pairing_session_id,
                     message,
+                    ..
                 } => {
                     assert_eq!(pairing_session_id, pairing.sid);
                     assert_eq!(message, early);
@@ -309,12 +311,14 @@ async fn regression_f98_joiner_websocket_before_creator_delivers_presence_and_ty
             ControlMessage::Spake2Msg {
                 pairing_session_id: pairing.sid.clone(),
                 message: STANDARD.encode(&outbound),
+                after_commitment: false,
             },
         )
         .await;
         let ControlMessage::Spake2Msg {
             pairing_session_id,
             message,
+            ..
         } = control(&mut member).await
         else {
             panic!("missing owner SPAKE")
@@ -382,6 +386,7 @@ async fn regression_f98_other_session_or_disconnected_joiner_is_not_announced() 
             ControlMessage::Spake2Msg {
                 pairing_session_id: disconnected.sid.clone(),
                 message: "must be discarded on disconnect".into(),
+                after_commitment: false,
             },
         )
         .await;
@@ -405,21 +410,21 @@ async fn regression_f98_pending_spake_is_bounded_take_once_and_session_bound() {
         assert!(matches!(control(&mut member).await, ControlMessage::HelloOk { .. }));
         // No other handshake phase is retained while the peer is offline.
         send(&mut member, ControlMessage::KeyConfirm { pairing_session_id: pairing.sid.clone(), mac: "unbuffered".into() }).await;
-        send(&mut member, ControlMessage::Spake2Msg { pairing_session_id: PairingSessionId::new(), message: "wrong session".into() }).await;
+        send(&mut member, ControlMessage::Spake2Msg { pairing_session_id: PairingSessionId::new(), message: "wrong session".into(), after_commitment: false }).await;
         assert!(matches!(control(&mut member).await, ControlMessage::Error { message, .. } if message == "pairing frame session mismatch"));
-        send(&mut member, ControlMessage::Spake2Msg { pairing_session_id: pairing.sid.clone(), message: "x".repeat(1025) }).await;
+        send(&mut member, ControlMessage::Spake2Msg { pairing_session_id: pairing.sid.clone(), message: "x".repeat(1025), after_commitment: false }).await;
         assert!(matches!(control(&mut member).await, ControlMessage::Error { message, .. } if message == "pairing SPAKE message too large"));
         let first = "x".repeat(1024);
         for _ in 0..2 {
-            send(&mut member, ControlMessage::Spake2Msg { pairing_session_id: pairing.sid.clone(), message: first.clone() }).await;
+            send(&mut member, ControlMessage::Spake2Msg { pairing_session_id: pairing.sid.clone(), message: first.clone(), after_commitment: false }).await;
         }
-        send(&mut member, ControlMessage::Spake2Msg { pairing_session_id: pairing.sid.clone(), message: "replacement".into() }).await;
+        send(&mut member, ControlMessage::Spake2Msg { pairing_session_id: pairing.sid.clone(), message: "replacement".into(), after_commitment: false }).await;
         assert!(matches!(control(&mut member).await, ControlMessage::Error { message, .. } if message == "pairing SPAKE already pending"));
         fence(&mut member, 201).await;
         let mut owner = relay.connect(&pairing, true).await;
         assert!(matches!(control(&mut owner).await, ControlMessage::HelloOk { .. }));
         joined(control(&mut owner).await, &pairing);
-        assert!(matches!(control(&mut owner).await, ControlMessage::Spake2Msg { pairing_session_id, message } if pairing_session_id == pairing.sid && message == first));
+        assert!(matches!(control(&mut owner).await, ControlMessage::Spake2Msg { pairing_session_id, message, .. } if pairing_session_id == pairing.sid && message == first));
         fence(&mut owner, 202).await;
         owner.close(None).await.unwrap();
         member.close(None).await.unwrap();
@@ -463,11 +468,11 @@ async fn regression_f98_replaced_socket_cannot_replay_or_unregister_its_replacem
         let pairing = relay.pairing(DeviceId::new(), DeviceId::new()).await;
         let mut first = relay.connect(&pairing, false).await;
         assert!(matches!(control(&mut first).await, ControlMessage::HelloOk { .. }));
-        send(&mut first, ControlMessage::Spake2Msg { pairing_session_id: pairing.sid.clone(), message: "old connection".into() }).await;
+        send(&mut first, ControlMessage::Spake2Msg { pairing_session_id: pairing.sid.clone(), message: "old connection".into(), after_commitment: false }).await;
         fence(&mut first, 401).await;
         let mut member = relay.connect(&pairing, false).await;
         assert!(matches!(control(&mut member).await, ControlMessage::HelloOk { .. }));
-        send(&mut first, ControlMessage::Spake2Msg { pairing_session_id: pairing.sid.clone(), message: "stale sender".into() }).await;
+        send(&mut first, ControlMessage::Spake2Msg { pairing_session_id: pairing.sid.clone(), message: "stale sender".into(), after_commitment: false }).await;
         assert!(matches!(control(&mut first).await, ControlMessage::Error { message, .. } if message == "pairing connection replaced"));
         first.close(None).await.unwrap();
         let mut owner = relay.connect(&pairing, true).await;
@@ -475,8 +480,107 @@ async fn regression_f98_replaced_socket_cannot_replay_or_unregister_its_replacem
         joined(control(&mut owner).await, &pairing);
         fence(&mut owner, 402).await;
         relay.connections(2).await;
-        send(&mut member, ControlMessage::Spake2Msg { pairing_session_id: pairing.sid.clone(), message: "new connection".into() }).await;
+        send(&mut member, ControlMessage::Spake2Msg { pairing_session_id: pairing.sid.clone(), message: "new connection".into(), after_commitment: false }).await;
         assert!(matches!(control(&mut owner).await, ControlMessage::Spake2Msg { message, .. } if message == "new connection"));
         owner.close(None).await.unwrap(); member.close(None).await.unwrap();
     }).await.expect("replacement socket fixture exceeded its deadline");
+}
+
+#[tokio::test]
+async fn regression_pairing_commitment_is_bounded_buffered_and_only_from_the_joiner() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let relay = Relay::start().await;
+        let pairing = relay.pairing(DeviceId::new(), DeviceId::new()).await;
+        let commit = |commitment: &str| ControlMessage::Spake2Commit {
+            pairing_session_id: pairing.sid.clone(),
+            commitment: commitment.into(),
+        };
+        let mut member = relay.connect(&pairing, false).await;
+        assert!(matches!(control(&mut member).await, ControlMessage::HelloOk { .. }));
+        send(
+            &mut member,
+            ControlMessage::Spake2Commit {
+                pairing_session_id: PairingSessionId::new(),
+                commitment: "wrong session".into(),
+            },
+        )
+        .await;
+        assert!(matches!(control(&mut member).await, ControlMessage::Error { message, .. } if message == "pairing frame session mismatch"));
+        // A commitment is one SHA-256 digest; nothing larger is relayed.
+        send(&mut member, commit(&"x".repeat(65))).await;
+        assert!(matches!(control(&mut member).await, ControlMessage::Error { message, .. } if message == "pairing commitment too large"));
+        // The creator is offline: the first commitment is held, a repeat is
+        // harmless and a different one is refused.
+        let first = STANDARD.encode([7u8; 32]);
+        send(&mut member, commit(&first)).await;
+        send(&mut member, commit(&first)).await;
+        send(&mut member, commit("replacement")).await;
+        assert!(matches!(control(&mut member).await, ControlMessage::Error { message, .. } if message == "pairing commitment already pending"));
+        send(
+            &mut member,
+            ControlMessage::Spake2Msg {
+                pairing_session_id: pairing.sid.clone(),
+                message: "joiner message".into(),
+                after_commitment: false,
+            },
+        )
+        .await;
+        fence(&mut member, 501).await;
+        // The arriving creator gets the commitment before the message it
+        // commits to.
+        let mut owner = relay.connect(&pairing, true).await;
+        assert!(matches!(control(&mut owner).await, ControlMessage::HelloOk { .. }));
+        joined(control(&mut owner).await, &pairing);
+        assert!(matches!(control(&mut owner).await, ControlMessage::Spake2Commit { pairing_session_id, commitment } if pairing_session_id == pairing.sid && commitment == first));
+        assert!(matches!(control(&mut owner).await, ControlMessage::Spake2Msg { message, after_commitment: false, .. } if message == "joiner message"));
+        // Only the joiner commits.
+        send(&mut owner, commit(&first)).await;
+        assert!(matches!(control(&mut owner).await, ControlMessage::Error { message, .. } if message == "only the joiner sends a pairing commitment"));
+        // The creator's acknowledgement reaches the joiner unchanged.
+        send(
+            &mut owner,
+            ControlMessage::Spake2Msg {
+                pairing_session_id: pairing.sid.clone(),
+                message: "creator message".into(),
+                after_commitment: true,
+            },
+        )
+        .await;
+        assert!(matches!(control(&mut member).await, ControlMessage::Spake2Msg { message, after_commitment: true, .. } if message == "creator message"));
+        // While both are connected a commitment is forwarded at once.
+        send(&mut member, commit(&first)).await;
+        assert!(matches!(control(&mut owner).await, ControlMessage::Spake2Commit { commitment, .. } if commitment == first));
+        fence(&mut owner, 502).await;
+        owner.close(None).await.unwrap();
+        member.close(None).await.unwrap();
+    })
+    .await
+    .expect("pairing commitment fixture exceeded its deadline");
+}
+
+#[tokio::test]
+async fn regression_buffered_creator_message_keeps_its_commitment_acknowledgement() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let relay = Relay::start().await;
+        let pairing = relay.pairing(DeviceId::new(), DeviceId::new()).await;
+        let mut owner = relay.connect(&pairing, true).await;
+        assert!(matches!(control(&mut owner).await, ControlMessage::HelloOk { .. }));
+        send(
+            &mut owner,
+            ControlMessage::Spake2Msg {
+                pairing_session_id: pairing.sid.clone(),
+                message: "creator message".into(),
+                after_commitment: true,
+            },
+        )
+        .await;
+        fence(&mut owner, 601).await;
+        let mut member = relay.connect(&pairing, false).await;
+        assert!(matches!(control(&mut member).await, ControlMessage::HelloOk { .. }));
+        assert!(matches!(control(&mut member).await, ControlMessage::Spake2Msg { message, after_commitment: true, .. } if message == "creator message"));
+        owner.close(None).await.unwrap();
+        member.close(None).await.unwrap();
+    })
+    .await
+    .expect("buffered acknowledgement fixture exceeded its deadline");
 }

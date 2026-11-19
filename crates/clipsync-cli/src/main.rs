@@ -89,6 +89,7 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
             background: _,
             background_worker,
             insecure_skip_sas,
+            accept_reduced_protection,
         }) => {
             let app = App::open()?;
             let _ = app.identity()?;
@@ -115,6 +116,7 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
                     json,
                     non_interactive: cli.non_interactive,
                     skip: insecure_skip_sas,
+                    accept_reduced: accept_reduced_protection,
                 })
             };
             let offer = app
@@ -170,12 +172,14 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
             code,
             no_auto_sync,
             insecure_skip_sas,
+            accept_reduced_protection,
         }) => {
             let app = App::open()?;
             let confirm = terminal_confirmer(SasMode {
                 json: cli.json,
                 non_interactive: cli.non_interactive,
                 skip: insecure_skip_sas,
+                accept_reduced: accept_reduced_protection,
             });
             let room = app.room_join(&code, no_auto_sync, confirm).await?;
             emit(
@@ -187,12 +191,16 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
             }
             Ok(())
         }
-        Commands::Room(RoomCmd::Confirm { code }) => {
+        Commands::Room(RoomCmd::Confirm {
+            code,
+            accept_reduced_protection,
+        }) => {
             let app = App::open()?;
             let mode = SasMode {
                 json: cli.json,
                 non_interactive: cli.non_interactive,
                 skip: false,
+                accept_reduced: accept_reduced_protection,
             };
             answer_background(&app, code.as_deref(), false, mode).await
         }
@@ -202,6 +210,7 @@ async fn run(cli: Cli) -> Result<(), CoreError> {
                 json: cli.json,
                 non_interactive: cli.non_interactive,
                 skip: false,
+                accept_reduced: false,
             };
             answer_background(&app, None, true, mode).await
         }

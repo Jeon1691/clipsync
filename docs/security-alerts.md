@@ -23,9 +23,9 @@ lockfile with `cargo metadata --locked` before building.
 The security workflow audits the three committed lockfiles (`Cargo.lock`,
 `fuzz/Cargo.lock` and `vendor/test-workspace.Cargo.lock`). Vulnerabilities,
 unsound code advisories, yanked packages and unmaintained packages fail the
-audit job. The only advisory exception is the time-boxed chrono ignore described
-in [Unmaintained time crates](#unmaintained-time-crates); it expires at its
-**2027-02-15** review.
+audit job. No advisory is ignored: the former time-boxed chrono exception was
+retired when chrono was replaced (see
+[Unmaintained time crates](#unmaintained-time-crates)).
 
 ## Pairing and deployment follow-up
 
@@ -59,8 +59,8 @@ zbus 6.3 APIs. Accessibility, native decorations/title text, both graphics
 backends, clipboard formats, and mobile bindings remain enabled.
 
 At that migration both real lockfile audits reported zero vulnerabilities and
-no warnings, without advisory ignores; the later chrono exception is described
-in [Unmaintained time crates](#unmaintained-time-crates). This is not solely a released-dependency update:
+no warnings, without advisory ignores; the later, since retired, chrono exception
+is described in [Unmaintained time crates](#unmaintained-time-crates). This is not solely a released-dependency update:
 seven explicit compatibility source forks are maintained by ClipSync. Their
 pinned original sources, complete local diffs, upstream licenses, ownership,
 weekly review policy, and retirement conditions are recorded in
@@ -80,16 +80,22 @@ patched release, which failed the required `audit` job:
 | Advisory | Package | Resolution |
 | --- | --- | --- |
 | [RUSTSEC-2026-0542](https://rustsec.org/advisories/RUSTSEC-2026-0542) | humantime 2.4.0 | Removed. `room create --ttl` now uses a small in-house parser in `clipsync-cli` that accepts the same units, compound/fractional forms and whitespace and prints the same error text. It reports an overflow error where humantime panicked on one input class. |
-| [RUSTSEC-2026-0543](https://rustsec.org/advisories/RUSTSEC-2026-0543) | chrono 0.4.45 | **Time-boxed ignore** in [`.cargo/audit.toml`](../.cargo/audit.toml), read by all three audits. Owner: maintainer. Review by **2027-02-15**. Tracking: [#38](https://github.com/Jeon1691/clipsync/issues/38). |
+| [RUSTSEC-2026-0543](https://rustsec.org/advisories/RUSTSEC-2026-0543) | chrono 0.4.45 | Removed ([#38](https://github.com/Jeon1691/clipsync/issues/38)). `clipsync_protocol::Timestamp`, built on `time` 0.3 (`large-dates`), replaces `DateTime<Utc>` in every crate. The former time-boxed ignore in `.cargo/audit.toml` is deleted. |
 
-chrono has no maintained drop-in replacement. Its `DateTime<Utc>` values are part
-of the RFC 3339 wire format and persisted state, so the replacement (`time` or
-`jiff`) needs its own reviewed PR with migration test vectors that keep those
-formats byte-identical. Until then chrono stays in the dependency graph without
-upstream maintenance. The ignore covers only RUSTSEC-2026-0543: the workflow
-keeps `--deny unmaintained`, so any other unmaintained package still fails the
-audit. At the review date the entry must be removed or renewed with a new date
-and reason.
+chrono's `DateTime<Utc>` values are part of the RFC 3339 wire format, the v2
+envelope AAD and persisted state. Before the replacement, golden vectors pinned
+what chrono emitted and accepted. The replacement passes them unchanged:
+
+- **Output:** `Z`, with the shortest 0/3/6/9-digit fraction. The pairing file and
+  the mobile FFI use `+00:00`, and the CLI prints `… UTC`.
+- **Input:** chrono's relaxed grammar, including offsets, `t`/`z`/`UTC`, unpadded
+  fields, whitespace and leap seconds.
+- **Range:** years -262143 to +262142.
+- **Arithmetic:** chrono's leap-second semantics in the receiver's skew and
+  lifetime checks.
+
+Old peers and existing state files keep working. All three audits now run with
+`--deny unmaintained` and no advisory ignores.
 
 ## Compiler-warning review and strict checks
 

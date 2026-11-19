@@ -410,8 +410,8 @@ async fn text_queues_offline_but_binary_requires_an_online_peer() {
         room_id: rid.clone(),
         sender_device_id: owner,
         recipient: Recipient::Broadcast,
-        sent_at: chrono::Utc::now(),
-        expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+        sent_at: clipsync_protocol::Timestamp::now(),
+        expires_at: clipsync_protocol::Timestamp::now() + time::Duration::seconds(60),
         item_kind: ItemKind::Text,
         seq: 1,
     };
@@ -535,7 +535,7 @@ async fn missing_peers_and_pairing_abort_report_explicit_control_outcomes() {
         .unwrap();
     receive(&mut rx).await;
     assert!(state.revoke(rid.as_str(), member.as_str()));
-    let now = chrono::Utc::now();
+    let now = clipsync_protocol::Timestamp::now();
     let routing = RoutingHeader {
         version: clipsync_protocol::PROTOCOL_VERSION,
         message_id: MessageId::new(),
@@ -544,7 +544,7 @@ async fn missing_peers_and_pairing_abort_report_explicit_control_outcomes() {
         sender_device_id: owner,
         recipient: Recipient::Broadcast,
         sent_at: now,
-        expires_at: now + chrono::Duration::seconds(60),
+        expires_at: now + time::Duration::seconds(60),
         item_kind: ItemKind::Text,
         seq: 1,
     };
@@ -835,8 +835,8 @@ async fn unauthenticated_forwarding_and_absent_pairing_peers_fail_without_invent
                 room_id: offer.room_id.clone(),
                 sender_device_id: owner.clone(),
                 recipient: Recipient::Broadcast,
-                sent_at: chrono::Utc::now(),
-                expires_at: chrono::Utc::now(),
+                sent_at: clipsync_protocol::Timestamp::now(),
+                expires_at: clipsync_protocol::Timestamp::now(),
                 item_kind: ItemKind::Files,
                 seq: 1,
             },
@@ -872,6 +872,7 @@ async fn unauthenticated_forwarding_and_absent_pairing_peers_fail_without_invent
     let message = ControlMessage::Spake2Msg {
         pairing_session_id: sid.clone(),
         message: "opaque".into(),
+        after_commitment: false,
     };
     forward_pairing_or_peer(&state, creator.as_ref().unwrap(), &tx, message.clone())
         .await
@@ -1076,7 +1077,7 @@ async fn regression_f88_revoked_network_peer_is_closed_cannot_send_and_cannot_re
         .unwrap()
         .unwrap();
     assert!(matches!(closed, ClientMessage::Close(_)));
-    let now = chrono::Utc::now();
+    let now = clipsync_protocol::Timestamp::now();
     let forbidden = ControlMessage::TextEnvelope {
         routing: RoutingHeader {
             version: clipsync_protocol::PROTOCOL_VERSION,
@@ -1086,7 +1087,7 @@ async fn regression_f88_revoked_network_peer_is_closed_cannot_send_and_cannot_re
             sender_device_id: member.clone(),
             recipient: Recipient::Broadcast,
             sent_at: now,
-            expires_at: now + chrono::Duration::seconds(60),
+            expires_at: now + time::Duration::seconds(60),
             item_kind: ItemKind::Text,
             seq: 1,
         },
@@ -1331,11 +1332,13 @@ fn regression_f98_late_creator_completes_real_core_pairing_and_persists_matching
                         .await
                     })
                 };
-                // Observe a genuine processed B SPAKE; do not fabricate pairing state
-                // or rely on socket-file presence, scheduler order or a blind delay.
+                // Observe a genuine processed B commitment (its first pairing
+                // frame; B keeps its SPAKE message back until A's arrives); do
+                // not fabricate pairing state or rely on socket-file presence,
+                // scheduler order or a blind delay.
                 tokio::time::timeout(Duration::from_secs(5), async {
                     loop {
-                        if state.pairing(&offered.pairing_code).unwrap().pending_spake[1].is_some()
+                        if state.pairing(&offered.pairing_code).unwrap().pending_commit[1].is_some()
                         {
                             break;
                         }
@@ -1362,12 +1365,10 @@ fn regression_f98_late_creator_completes_real_core_pairing_and_persists_matching
                     owner_store.load_epoch_key(&created.room_id).unwrap(),
                     member_store.load_epoch_key(&created.room_id).unwrap()
                 );
-                assert!(state
-                    .pairing(&offered.pairing_code)
-                    .unwrap()
-                    .pending_spake
-                    .iter()
-                    .all(Option::is_none));
+                let session = state.pairing(&offered.pairing_code).unwrap();
+                assert!(session.pending_spake.iter().all(Option::is_none));
+                assert!(session.pending_commit.iter().all(Option::is_none));
+                drop(session);
                 server.abort();
             })
             .await
@@ -1422,17 +1423,20 @@ async fn regression_f98_expiry_discards_pending_spake_and_prevents_admission_or_
     let early = ControlMessage::Spake2Msg {
         pairing_session_id: sid.clone(),
         message: "early".into(),
+        after_commitment: false,
     };
     handle_control(&state, &member_tx, &mut member_ctx, early.clone(), None)
         .await
         .unwrap();
     assert_eq!(
-        state.pairing(sid.as_str()).unwrap().pending_spake[1].as_deref(),
+        state.pairing(sid.as_str()).unwrap().pending_spake[1]
+            .as_ref()
+            .map(|pending| pending.message.as_str()),
         Some("early")
     );
     // Advance the existing session's expiry boundary without a two-minute test.
     state.pairing_mut(sid.as_str()).unwrap().expires_at =
-        chrono::Utc::now() - chrono::Duration::seconds(1);
+        clipsync_protocol::Timestamp::now() - time::Duration::seconds(1);
     assert_eq!(
         handle_control(&state, &member_tx, &mut member_ctx, early, None)
             .await
@@ -1484,8 +1488,8 @@ async fn text_for_an_offline_peer_is_acked_peer_offline_when_the_queue_is_full()
         room_id: rid.clone(),
         sender_device_id: owner,
         recipient: Recipient::Broadcast,
-        sent_at: chrono::Utc::now(),
-        expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+        sent_at: clipsync_protocol::Timestamp::now(),
+        expires_at: clipsync_protocol::Timestamp::now() + time::Duration::seconds(60),
         item_kind: ItemKind::Text,
         seq: 1,
     };
@@ -1751,8 +1755,8 @@ async fn regression_a_client_with_many_rooms_gets_only_its_share_of_the_offline_
             room_id: rid,
             sender_device_id: owner,
             recipient: Recipient::Broadcast,
-            sent_at: chrono::Utc::now(),
-            expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+            sent_at: clipsync_protocol::Timestamp::now(),
+            expires_at: clipsync_protocol::Timestamp::now() + time::Duration::seconds(60),
             item_kind: ItemKind::Text,
             seq: 1,
         };
@@ -1867,7 +1871,7 @@ async fn regression_a_valid_hello_on_a_full_queue_never_blocks() {
     // although its replies cannot be queued.
     let (sid, greeting) = pairing_hello(&state);
     state.pairing_mut(sid.as_str()).unwrap().expires_at =
-        chrono::Utc::now() + chrono::Duration::from_std(PAIRING_LEFT).unwrap();
+        clipsync_protocol::Timestamp::now() + time::Duration::try_from(PAIRING_LEFT).unwrap();
     let slot = state.acquire_connection(TEST_CLIENT).unwrap();
     let (tx, _rx) = full_queue();
     let requests = vec![text(&greeting), text(&ControlMessage::Ping { ts: 1 })];
@@ -2064,6 +2068,7 @@ fn pairing_with_stalled_peer(
     let spake = ControlMessage::Spake2Msg {
         pairing_session_id: sid.clone(),
         message: "opaque".into(),
+        after_commitment: false,
     };
     (sid, frames(&[greeting, spake]), unread)
 }
@@ -2092,7 +2097,7 @@ async fn a_pairing_socket_stalled_on_its_peer_closes_at_its_deadline() {
     let state = state();
     let (sid, requests, _unread) = pairing_with_stalled_peer(&state);
     state.pairing_mut(sid.as_str()).unwrap().expires_at =
-        chrono::Utc::now() + chrono::Duration::from_std(PAIRING_LEFT).unwrap();
+        clipsync_protocol::Timestamp::now() + time::Duration::try_from(PAIRING_LEFT).unwrap();
     let slot = state.acquire_connection(TEST_CLIENT).unwrap();
     let (tx, _rx) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
     let mut stream = futures_util::stream::iter(requests).chain(futures_util::stream::pending());
@@ -2191,7 +2196,7 @@ async fn a_silent_pairing_socket_is_closed_after_the_read_idle_limit() {
     });
     let (sid, greeting) = pairing_hello(&state);
     state.pairing_mut(sid.as_str()).unwrap().expires_at =
-        chrono::Utc::now() + chrono::Duration::from_std(PAIRING_LEFT).unwrap();
+        clipsync_protocol::Timestamp::now() + time::Duration::try_from(PAIRING_LEFT).unwrap();
     let slot = state.acquire_connection(TEST_CLIENT).unwrap();
     let (tx, _rx) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
     let mut stream =
@@ -2438,8 +2443,8 @@ mod liveness {
                 room_id: room.clone(),
                 sender_device_id: sender.clone(),
                 recipient: Recipient::Broadcast,
-                sent_at: chrono::Utc::now(),
-                expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+                sent_at: clipsync_protocol::Timestamp::now(),
+                expires_at: clipsync_protocol::Timestamp::now() + time::Duration::seconds(60),
                 item_kind: ItemKind::Text,
                 seq: 1,
             },
@@ -2599,5 +2604,126 @@ mod liveness {
         .await
         .expect("an evicted socket with a full queue was never closed");
         server.abort();
+    }
+}
+
+/// A queued text keeps the sender's header instants exactly. The relay caps
+/// how long it retains the envelope, not the `expires_at` the receiver checks,
+/// and it re-emits every instant in the canonical `Z` spelling.
+#[tokio::test]
+async fn queued_text_relays_header_instants_unchanged_and_canonical() {
+    // (sender spelling, spelling the queued copy carries).
+    const VECTORS: &[(&str, &str)] = &[
+        ("2099-01-02T03:04:05Z", "2099-01-02T03:04:05Z"),
+        (
+            "2099-01-02T03:04:05.123456789Z",
+            "2099-01-02T03:04:05.123456789Z",
+        ),
+        ("2099-01-02T12:04:05.5+09:00", "2099-01-02T03:04:05.500Z"),
+        ("2099-01-02t03:04:05.120z", "2099-01-02T03:04:05.120Z"),
+        ("2098-12-31T23:59:60.25Z", "2098-12-31T23:59:60.250Z"),
+        (
+            "+262142-12-31T23:59:59.999999999Z",
+            "+262142-12-31T23:59:59.999999999Z",
+        ),
+    ];
+    let state = state();
+    let (rid, owner, member, token, _) = room(&state);
+    let (tx, mut rx) = mpsc::channel(32);
+    let mut ctx = None;
+    handle_control(&state, &tx, &mut ctx, hello(&owner, &rid, &token), None)
+        .await
+        .unwrap();
+    receive(&mut rx).await;
+    for (sent, relayed) in VECTORS {
+        let wire = serde_json::json!({
+            "type": "text_envelope",
+            "routing": {
+                "version": clipsync_protocol::PROTOCOL_VERSION,
+                "message_id": MessageId::new(),
+                "transfer_id": TransferId::new(),
+                "room_id": rid,
+                "sender_device_id": owner,
+                "recipient": "broadcast",
+                "sent_at": "2023-11-14T22:13:20.5+00:00",
+                "expires_at": sent,
+                "item_kind": "text",
+                "seq": 1,
+            },
+            "nonce": "opaque-nonce",
+            "ciphertext": "opaque-ciphertext",
+        })
+        .to_string();
+        let envelope = ControlMessage::decode(&wire).unwrap();
+        handle_control(&state, &tx, &mut ctx, envelope, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            receive(&mut rx).await,
+            ControlMessage::Ack {
+                status: AckStatus::Accepted,
+                ..
+            }
+        ));
+        let queued = state.take_queue(rid.as_str(), member.as_str()).unwrap();
+        let routing = serde_json::to_value(&queued.routing).unwrap();
+        assert_eq!(routing["sent_at"], "2023-11-14T22:13:20.500Z", "{sent}");
+        assert_eq!(routing["expires_at"], *relayed, "{sent}");
+    }
+}
+
+/// Each webhook body stamps `ts` with `to_rfc3339`'s UTC spelling: `+00:00`
+/// and the shortest exact 0, 3, 6 or 9 digit fraction, taken when the event
+/// happens. Webhook consumers parse this string, so its shape is pinned
+/// separately from the protocol's `Z` spelling.
+#[tokio::test]
+async fn webhook_events_stamp_ts_in_the_pinned_utc_offset_spelling() {
+    use crate::timestamp_shape_tests::{is_utc_timestamp, UTC_OFFSET_SUFFIX};
+    use clipsync_protocol::Timestamp;
+
+    let state = state();
+    let (rid, owner, member, token, _) = room(&state);
+    let (tx, mut rx) = mpsc::channel(32);
+    let mut ctx = None;
+    let before = Timestamp::now();
+    handle_control(&state, &tx, &mut ctx, hello(&owner, &rid, &token), None)
+        .await
+        .unwrap();
+    receive(&mut rx).await;
+    let routing = RoutingHeader {
+        version: clipsync_protocol::PROTOCOL_VERSION,
+        message_id: MessageId::new(),
+        transfer_id: TransferId::new(),
+        room_id: rid.clone(),
+        sender_device_id: owner,
+        recipient: Recipient::Broadcast,
+        sent_at: Timestamp::now(),
+        expires_at: Timestamp::now() + time::Duration::seconds(60),
+        item_kind: ItemKind::Text,
+        seq: 1,
+    };
+    let text = ControlMessage::TextEnvelope {
+        routing,
+        nonce: "opaque-nonce".into(),
+        ciphertext: "opaque-ciphertext".into(),
+    };
+    handle_control(&state, &tx, &mut ctx, text, None)
+        .await
+        .unwrap();
+    receive(&mut rx).await;
+    let revoke = ControlMessage::Revoke { device_id: member };
+    handle_control(&state, &tx, &mut ctx, revoke, None)
+        .await
+        .unwrap();
+    let after = Timestamp::now();
+
+    let events = state.webhook_events.lock().unwrap().clone();
+    let kinds: Vec<_> = events.iter().map(|event| event["type"].clone()).collect();
+    assert_eq!(kinds, ["device.joined", "clip.received", "room.revoked"]);
+    for event in &events {
+        let ts = event["ts"].as_str().unwrap();
+        assert!(is_utc_timestamp(ts, UTC_OFFSET_SUFFIX), "{event}");
+        let at: Timestamp = ts.parse().unwrap();
+        assert!(before <= at && at <= after, "{event}");
     }
 }

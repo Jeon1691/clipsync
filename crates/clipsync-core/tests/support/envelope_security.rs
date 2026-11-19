@@ -5,13 +5,12 @@
 use super::*;
 use crate::envelope::{check_version, sending_version, sequence_floor, EnvelopePolicy};
 use crate::EnvelopeRejection;
-use chrono::DateTime;
 use clipsync_protocol::CLOCK_SKEW_SECS;
 
 /// Routing header a current sender in `pair` would emit from `from` to the room.
 fn room_routing(from: &Peer, seq: u64) -> RoutingHeader {
     let room = from.app.store.current_room().unwrap();
-    let now = Utc::now();
+    let now = Timestamp::now();
     RoutingHeader {
         version: ENVELOPE_VERSION_AUTHENTICATED,
         message_id: MessageId::new(),
@@ -20,7 +19,7 @@ fn room_routing(from: &Peer, seq: u64) -> RoutingHeader {
         sender_device_id: from.identity.device_id.clone(),
         recipient: Recipient::Broadcast,
         sent_at: now,
-        expires_at: now + ChronoDuration::seconds(60),
+        expires_at: now + TimeDuration::seconds(60),
         item_kind: ItemKind::Text,
         seq,
     }
@@ -85,8 +84,8 @@ async fn expired_and_misaddressed_text_envelopes_never_reach_the_clipboard() {
     let b = Session::start(&pair.b).await;
 
     let mut expired = room_routing(&pair.a, 20);
-    expired.sent_at -= ChronoDuration::minutes(30);
-    expired.expires_at = expired.sent_at + ChronoDuration::seconds(60);
+    expired.sent_at -= TimeDuration::minutes(30);
+    expired.expires_at = expired.sent_at + TimeDuration::seconds(60);
     deliver(&mut sender, sealed_text(expired, "expired clip")).await;
 
     let mut other_room = room_routing(&pair.a, 21);
@@ -127,10 +126,10 @@ async fn relay_rewritten_routing_fields_are_rejected() {
     };
     let mut rewritten = Vec::new();
     let mut header = honest.clone();
-    header.expires_at += ChronoDuration::seconds(120);
+    header.expires_at += TimeDuration::seconds(120);
     rewritten.push(header);
     let mut header = honest.clone();
-    header.sent_at -= ChronoDuration::seconds(1);
+    header.sent_at -= TimeDuration::seconds(1);
     rewritten.push(header);
     let mut header = honest.clone();
     header.seq += 1_000;
@@ -172,10 +171,8 @@ fn rewritten_headers(honest: &RoutingHeader) -> Vec<(&'static str, RoutingHeader
     push("recipient", &|r| {
         r.recipient = Recipient::Device(clipsync_protocol::DeviceId::new())
     });
-    push("sent_at", &|r| r.sent_at -= ChronoDuration::seconds(1));
-    push("expires_at", &|r| {
-        r.expires_at += ChronoDuration::seconds(1)
-    });
+    push("sent_at", &|r| r.sent_at -= TimeDuration::seconds(1));
+    push("expires_at", &|r| r.expires_at += TimeDuration::seconds(1));
     push("item_kind", &|r| r.item_kind = ItemKind::Files);
     push("seq", &|r| r.seq += 1);
     variants
@@ -378,22 +375,22 @@ fn header_checks_cover_addressing_lifetime_and_frame_kind() {
         (
             EnvelopeRejection::NotYetValid,
             Box::new(|r| {
-                r.sent_at += ChronoDuration::seconds(CLOCK_SKEW_SECS + 60);
-                r.expires_at = r.sent_at + ChronoDuration::seconds(60);
+                r.sent_at += TimeDuration::seconds(CLOCK_SKEW_SECS + 60);
+                r.expires_at = r.sent_at + TimeDuration::seconds(60);
             }),
         ),
         (
             EnvelopeRejection::Expired,
             Box::new(|r| {
-                r.expires_at = Utc::now() - ChronoDuration::seconds(CLOCK_SKEW_SECS + 1);
-                r.sent_at = r.expires_at - ChronoDuration::seconds(60);
+                r.expires_at = Timestamp::now() - TimeDuration::seconds(CLOCK_SKEW_SECS + 1);
+                r.sent_at = r.expires_at - TimeDuration::seconds(60);
             }),
         ),
         (
             EnvelopeRejection::LifetimeTooLong,
             Box::new(|r| {
                 r.expires_at = r.sent_at
-                    + ChronoDuration::seconds(clipsync_protocol::HARD_MAX_TTL_SECS as i64 + 1)
+                    + TimeDuration::seconds(clipsync_protocol::HARD_MAX_TTL_SECS as i64 + 1)
             }),
         ),
     ];
@@ -404,8 +401,8 @@ fn header_checks_cover_addressing_lifetime_and_frame_kind() {
     }
     // Within the skew tolerance, a slightly early or late envelope still arrives.
     let mut skewed = text_routing(&room);
-    skewed.sent_at += ChronoDuration::seconds(CLOCK_SKEW_SECS / 2);
-    skewed.expires_at = Utc::now() - ChronoDuration::seconds(CLOCK_SKEW_SECS / 2);
+    skewed.sent_at += TimeDuration::seconds(CLOCK_SKEW_SECS / 2);
+    skewed.expires_at = Timestamp::now() - TimeDuration::seconds(CLOCK_SKEW_SECS / 2);
     admit_text(&peer, &skewed, "skewed clocks").unwrap();
     // The decrypted manifest must describe the item kind its header announced.
     let image = routing_from(&room, SCRIPT_SENDER, ItemKind::Image);
@@ -428,34 +425,34 @@ fn header_checks_cover_addressing_lifetime_and_frame_kind() {
 }
 
 /// Header timestamps arrive from the relay before authentication. Extremes of
-/// chrono's range must be rejected (or, for an unbound v1 `sent_at`, accepted
+/// the representable range must be rejected (or, for an unbound v1 `sent_at`, accepted
 /// as before v2) without panicking: release builds abort on panic, so one
 /// envelope would otherwise stop the receiving client.
 #[test]
 fn extreme_header_timestamps_are_rejected_without_panicking() {
-    let max = DateTime::<Utc>::MAX_UTC;
-    let min = DateTime::<Utc>::MIN_UTC;
-    let fresh_expiry = || Utc::now() + ChronoDuration::seconds(60);
+    let max = Timestamp::MAX;
+    let min = Timestamp::MIN;
+    let fresh_expiry = || Timestamp::now() + TimeDuration::seconds(60);
     // (case, sent_at, expires_at, v1 outcome, v2 outcome); `None` = admitted.
     type Case = (
         &'static str,
-        DateTime<Utc>,
-        DateTime<Utc>,
+        Timestamp,
+        Timestamp,
         Option<EnvelopeRejection>,
         Option<EnvelopeRejection>,
     );
     let cases: Vec<Case> = vec![
         (
             "expires_at at the maximum",
-            Utc::now(),
+            Timestamp::now(),
             max,
             Some(EnvelopeRejection::LifetimeTooLong),
             Some(EnvelopeRejection::LifetimeTooLong),
         ),
         (
             "expires_at just below the maximum",
-            Utc::now(),
-            max - ChronoDuration::nanoseconds(1),
+            Timestamp::now(),
+            max - TimeDuration::nanoseconds(1),
             Some(EnvelopeRejection::LifetimeTooLong),
             Some(EnvelopeRejection::LifetimeTooLong),
         ),
@@ -544,8 +541,8 @@ fn legacy_envelopes_are_accepted_until_the_sender_upgrades_then_refused_across_r
     // a relay can rewrite a v1 `sent_at` anyway, so "sent in the future" adds
     // nothing there. The same header under v2 is refused.
     let mut ahead = legacy(true);
-    ahead.sent_at += ChronoDuration::seconds(CLOCK_SKEW_SECS + 60);
-    ahead.expires_at = ahead.sent_at + ChronoDuration::seconds(60);
+    ahead.sent_at += TimeDuration::seconds(CLOCK_SKEW_SECS + 60);
+    ahead.expires_at = ahead.sent_at + TimeDuration::seconds(60);
     admit_text(&peer, &ahead, "legacy sender clock ahead").unwrap();
     let ahead_v2 = RoutingHeader {
         version: ENVELOPE_VERSION_AUTHENTICATED,
@@ -558,8 +555,8 @@ fn legacy_envelopes_are_accepted_until_the_sender_upgrades_then_refused_across_r
     );
     // Header checks still apply to legacy envelopes.
     let mut expired = legacy(false);
-    expired.expires_at = Utc::now() - ChronoDuration::minutes(10);
-    expired.sent_at = expired.expires_at - ChronoDuration::seconds(60);
+    expired.expires_at = Timestamp::now() - TimeDuration::minutes(10);
+    expired.sent_at = expired.expires_at - TimeDuration::seconds(60);
     assert_eq!(
         rejection(admit_text(&peer, &expired, "expired legacy")),
         EnvelopeRejection::Expired
@@ -699,7 +696,7 @@ async fn senders_use_v1_until_the_peer_proves_v2_and_honor_both_overrides() {
         let last = pair.a.app.store.load_replay_state().unwrap().rooms[routing.room_id.as_str()]
             .last_sent_seq;
         assert_eq!(routing.seq, last);
-        assert!(routing.seq >= sequence_floor(routing.sent_at - ChronoDuration::seconds(1)));
+        assert!(routing.seq >= sequence_floor(routing.sent_at - TimeDuration::seconds(1)));
         a.stop().await;
     }
     receiver.close().await;
@@ -758,7 +755,7 @@ async fn updated_clients_converge_on_v2_through_the_handshake_in_either_start_or
         };
         deliver(&mut sender, sealed_text(legacy, "downgraded clip")).await;
         let before = b.clipboard.signature().await.unwrap();
-        settle(&mut sender, &pair.a, &b, sequence_floor(Utc::now())).await;
+        settle(&mut sender, &pair.a, &b, sequence_floor(Timestamp::now())).await;
         let after: u64 = b.clipboard.signature().await.unwrap().parse().unwrap();
         assert_eq!(
             after,

@@ -16,7 +16,6 @@ name = "clipsync"
 path = "src/main.rs"
 
 [dependencies]
-chrono.workspace = true
 clap.workspace = true
 clipsync-clipboard.workspace = true
 clipsync-core.workspace = true

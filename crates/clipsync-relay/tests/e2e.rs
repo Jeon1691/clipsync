@@ -890,6 +890,10 @@ async fn real_relay_pairing_shows_both_devices_the_same_sas_and_names() {
     creator.await.unwrap().unwrap();
     let (seen_a, seen_b) = (seen_a.await.unwrap(), seen_b.await.unwrap());
     assert_eq!(seen_a.sas, seen_b.sas);
+    // An updated relay forwards the commitment, so both devices ran the
+    // commitment round and say so on the confirmation screen.
+    assert_eq!(seen_a.protection, clipsync_core::SasProtection::Committed);
+    assert_eq!(seen_b.protection, clipsync_core::SasProtection::Committed);
     assert_eq!(seen_a.peer_device_id, id_b.device_id);
     assert_eq!(seen_b.peer_device_id, id_a.device_id);
     assert!(!seen_a.peer_device_name.is_empty() && !seen_b.peer_device_name.is_empty());

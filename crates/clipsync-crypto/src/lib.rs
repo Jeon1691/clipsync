@@ -21,9 +21,10 @@ pub use kdf::{
 };
 pub use noise::{NoiseHandshake, NoiseSession, NOISE_PATTERN};
 pub use pairing::{
-    confirm_mac, finish_pairing, pairing_transcript, short_authentication_string, start_pairing_a,
-    start_pairing_b, verify_confirm_mac, PairingKeys, PairingRole, PairingState, SAS_DIGITS,
-    SAS_LABEL,
+    confirm_mac, finish_pairing, pairing_transcript, short_authentication_string,
+    spake2_commitment, start_pairing_a, start_pairing_b, verify_confirm_mac,
+    verify_spake2_commitment, PairingKeys, PairingRole, PairingState, SasProtection,
+    COMMITTED_SAS_LABEL, SAS_DIGITS, SAS_LABEL, SPAKE2_COMMITMENT_LEN, SPAKE2_COMMIT_LABEL,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -40,6 +41,8 @@ pub enum CryptoError {
     Key,
     #[error("confirmation mismatch")]
     Confirm,
+    #[error("the SPAKE2 message does not open the commitment sent before it")]
+    Commitment,
 }
 
 pub type Result<T> = std::result::Result<T, CryptoError>;

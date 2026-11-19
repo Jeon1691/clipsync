@@ -49,9 +49,9 @@ output is empty; errors follow the convention above.
 | Command and inputs | Effect and normal-mode output | JSON result |
 | --- | --- | --- |
 | `init [--relay-url URL]` | Create/reuse the local identity; optionally save a relay URL. Print device ID and fingerprint. | `{device_id: string, fingerprint: string}` |
-| `room create [--ttl DURATION] [--no-auto-sync] [--foreground] [--insecure-skip-sas]` | Print a six-digit pairing code, room, and expiry. Default: detach the pairing wait and return after the offer is available; answer the verification code later with `room confirm` or `room reject`. `--foreground` (alias `--wait`) waits in this terminal, asks for the verification code like `room join`, and prints `paired` on success. | First `{event: "pairing_code", pairing_code: string, room_id: string, expires_at: time}`. Background mode adds `{background: true, pid: integer}`; foreground mode later emits the SAS event below, then `{ok: true, pairing_code: string, room_id: string}`. |
-| `room join CODE [--no-auto-sync] [--insecure-skip-sas]` | Join using the code string, preserving any leading zero. After key confirmation, print the verification code and the other device's name and read one answer line from stdin: the code shown on the other device confirms, and so does `y`/`yes` when stdin is a terminal; anything else or end of input rejects and stores nothing. Then wait for pairing and print the room ID. | `{event: "sas_confirmation", sas: string, peer_device_name: string}`, then `{room_id: string, role: "member"}` |
-| `room confirm [CODE]` | Answer a background `room create`. `CODE` must be the six digits shown on the other device (spaces or dashes between groups are allowed); anything else, including `yes`, fails at once and records nothing. Waits for the joiner if needed, then compares `CODE` with this device's code, or without `CODE` shows the code and prompts like `room join`; that prompt ends with an error, without waiting for input, if the pairing fails, expires, is rejected or is removed meanwhile. A mismatch aborts the pairing. On a match, waits for the worker and prints `paired`. | Without `CODE`, the SAS event above; then `{ok: true, room_id: string}`. |
+| `room create [--ttl DURATION] [--no-auto-sync] [--foreground] [--insecure-skip-sas] [--accept-reduced-protection]` | Print a six-digit pairing code, room, and expiry. Default: detach the pairing wait and return after the offer is available; answer the verification code later with `room confirm` or `room reject`. `--foreground` (alias `--wait`) waits in this terminal, asks for the verification code like `room join`, and prints `paired` on success. `--accept-reduced-protection` requires `--foreground` and works as in `room join`; in background mode pass it to `room confirm`. | First `{event: "pairing_code", pairing_code: string, room_id: string, expires_at: time}`. Background mode adds `{background: true, pid: integer}`; foreground mode later emits the SAS event below, then `{ok: true, pairing_code: string, room_id: string}`. |
+| `room join CODE [--no-auto-sync] [--insecure-skip-sas] [--accept-reduced-protection]` | Join using the code string, preserving any leading zero. After key confirmation, print the other device's name, the verification code and its protection (`protection: full on this device` after the commitment round, `protection: REDUCED` without it; trust a match only when both devices show full), and read one answer line from stdin: the code shown on the other device confirms, and so does `y`/`yes` when stdin is a terminal; anything else or end of input rejects and stores nothing. Under `protection: REDUCED`, an answer that no person gave right after reading the REDUCED line (stdin or stdout is not a terminal, or `--json` is set) is refused before it is read, aborting the pairing, unless `--accept-reduced-protection` is given; when both are a terminal in text mode, the REDUCED line shown just before the prompt is the acknowledgement. `--insecure-skip-sas` also prints the protection line to stderr (a background `room create` worker writes it to its log). Then wait for pairing and print the room ID. | `{event: "sas_confirmation", sas: string, peer_device_name: string, protection: "committed" \| "uncommitted"}`, then `{room_id: string, role: "member"}` |
+| `room confirm [CODE] [--accept-reduced-protection]` | Answer a background `room create`. `CODE` must be the six digits shown on the other device (spaces or dashes between groups are allowed); anything else, including `yes`, fails at once and records nothing. Waits for the joiner if needed, then prints this device's protection line (`protection: full on this device` or `protection: REDUCED …`, fixed local text) and compares `CODE` with this device's code, or without `CODE` shows the code and prompts like `room join`; that prompt ends with an error, without waiting for input, if the pairing fails, expires, is rejected or is removed meanwhile. Under `protection: REDUCED`, `CODE`, and a prompt answer that no person gave right after reading the REDUCED line (as for `room join`), are refused before comparing unless `--accept-reduced-protection` is given; the refusal records nothing and says the request is still open, so it can still be confirmed with the flag or rejected. A mismatch aborts the pairing. On a match, waits for the worker and prints `paired`. | With `CODE`, `{event: "sas_protection", protection: "committed" \| "uncommitted"}` (no code); without it, the SAS event above; then `{ok: true, room_id: string}`. |
 | `room reject` | Abort a background `room create`. At the verification step, waits until the worker has stopped, then reports that nothing was stored; fails if the code was already confirmed. Before a device joins, records the rejection (the worker stops when one joins) and lets a new `room create` start at once. | `{ok: true, rejected: true}`; before a join also `joined: false` |
 | `room leave [--yes]` | Stop/uninstall the login daemon, remove the current local room, and clear pending pairing state. Requires local/global `--yes` or global `--non-interactive`; otherwise fails rather than prompting. | `{ok: true}` |
 | `room list` | Print locally stored rooms with epoch and role. | Array of `RoomRecord` values below. |
@@ -101,7 +101,7 @@ not printed. Clipboard write failures in `pull --copy` are currently best effort
 | --- | --- |
 | `PeerRecord` | `device_id`, `device_name`, `os`, `public_key_hex`, `fingerprint`: strings; `role`: `owner` or `member`. |
 | `RoomRecord` | `room_id`: string; `epoch`: unsigned integer; `role`: `owner` or `member`; `created_at`: time; `device_token`: secret string; `peers`: array of `PeerRecord`. |
-| Status without daemon | `daemon: false`, `paused`, `connected: false`, `peer_online: false`: booleans; `room_id`, `device_id`: nullable strings; `relay_url`: string. Optional `pairing` contains `status` (`waiting`, `confirm_sas`, `paired`, `failed`), `pairing_code`, `room_id`, `expires_at`: strings; `pid`: integer; optional `error`, `sas`, `peer_device_name`, `sas_decision` (`confirmed`/`rejected`): strings. |
+| Status without daemon | `daemon: false`, `paused`, `connected: false`, `peer_online: false`: booleans; `room_id`, `device_id`: nullable strings; `relay_url`: string. Optional `pairing` contains `status` (`waiting`, `confirm_sas`, `paired`, `failed`), `pairing_code`, `room_id`, `expires_at`: strings; `pid`: integer; optional `error`, `sas`, `peer_device_name`, `sas_decision` (`confirmed`/`rejected`), `sas_protection` (`committed`/`uncommitted`): strings. |
 | Status with daemon | `daemon: true`, `paused`, `connected`, `peer_online`: booleans; `room_id`, `device_id`, `device_name`, `relay_url`: nullable strings; `last_item_kind`: nullable `text`/`image`/`files`; `last_sync_at`: nullable string (currently always `null`). |
 | Doctor | `identity`, `daemon_socket`, `login_service`: booleans; `device_id`, `fingerprint`, `room`: nullable strings; `relay_url`: string; `clipboard`: nullable `{name, source: string, text, image, files: boolean, fallback: string\|null}`; `tools`: array of `[tool_name, found_boolean]`; `relay`: `{ok: boolean, status: integer}` or `{ok: false, error: string}` (a URL refused by the relay URL policy reports its error without contacting the relay); `tls`: `{verifier: "platform", ca_file: string\|null}`; `paths`: `{config_dir, data_dir, log_file: string}`. |
 
@@ -118,8 +118,9 @@ define room/peer output.
 | `config get` / `set` key | Values accepted by `set`; default |
 | --- | --- |
 | `relay_url` | `https://` or `wss://` URL; plaintext `http://`/`ws://` only for a loopback host (`127.0.0.0/8`, `::1`, `localhost`) or with `CLIPSYNC_ALLOW_INSECURE_RELAY=1`. A URL without a scheme is rejected, as is a host not written in the canonical form the client dials (for example `0x7f.1` or `[0:0:0:0:0:0:0:1]`). The parsed, normalized URL is saved. Default `CLIPSYNC_RELAY_URL` or `https://clipsync.develicit.dev`. Relay HTTP requests do not follow redirects; plaintext relays are contacted directly, ignoring `HTTP_PROXY`/`ALL_PROXY` and system proxies, while `https://` relays honor them. |
-| `sync.enabled`, `sync.auto_start`, `notify.enabled` | `1`, `true`, `yes`, `on` mean true; all other strings mean false. Default true. |
+| `sync.enabled`, `sync.auto_start`, `notify.enabled` | `1`, `true`, `yes`, `on` mean true; `0`, `false`, `no`, `off` mean false; any other value fails and leaves the setting unchanged. Default true. |
 | `notify.preview` | Same boolean syntax; default false. |
+| `pairing.require_commitment` | Same boolean syntax; default false. When true, refuse to pair without the [commitment round](security.md#commitment-round) instead of falling back to reduced protection. Against a malicious relay it counts on the device that runs `room create`. |
 | `sync.direction` | `both`, `send-only`/`send_only`, `receive-only`/`receive_only`; default `both`. Single-key `get` currently returns `sendonly`/`receiveonly`, while full JSON uses underscores. |
 | `sync.ttl_secs` | Unsigned seconds, clamped to 10–300; default 60. Current sending code uses 60 regardless of this setting. |
 | `sync.legacy_envelopes` | Same boolean syntax; default false. By default the envelope version is negotiated per peer (v1 until the peer proves it opens v2). True makes this device always send legacy v1 envelopes; receiving is unaffected. See [transition from v1](protocol.md#transition-from-v1). |
@@ -127,7 +128,7 @@ define room/peer output.
 
 `sync.types` (default text/image/files), `sync.debounce_ms` (default 200), and
 `webhook` appear in the full config but have no `config set` key. An unknown key
-or invalid direction/integer fails. `send_only` currently does not block
+or invalid boolean/direction/integer fails. `send_only` currently does not block
 received clipboard writes; `receive_only` blocks the sending watch path.
 Restart a running daemon after changing configuration to reload its snapshot.
 
@@ -188,7 +189,13 @@ Webhook URL/secret settings are optional and must both be present to emit the
 webhook output described below. Without an explicit public URL, it is derived from the
 environment bind port (default `http://127.0.0.1:7600`); `--bind` alone does not
 recompute it. Current pairing responses advertise the relative `ws_path`, not
-that URL.
+that URL. A bind port of `0` (for example `--bind 127.0.0.1:0`) lets the
+operating system choose a free port. Pass `--public-url` explicitly in that
+case, because a derived URL would carry port `0`. The startup diagnostic
+`clipsync-relay listening ... addr=ADDRESS` is written to standard output once
+the socket is bound and reports the chosen address. It is an info-level
+tracing event, so a `RUST_LOG` filter above `info` suppresses it, and terminal
+colour can change its formatting; set `NO_COLOR=1` when a script parses it.
 
 HTTP definitions: [router and handlers](../crates/clipsync-relay/src/lib.rs),
 [pairing behavior](../crates/clipsync-relay/src/state.rs), and
@@ -258,7 +265,8 @@ as `null` when unset.
 | `hello_ok` | `room_id: string`, `peer_online: boolean`, `peers: PeerInfo[]`, `queued_text?: QueuedEnvelope`, `device_token?: string`. | Relay → client. Pairing connections get empty peers/queue; member connections may receive queued text. `device_token` is currently null here. |
 | `peer_joined` | `device: PeerInfo`. | Relay → peer: device connected. |
 | `peer_left` | `device_id: string`. | Relay → peer: device disconnected. |
-| `spake2_msg` | `pairing_session_id`, `message: string`. | Client ↔ peer via relay: pairing exchange. |
+| `spake2_commit` | `pairing_session_id`, `commitment: string`. | Joiner → creator via relay, before its `spake2_msg`: commitment to that message ([commitment round](protocol.md#commitment-round)). The relay accepts it only from the joiner's pairing connection, at most 64 bytes. |
+| `spake2_msg` | `pairing_session_id`, `message: string`, `after_commitment?: boolean` (omitted when false). | Client ↔ peer via relay: pairing exchange. The creator sets `after_commitment` when it received the joiner's commitment first. |
 | `key_confirm` | `pairing_session_id`, `mac: string`. | Client ↔ peer: pairing key confirmation. |
 | `device_bind` | `pairing_session_id`, `nonce`, `ciphertext: string`. | Client ↔ peer: encrypted device binding. |
 | `pairing_complete` | `room_id`, `device_token: string`, `epoch: u64`, `role: DeviceRole`. | Relay → each paired client: persist room and token; initial epoch is 1. |
@@ -287,7 +295,8 @@ null transfer ID. Peers can emit further acknowledgements.
 | `QueuedEnvelope` | `routing: RoutingHeader`, `nonce`, `ciphertext: string`. |
 | `EpochWrap` | `device_id`, `eph_public`, `nonce`, `ciphertext: string`. |
 
-The core encodes `spake2_msg.message` and `key_confirm.mac` as standard Base64;
+The core encodes `spake2_msg.message`, `spake2_commit.commitment` and
+`key_confirm.mac` as standard Base64;
 Noise handshake messages, nonces, and ciphertexts use hex strings.
 `manifest.ciphertext` encrypts a `ManifestPlain` record: `item_kind`,
 `total_bytes: u64`, `chunk_count: u32`, `content_hash: string`, `files:
@@ -359,7 +368,7 @@ is cached; use one active identity/client configuration per process rather
 than assuming independent instances. Neither pairing method installs an OS
 login service; native apps call `start_sync` and manage platform lifecycle.
 
-`SasVerifier.confirm_sas(sas, peer_device_name) -> bool` is called once per
+`SasVerifier.confirm_sas(sas, peer_device_name, full_protection) -> bool` is called once per
 pairing on a background thread, after key confirmation. Show the six-digit
 `sas` (for example as `482 913`) and the relay-reported `peer_device_name`
 (fixed before SPAKE2 starts; control, bidi, blank and invisible characters
@@ -373,7 +382,10 @@ device rejected, relay error), `SasVerifier.sas_cancelled()` is called: dismiss
 the dialog and let the pending `confirm_sas` return; its answer is ignored.
 `sas_cancelled` must not block. Marshal the dialog to the UI thread; do not
 block the UI thread waiting for it. Keep the client alive until the dialog is
-dismissed, because dropping it waits for a blocked `confirm_sas`. See
+dismissed, because dropping it waits for a blocked `confirm_sas`.
+`full_protection` is true when this device ran the commitment round; show
+"full protection" or "reduced protection" next to the code, and tell the user
+that a match is trustworthy only when both devices show full protection. See
 [security](security.md#verification-code-sas).
 
 Implement every callback in `ClipboardBridge`; it is a thread-safe

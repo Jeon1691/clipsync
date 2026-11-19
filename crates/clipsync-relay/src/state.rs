@@ -5,7 +5,7 @@ use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use chrono::{DateTime, Utc};
+use clipsync_protocol::Timestamp;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use rand::Rng;
@@ -46,7 +46,7 @@ const ROOM_EVICTION_ATTEMPTS: usize = 4;
 /// One offline text envelope, charged to the client that sent it.
 struct QueuedText {
     envelope: QueuedEnvelope,
-    expires_at: DateTime<Utc>,
+    expires_at: Timestamp,
     /// The sender's client key (see [`client_key`]).
     sender: IpAddr,
 }
@@ -131,6 +131,11 @@ pub struct RelayState {
     /// Serializes the capacity check with the insert of a new pairing session,
     /// so concurrent creations cannot overshoot the session or room caps.
     pairing_admission: Mutex<()>,
+    /// Test hook: every event handed to [`Self::webhook_spawn`], recorded
+    /// whether or not a webhook is configured, so tests can pin the body
+    /// without a reachable (non-loopback) webhook target.
+    #[cfg(test)]
+    pub(crate) webhook_events: Mutex<Vec<serde_json::Value>>,
     pub(crate) connection_counts: Arc<ConnectionCounts>,
     trusted_proxies: TrustedProxies,
     join_limits: PairingJoinLimits,
@@ -160,7 +165,7 @@ pub struct PairingSession {
     pub session_id: PairingSessionId,
     pub room_id: RoomId,
     pub code: String,
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
     pub attempts: u32,
     pub creator: PeerInfo,
     pub joiner: Option<PeerInfo>,
@@ -169,7 +174,26 @@ pub struct PairingSession {
     pub completed: bool,
     // Only authenticated sockets for this session may exchange pairing frames.
     pub(crate) pairing_senders: [Option<mpsc::Sender<WsOut>>; 2],
-    pub(crate) pending_spake: [Option<String>; 2],
+    pub(crate) pending_spake: [Option<PendingSpake>; 2],
+    // The joiner's commitment, held like its SPAKE message until the creator
+    // is connected. Only side 1 (the joiner) ever fills its slot.
+    pub(crate) pending_commit: [Option<String>; 2],
+}
+
+/// A SPAKE message retained until the peer's authenticated socket arrives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingSpake {
+    pub(crate) message: String,
+    pub(crate) after_commitment: bool,
+}
+
+impl PairingSession {
+    /// Drop every retained pairing frame (expiry, completion, a replaced or
+    /// closed pairing socket).
+    pub(crate) fn clear_pending(&mut self) {
+        self.pending_spake = [None, None];
+        self.pending_commit = [None, None];
+    }
 }
 
 pub struct Room {
@@ -178,7 +202,7 @@ pub struct Room {
     pub epoch: u64,
     pub default_ttl: u64,
     /// When the device tokens issued for this room expire.
-    pub tokens_expire_at: DateTime<Utc>,
+    pub tokens_expire_at: Timestamp,
     /// When the room was last used, on the relay's activity clock: a device
     /// registering, sending or leaving.
     pub(crate) last_active: AtomicU64,
@@ -306,6 +330,8 @@ impl RelayState {
             join_budget: Budget::default(),
             create_budget: Budget::default(),
             pairing_admission: Mutex::new(()),
+            #[cfg(test)]
+            webhook_events: Mutex::default(),
             connection_counts: Arc::default(),
             trusted_proxies: TrustedProxies::new(trusted_proxies),
             join_limits,
@@ -368,7 +394,7 @@ impl RelayState {
         if !self.has_pairing_capacity() {
             // Expired sessions linger until the next GC pass; never let them
             // refuse a creation.
-            self.prune_pairings(Utc::now());
+            self.prune_pairings(Timestamp::now());
         }
         while self.pairing_by_code.len() < MAX_ACTIVE_PAIRING_SESSIONS
             && !self.has_pairing_capacity()
@@ -385,7 +411,7 @@ impl RelayState {
             return Err(CreateError::Full);
         };
         let room_id = RoomId::new();
-        let expires_at = Utc::now() + chrono::Duration::seconds(PAIRING_TTL_SECS as i64);
+        let expires_at = Timestamp::now() + time::Duration::seconds(PAIRING_TTL_SECS as i64);
         let session = PairingSession {
             session_id: req.pairing_session_id.clone(),
             room_id: room_id.clone(),
@@ -405,6 +431,7 @@ impl RelayState {
             completed: false,
             pairing_senders: [None, None],
             pending_spake: [None, None],
+            pending_commit: [None, None],
         };
         self.pairing_by_code.insert(code.clone(), session);
         self.pairing_by_id
@@ -548,7 +575,7 @@ impl RelayState {
             .pairing_by_code
             .get_mut(&req.pairing_code)
             .ok_or(JoinError::NotFound)?;
-        if session.expires_at < Utc::now() {
+        if session.expires_at < Timestamp::now() {
             return Err(JoinError::Expired);
         }
         if session.completed {
@@ -634,8 +661,8 @@ impl RelayState {
         if expected_room.is_some_and(|room| room != session.room_id.as_str()) {
             return None;
         }
-        if session.expires_at < Utc::now() {
-            session.pending_spake = [None, None];
+        if session.expires_at < Timestamp::now() {
+            session.clear_pending();
             return None;
         }
         if session.completed {
@@ -646,7 +673,7 @@ impl RelayState {
             return None;
         }
         session.completed = true;
-        session.pending_spake = [None, None];
+        session.clear_pending();
         let joiner = session.joiner.clone()?;
         let creator = session.creator.clone();
         let room_id = session.room_id.clone();
@@ -691,8 +718,8 @@ impl RelayState {
                 epoch: 1,
                 default_ttl: session.ttl_secs,
                 // Read after both tokens were issued, so neither outlives it.
-                tokens_expire_at: Utc::now()
-                    + chrono::Duration::seconds(DEVICE_TOKEN_TTL_SECS + TOKEN_EXPIRY_GRACE_SECS),
+                tokens_expire_at: Timestamp::now()
+                    + time::Duration::seconds(DEVICE_TOKEN_TTL_SECS + TOKEN_EXPIRY_GRACE_SECS),
                 last_active: AtomicU64::new(self.next_activity()),
             },
         );
@@ -852,12 +879,12 @@ impl RelayState {
         room_id: &str,
         device_id: &str,
         env: QueuedEnvelope,
-        expires_at: DateTime<Utc>,
+        expires_at: Timestamp,
         sender: IpAddr,
     ) -> bool {
         let sender = client_key(sender);
-        let now = Utc::now();
-        let expires_at = expires_at.min(now + chrono::Duration::seconds(QUEUE_TTL_SECS as i64));
+        let now = Timestamp::now();
+        let expires_at = expires_at.min(now + time::Duration::seconds(QUEUE_TTL_SECS as i64));
         let key = member_key(room_id, device_id);
         let replaced_sender = self.queue.get(&key).map(|queued| queued.sender);
         if replaced_sender != Some(sender)
@@ -903,7 +930,7 @@ impl RelayState {
     pub fn take_queue(&self, room_id: &str, device_id: &str) -> Option<QueuedEnvelope> {
         let (_, queued) = self.queue.remove(&member_key(room_id, device_id))?;
         self.uncharge_sender(queued.sender);
-        if queued.expires_at < Utc::now() {
+        if queued.expires_at < Timestamp::now() {
             self.expired.fetch_add(1, Ordering::Relaxed);
             None
         } else {
@@ -945,7 +972,7 @@ impl RelayState {
     }
 
     pub fn gc(&self) {
-        let now = Utc::now();
+        let now = Timestamp::now();
         self.prune_pairings(now);
         self.join_budget
             .prune(self.join_limits.client_fail_window());
@@ -956,7 +983,7 @@ impl RelayState {
     }
 
     /// Drop expired and completed pairing sessions from both indexes.
-    fn prune_pairings(&self, now: DateTime<Utc>) {
+    fn prune_pairings(&self, now: Timestamp) {
         let mut removed = Vec::new();
         self.pairing_by_code.retain(|code, session| {
             let keep = session.expires_at > now && !session.completed;
@@ -975,7 +1002,7 @@ impl RelayState {
     /// Drop rooms nobody can use again: every device revoked, or every device
     /// token expired while no device is still connected. Tokens are only
     /// issued at pairing, so neither kind of room can be re-entered.
-    fn prune_rooms(&self, now: DateTime<Utc>) {
+    fn prune_rooms(&self, now: Timestamp) {
         self.rooms.retain(|room_id, room| {
             let any_active = room.devices.values().any(|device| !device.revoked);
             let tokens_valid = room.tokens_expire_at > now;
@@ -983,7 +1010,7 @@ impl RelayState {
         });
     }
 
-    fn prune_queue(&self, now: DateTime<Utc>) {
+    fn prune_queue(&self, now: Timestamp) {
         let mut expired = Vec::new();
         self.queue.retain(|_, queued| {
             let keep = queued.expires_at > now;
@@ -1019,6 +1046,11 @@ impl RelayState {
     }
 
     pub fn webhook_spawn(&self, event: serde_json::Value) {
+        #[cfg(test)]
+        self.webhook_events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(event.clone());
         if let (Some(url), Some(secret)) = (
             self.config.webhook_url.clone(),
             self.config.webhook_secret.clone(),

@@ -4,12 +4,13 @@ use std::future::Future;
 use std::time::Duration;
 
 use base64::Engine as _;
-use chrono::Utc;
+use clipsync_protocol::Timestamp;
 use tracing::{info, warn};
 
 use clipsync_crypto::{
     confirm_mac, finish_pairing, initial_epoch_key, open, seal, short_authentication_string,
-    start_pairing_a, start_pairing_b, verify_confirm_mac, DeviceIdentity, PairingRole, SAS_DIGITS,
+    spake2_commitment, start_pairing_a, start_pairing_b, verify_confirm_mac,
+    verify_spake2_commitment, DeviceIdentity, PairingRole, SasProtection, SAS_DIGITS,
 };
 use clipsync_protocol::{
     ClientRole, ControlMessage, CreatePairingRequest, CreatePairingResponse,
@@ -40,6 +41,47 @@ const SAS_REJECT_FLUSH: Duration = Duration::from_secs(2);
 /// confirmation at once, and an updated peer treats any second `key_confirm`
 /// as this notice.
 const SAS_ABORT_NOTICE_MAC: &str = "";
+
+/// How long the creator waits, after the joiner is announced, for the
+/// joiner's commitment before it sends its own SPAKE2 message without one.
+/// An updated joiner sends the commitment right after its `Hello`, in the
+/// same relay task that announces it, so it trails `peer_joined` by one
+/// relay round trip; five seconds covers a slow mobile uplink. Only a relay
+/// that drops the unknown frame (one that predates it) or withholds it
+/// makes the creator wait this long. An older joiner sends its SPAKE2
+/// message instead, which ends the wait at once.
+pub const COMMITMENT_WAIT: Duration = Duration::from_secs(5);
+/// Error code sent when the joiner's SPAKE2 message does not open its
+/// commitment. The relay aborts the pairing session on any client `Error`.
+const COMMITMENT_MISMATCH_CODE: &str = "commitment_mismatch";
+/// Error code sent when `pairing.require_commitment` refuses a pairing that
+/// would run without the commitment round.
+const COMMITMENT_REQUIRED_CODE: &str = "commitment_required";
+
+/// Whether a pairing may run without the commitment round.
+///
+/// Against a malicious relay, `Require` protects on the creator, which
+/// checks the commitment itself. A joiner cannot verify the creator's
+/// acknowledgement, which the relay can forge, but an updated joiner's own
+/// half is protected by its order in any mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommitmentPolicy {
+    /// Use the round when both sides support it, else fall back and show
+    /// the reduced protection on the confirmation screen.
+    Prefer,
+    /// `pairing.require_commitment`: abort instead of falling back.
+    Require,
+}
+
+impl CommitmentPolicy {
+    fn from_config(cfg: &AppConfig) -> Self {
+        if cfg.pairing.require_commitment {
+            Self::Require
+        } else {
+            Self::Prefer
+        }
+    }
+}
 
 /// Relay-supplied text made safe to print: it ends up in error messages on
 /// a terminal, possibly right after a verification code.
@@ -115,6 +157,12 @@ pub struct SasCheck {
     /// and the width is bounded (see [`crate::sanitize_untrusted`]), but show
     /// it apart from the SAS anyway.
     pub peer_device_name: String,
+    /// Whether this device ran the commitment round. Show it with the code:
+    /// a match is trustworthy only when both devices show
+    /// [`SasProtection::Committed`]. A relay that downgraded either device
+    /// can search for messages that make the codes match, so one device's
+    /// mode says nothing about the other's.
+    pub protection: SasProtection,
 }
 
 impl SasCheck {
@@ -127,6 +175,41 @@ impl SasCheck {
     /// Digits grouped for reading aloud, such as `482 913`.
     pub fn display(&self) -> String {
         display_sas(&self.sas)
+    }
+
+    /// One line for the confirmation screen that states the protection.
+    pub fn protection_notice(&self) -> &'static str {
+        protection_notice(self.protection)
+    }
+}
+
+/// Wire and file name of a [`SasProtection`] (CLI JSON events, the
+/// background pairing file).
+pub fn protection_name(protection: SasProtection) -> &'static str {
+    match protection {
+        SasProtection::Committed => "committed",
+        SasProtection::Uncommitted => "uncommitted",
+    }
+}
+
+/// Inverse of [`protection_name`]. Anything else, including a missing
+/// value, reads as the weaker mode so a screen never overstates protection.
+pub fn parse_protection(name: Option<&str>) -> SasProtection {
+    match name {
+        Some("committed") => SasProtection::Committed,
+        _ => SasProtection::Uncommitted,
+    }
+}
+
+/// What the confirmation screen says about a [`SasProtection`].
+pub fn protection_notice(protection: SasProtection) -> &'static str {
+    match protection {
+        SasProtection::Committed => {
+            "protection: full on this device (trust matching codes only if the other device also shows protection: full)"
+        }
+        SasProtection::Uncommitted => {
+            "protection: REDUCED (the other device or the relay does not support the commitment round, so a malicious relay can search for matching codes; trust a match only on a relay you trust, or set pairing.require_commitment)"
+        }
     }
 }
 
@@ -178,7 +261,7 @@ pub enum SasDecision {
 pub struct RoomOffer {
     pub pairing_code: String,
     pub room_id: clipsync_protocol::RoomId,
-    pub expires_at: chrono::DateTime<Utc>,
+    pub expires_at: Timestamp,
 }
 
 pub struct PendingCreate {
@@ -186,6 +269,7 @@ pub struct PendingCreate {
     conn: RelayConnection,
     session_id: PairingSessionId,
     password: String,
+    commitment: CommitmentPolicy,
 }
 
 impl PendingCreate {
@@ -217,6 +301,7 @@ impl PendingCreate {
             None,
             self.offer.room_id.clone(),
             DeviceRole::Owner,
+            self.commitment,
             confirm,
         )
         .await
@@ -290,6 +375,7 @@ pub async fn begin_create_room(
         conn,
         session_id,
         password: created.pairing_code,
+        commitment: CommitmentPolicy::from_config(cfg),
     })
 }
 
@@ -399,6 +485,7 @@ where
         Some(joined.peer.device_name.clone()),
         joined.room_id,
         DeviceRole::Member,
+        CommitmentPolicy::from_config(cfg),
         confirm,
     )
     .await?;
@@ -425,6 +512,7 @@ async fn run_pairing<C, F>(
     mut peer_name: Option<String>,
     room_id: clipsync_protocol::RoomId,
     our_role: DeviceRole,
+    policy: CommitmentPolicy,
     confirm: C,
 ) -> Result<(), CoreError>
 where
@@ -440,9 +528,20 @@ where
         PairingRole::B => Some(device_a.clone()),
     };
     let mut spake_started = false;
-    let mut state = None;
+    let mut state: Option<clipsync_crypto::PairingState> = None;
     let mut keys = None;
     let mut inbound_spake: Option<Vec<u8>> = None;
+    // Commitment round (see `docs/protocol.md`). The joiner commits to its
+    // SPAKE2 message and reveals it only after the creator's message
+    // arrived; the creator sends its message only once it holds the
+    // commitment, or once it knows there is none.
+    let mut peer_commitment: Option<Vec<u8>> = None;
+    let mut peer_after_commitment = false;
+    let mut protection: Option<SasProtection> = None;
+    let mut our_message: Option<Vec<u8>> = None;
+    let mut revealed = false;
+    let mut commitment_wait: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
+    let mut commitment_wait_over = false;
     let mut peer_confirm: Option<Vec<u8>> = None;
     let mut peer_bind: Option<(String, String)> = None;
     let mut complete: Option<ControlMessage> = None;
@@ -455,6 +554,15 @@ where
     loop {
         tokio::select! {
             _ = &mut timeout => return Err(CoreError::Timeout),
+            _ = async {
+                match commitment_wait.as_mut() {
+                    Some(wait) => wait.await,
+                    None => std::future::pending().await,
+                }
+            }, if commitment_wait.is_some() => {
+                commitment_wait = None;
+                commitment_wait_over = true;
+            }
             verdict = async {
                 match decision.as_mut() {
                     Some(pending) => pending.await,
@@ -534,8 +642,17 @@ where
                             }
                         }
                     }
-                    Incoming::Control(ControlMessage::Spake2Msg { message, .. }) => {
+                    Incoming::Control(ControlMessage::Spake2Commit { commitment, .. }) => {
+                        // Only a commitment that arrives before the creator's
+                        // own message can bind the joiner; a late or repeated
+                        // one changes nothing, and the joiner never gets one.
+                        if role == PairingRole::A && !spake_started && peer_commitment.is_none() {
+                            peer_commitment = Some(b64_decode(&commitment)?);
+                        }
+                    }
+                    Incoming::Control(ControlMessage::Spake2Msg { message, after_commitment, .. }) => {
                         inbound_spake = Some(b64_decode(&message)?);
+                        peer_after_commitment = after_commitment;
                     }
                     Incoming::Control(ControlMessage::KeyConfirm { mac, .. }) => {
                         if peer_confirm.is_some() {
@@ -575,6 +692,27 @@ where
             continue;
         }
 
+        if role == PairingRole::A && !spake_started {
+            // Wait for the joiner's commitment. An older joiner sends its
+            // SPAKE2 message instead; an older relay drops the commitment,
+            // which `COMMITMENT_WAIT` bounds.
+            let decided = if peer_commitment.is_some() {
+                SasProtection::Committed
+            } else if inbound_spake.is_some() || commitment_wait_over {
+                SasProtection::Uncommitted
+            } else {
+                if commitment_wait.is_none() {
+                    commitment_wait = Some(Box::pin(tokio::time::sleep(COMMITMENT_WAIT)));
+                }
+                continue;
+            };
+            commitment_wait = None;
+            if decided == SasProtection::Uncommitted && policy == CommitmentPolicy::Require {
+                return Err(refuse_uncommitted(&mut conn).await);
+            }
+            protection = Some(decided);
+        }
+
         if !spake_started {
             let (id_a, id_b) = match role {
                 PairingRole::A => (
@@ -589,17 +727,65 @@ where
                 PairingRole::A => start_pairing_a(password, session_id.clone(), id_a, id_b)?,
                 PairingRole::B => start_pairing_b(password, session_id.clone(), id_a, id_b)?,
             };
-            conn.send_control(ControlMessage::Spake2Msg {
-                pairing_session_id: session_id.clone(),
-                message: b64_encode(&st.outbound),
-            })
-            .await?;
+            match role {
+                PairingRole::A => {
+                    conn.send_control(ControlMessage::Spake2Msg {
+                        pairing_session_id: session_id.clone(),
+                        message: b64_encode(&st.outbound),
+                        after_commitment: protection == Some(SasProtection::Committed),
+                    })
+                    .await?;
+                }
+                // The joiner commits first and keeps its message back.
+                PairingRole::B => {
+                    conn.send_control(ControlMessage::Spake2Commit {
+                        pairing_session_id: session_id.clone(),
+                        commitment: b64_encode(&spake2_commitment(&st)?),
+                    })
+                    .await?;
+                    our_message = Some(st.outbound.clone());
+                }
+            }
             state = Some(st);
             spake_started = true;
         }
 
+        // The joiner reveals its message only after the creator's arrived,
+        // so a relay has to fix what it sends us before it learns it.
+        if role == PairingRole::B && !revealed && inbound_spake.is_some() {
+            let decided = if peer_after_commitment {
+                SasProtection::Committed
+            } else {
+                SasProtection::Uncommitted
+            };
+            if decided == SasProtection::Uncommitted && policy == CommitmentPolicy::Require {
+                return Err(refuse_uncommitted(&mut conn).await);
+            }
+            protection = Some(decided);
+            conn.send_control(ControlMessage::Spake2Msg {
+                pairing_session_id: session_id.clone(),
+                message: b64_encode(our_message.as_deref().unwrap_or_default()),
+                after_commitment: false,
+            })
+            .await?;
+            revealed = true;
+        }
+
         if keys.is_none() && inbound_spake.is_some() {
             if let (Some(st), Some(inbound)) = (state.take(), inbound_spake.clone()) {
+                if let (PairingRole::A, Some(committed)) = (role, &peer_commitment) {
+                    if verify_spake2_commitment(&st, committed, &inbound).is_err() {
+                        abort_pairing(
+                            &mut conn,
+                            COMMITMENT_MISMATCH_CODE,
+                            "SPAKE2 message does not open its commitment",
+                        )
+                        .await;
+                        return Err(CoreError::Pairing(
+                            "the other device's SPAKE2 message does not match the commitment it sent first; nothing was stored".into(),
+                        ));
+                    }
+                }
                 match finish_pairing(st, &inbound) {
                     Ok(k) => keys = Some(k),
                     Err(e) => {
@@ -639,8 +825,10 @@ where
                     return Err(CoreError::Pairing(e.to_string()));
                 }
                 if let Some(ask) = confirm.take() {
+                    let protection = protection
+                        .ok_or_else(|| CoreError::Pairing("missing SAS protection mode".into()))?;
                     let check = SasCheck {
-                        sas: short_authentication_string(k),
+                        sas: short_authentication_string(k, protection),
                         peer_device_id: peer_id
                             .clone()
                             .ok_or_else(|| CoreError::Pairing("missing peer identity".into()))?,
@@ -649,6 +837,7 @@ where
                             peer_name.as_deref().unwrap_or_default(),
                             MAX_PEER_NAME_COLUMNS,
                         ),
+                        protection,
                     };
                     decision = Some(Box::pin(ask(check)));
                 }
@@ -730,7 +919,7 @@ where
                     room_id: room_id.clone(),
                     epoch,
                     role,
-                    created_at: Utc::now(),
+                    created_at: Timestamp::now(),
                     device_token,
                     peers: vec![peer],
                 };
@@ -766,6 +955,38 @@ where
             }
         }
     }
+}
+
+/// Send `error` so the relay drops the pairing session, close, and keep
+/// reading until the transport has flushed both (see [`SAS_REJECT_FLUSH`]):
+/// dropping the connection at once can discard the queued `error`.
+async fn abort_pairing(conn: &mut RelayConnection, code: &str, message: &str) {
+    let _ = conn
+        .send_control(ControlMessage::Error {
+            code: code.into(),
+            message: message.into(),
+        })
+        .await;
+    conn.close().await;
+    let _ = tokio::time::timeout(SAS_REJECT_FLUSH, async {
+        while conn.incoming.recv().await.is_some() {}
+    })
+    .await;
+}
+
+/// Abort a pairing that would run without the commitment round while
+/// `pairing.require_commitment` is set. Nothing has been sent that commits
+/// anything, and nothing is stored.
+async fn refuse_uncommitted(conn: &mut RelayConnection) -> CoreError {
+    abort_pairing(
+        conn,
+        COMMITMENT_REQUIRED_CODE,
+        "pairing requires the commitment round",
+    )
+    .await;
+    CoreError::Pairing(
+        "the other device or the relay does not support the commitment round, and pairing.require_commitment is set; nothing was stored".into(),
+    )
 }
 
 fn device_bind_nonce(
@@ -864,7 +1085,7 @@ pub(crate) fn sas_comparison() -> (SasPeerConfirm, SasPeerConfirm) {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use clipsync_crypto::{derive_nonce, PairingKeys};
+    use clipsync_crypto::{derive_nonce, PairingKeys, SPAKE2_COMMITMENT_LEN};
 
     /// Real-clock budget for a scripted relay that answers immediately.
     const SCRIPT_DEADLINE: Duration = Duration::from_secs(8);
@@ -946,14 +1167,113 @@ mod tests {
         )
     }
 
-    /// Scripted relay plus honest joiner (role B) sharing [`TEST_CODE`]. It reports
-    /// the SAS it derived, then follows `script`. Returns the frames the
-    /// client sent after key confirmation, up to its binding or `Error`.
+    /// The joiner's commitment to `message` under `state`'s bindings, which
+    /// lets a script commit to bytes other than its own SPAKE2 message.
+    fn commitment_for(
+        state: &clipsync_crypto::PairingState,
+        message: &[u8],
+    ) -> [u8; SPAKE2_COMMITMENT_LEN] {
+        let mut shadow = start_pairing_b(
+            &TEST_CODE,
+            state.session_id.clone(),
+            state.device_a.clone(),
+            state.device_b.clone(),
+        )
+        .unwrap();
+        shadow.outbound = message.to_vec();
+        spake2_commitment(&shadow).unwrap()
+    }
+
+    /// How the scripted joiner's SPAKE2 message reaches the client.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum JoinerWire {
+        /// An updated joiner: commit, wait for the creator's message, reveal.
+        Committing,
+        /// A joiner that predates the commitment round (protocol v1 with or
+        /// without the SAS): its SPAKE2 message goes out at once.
+        Legacy,
+        /// An updated joiner behind a relay that predates the round and drops
+        /// the commitment as an unknown frame.
+        BehindOldRelay,
+        /// [`JoinerWire::Committing`], but the commitment arrives only after
+        /// the script checked that the creator sent nothing without it.
+        CommitsLate,
+        /// A relay that commits to one message and then reveals another.
+        WrongOpening,
+        /// The creator acknowledged the commitment, but the relay stripped the
+        /// flag on the way to this (honest) joiner, which therefore derives
+        /// the uncommitted SAS.
+        AckStripped,
+    }
+
+    impl JoinerWire {
+        fn commits(self) -> bool {
+            !matches!(self, JoinerWire::Legacy | JoinerWire::BehindOldRelay)
+        }
+    }
+
+    /// Read the next control frame, waiting long enough for a creator that
+    /// sits out [`COMMITMENT_WAIT`].
+    async fn receive_after_commitment_wait(
+        socket: &mut axum::extract::ws::WebSocket,
+    ) -> ControlMessage {
+        tokio::time::timeout(COMMITMENT_WAIT * 2, async {
+            loop {
+                let frame = socket.recv().await;
+                let Some(Ok(frame)) = frame else {
+                    panic!("client closed before sending SPAKE2: {frame:?}");
+                };
+                let axum::extract::ws::Message::Text(text) = frame else {
+                    continue;
+                };
+                match ControlMessage::decode(&text).unwrap() {
+                    ControlMessage::Ping { ts } => {
+                        crate::test_relay::send(socket, ControlMessage::Pong { ts }).await;
+                    }
+                    message => return message,
+                }
+            }
+        })
+        .await
+        .expect("client never sent SPAKE2")
+    }
+
+    /// Scripted relay plus honest, updated joiner (role B) sharing
+    /// [`TEST_CODE`]. See [`scripted_joiner`].
     async fn honest_joiner(
         local: DeviceId,
         sid: PairingSessionId,
         room: clipsync_protocol::RoomId,
         script: Joiner,
+        script_deadline: Duration,
+    ) -> (
+        crate::test_relay::Server,
+        tokio::sync::oneshot::Receiver<String>,
+        tokio::sync::oneshot::Receiver<Vec<ControlMessage>>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        scripted_joiner(
+            local,
+            sid,
+            room,
+            script,
+            JoinerWire::Committing,
+            script_deadline,
+        )
+        .await
+    }
+
+    /// Scripted relay plus honest joiner (role B) sharing [`TEST_CODE`],
+    /// whose SPAKE2 message travels as `wire` says. It checks that the client
+    /// acknowledges a commitment exactly when it received one, reports the
+    /// SAS it derived in that mode, then follows `script`. Returns the frames
+    /// the client sent after key confirmation, up to its binding or `Error`.
+    async fn scripted_joiner(
+        local: DeviceId,
+        sid: PairingSessionId,
+        room: clipsync_protocol::RoomId,
+        script: Joiner,
+        wire: JoinerWire,
         script_deadline: Duration,
     ) -> (
         crate::test_relay::Server,
@@ -983,23 +1303,81 @@ mod tests {
                     },
                 )
                 .await;
-                let ControlMessage::Spake2Msg { message, .. } = receive(&mut socket).await else {
-                    panic!("client did not initiate SPAKE2")
-                };
                 let state = start_pairing_b(&TEST_CODE, sid.clone(), local, peer.clone()).unwrap();
-                let outbound = state.outbound.clone();
+                let reveal = ControlMessage::Spake2Msg {
+                    pairing_session_id: sid.clone(),
+                    message: b64_encode(&state.outbound),
+                    after_commitment: false,
+                };
+                if wire == JoinerWire::CommitsLate {
+                    assert!(
+                        tokio::time::timeout(EARLY_FRAME_PROBE, receive(&mut socket))
+                            .await
+                            .is_err(),
+                        "the creator sent a frame before it held the joiner's commitment"
+                    );
+                }
+                match wire {
+                    JoinerWire::Legacy => send(&mut socket, reveal.clone()).await,
+                    JoinerWire::BehindOldRelay => {}
+                    _ => {
+                        let committed = if wire == JoinerWire::WrongOpening {
+                            let other = start_pairing_b(
+                                &TEST_CODE,
+                                sid.clone(),
+                                state.device_a.clone(),
+                                peer.clone(),
+                            )
+                            .unwrap();
+                            commitment_for(&state, &other.outbound)
+                        } else {
+                            spake2_commitment(&state).unwrap()
+                        };
+                        send(
+                            &mut socket,
+                            ControlMessage::Spake2Commit {
+                                pairing_session_id: sid.clone(),
+                                commitment: b64_encode(&committed),
+                            },
+                        )
+                        .await;
+                    }
+                }
+                // A client that refuses the pairing here answers with an
+                // `Error`; hand it to the test instead of SPAKE2.
+                let answer = receive_after_commitment_wait(&mut socket).await;
+                let ControlMessage::Spake2Msg {
+                    message,
+                    after_commitment,
+                    ..
+                } = answer
+                else {
+                    // No SAS was derived; let a waiting test see that.
+                    drop(sas_tx);
+                    let _ = frame_tx.send(vec![answer]);
+                    let _ = release.await;
+                    return;
+                };
+                assert_eq!(
+                    after_commitment,
+                    wire.commits(),
+                    "{wire:?}: the creator's acknowledgement must match the commitment it got"
+                );
+                let protection = if after_commitment && wire != JoinerWire::AckStripped {
+                    SasProtection::Committed
+                } else {
+                    SasProtection::Uncommitted
+                };
                 let keys = finish_pairing(state, &b64_decode(&message).unwrap()).unwrap();
-                let _ = sas_tx.send(short_authentication_string(&keys));
-                send(
-                    &mut socket,
-                    ControlMessage::Spake2Msg {
-                        pairing_session_id: sid.clone(),
-                        message: b64_encode(&outbound),
-                    },
-                )
-                .await;
-                let ControlMessage::KeyConfirm { mac, .. } = receive(&mut socket).await else {
-                    panic!("client did not confirm key")
+                let _ = sas_tx.send(short_authentication_string(&keys, protection));
+                if wire != JoinerWire::Legacy {
+                    send(&mut socket, reveal).await;
+                }
+                let confirm = receive(&mut socket).await;
+                let ControlMessage::KeyConfirm { mac, .. } = confirm else {
+                    let _ = frame_tx.send(vec![confirm]);
+                    let _ = release.await;
+                    return;
                 };
                 verify_confirm_mac(&keys, PairingRole::A, &b64_decode(&mac).unwrap()).unwrap();
                 if let Joiner::RenamesBeforeConfirm { new_id } = script {
@@ -1012,7 +1390,9 @@ mod tests {
                                 } else {
                                     peer.clone()
                                 },
-                                device_name: forged_code_name(&short_authentication_string(&keys)),
+                                device_name: forged_code_name(&short_authentication_string(
+                                    &keys, protection,
+                                )),
                                 os: "android".into(),
                                 role: DeviceRole::Member,
                                 online: true,
@@ -1167,6 +1547,7 @@ mod tests {
                 None,
                 room.clone(),
                 DeviceRole::Owner,
+                CommitmentPolicy::Prefer,
                 move |check: SasCheck| async move {
                     shown_tx.send(check).unwrap();
                     answered.await.unwrap()
@@ -1253,6 +1634,7 @@ mod tests {
                     None,
                     room.clone(),
                     DeviceRole::Owner,
+                    CommitmentPolicy::Prefer,
                     |_| async { SasDecision::Rejected },
                 ),
             )
@@ -1324,6 +1706,7 @@ mod tests {
                     None,
                     room,
                     DeviceRole::Owner,
+                    CommitmentPolicy::Prefer,
                     accept,
                 ),
             )
@@ -1380,6 +1763,7 @@ mod tests {
                     None,
                     room,
                     DeviceRole::Owner,
+                    CommitmentPolicy::Prefer,
                     move |_| async move {
                         shown_tx.send(()).unwrap();
                         std::future::pending::<SasDecision>().await
@@ -1440,6 +1824,7 @@ mod tests {
                     None,
                     room,
                     DeviceRole::Owner,
+                    CommitmentPolicy::Prefer,
                     move |check: SasCheck| async move {
                         let _ = shown_tx.send(check);
                         SasDecision::Confirmed
@@ -1473,6 +1858,19 @@ mod tests {
         }
     }
 
+    /// How the scripted creator answers the joiner's commitment.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum CreatorWire {
+        /// An updated creator acknowledges the commitment.
+        Committing,
+        /// A creator that predates the round ignores the unknown frame and
+        /// sends a plain message (also what a joiner sees behind an old relay).
+        Legacy,
+    }
+
+    /// How long a script listens for a frame the client must not send yet.
+    const EARLY_FRAME_PROBE: Duration = Duration::from_millis(300);
+
     /// Scripted relay plus honest creator (role A) for a client joining as
     /// role B. With `rename`, the relay announces the creator under a forged
     /// name after both SPAKE2 messages crossed. Reports the creator's SAS.
@@ -1482,6 +1880,7 @@ mod tests {
         sid: PairingSessionId,
         room: clipsync_protocol::RoomId,
         rename: bool,
+        creator_wire: CreatorWire,
     ) -> (
         crate::test_relay::Server,
         tokio::sync::oneshot::Receiver<String>,
@@ -1502,21 +1901,45 @@ mod tests {
                 },
             )
             .await;
-            let ControlMessage::Spake2Msg { message, .. } = receive(&mut socket).await else {
-                panic!("joiner did not send SPAKE2")
+            // The joiner commits first and keeps its message back until the
+            // creator's message arrived.
+            let ControlMessage::Spake2Commit { commitment, .. } = receive(&mut socket).await else {
+                panic!("joiner did not commit before SPAKE2")
             };
             let state = start_pairing_a(&TEST_CODE, sid.clone(), creator.clone(), local).unwrap();
-            let outbound = state.outbound.clone();
-            let keys = finish_pairing(state, &b64_decode(&message).unwrap()).unwrap();
-            let sas = short_authentication_string(&keys);
+            assert!(
+                tokio::time::timeout(EARLY_FRAME_PROBE, receive(&mut socket))
+                    .await
+                    .is_err(),
+                "joiner revealed its SPAKE2 message before the creator's arrived"
+            );
+            let acknowledged = creator_wire == CreatorWire::Committing;
             send(
                 &mut socket,
                 ControlMessage::Spake2Msg {
                     pairing_session_id: sid.clone(),
-                    message: b64_encode(&outbound),
+                    message: b64_encode(&state.outbound),
+                    after_commitment: acknowledged,
                 },
             )
             .await;
+            // A joiner that refuses the pairing (strict mode) sends an
+            // `Error` instead and shows no code.
+            let ControlMessage::Spake2Msg { message, .. } = receive(&mut socket).await else {
+                return;
+            };
+            let message = b64_decode(&message).unwrap();
+            verify_spake2_commitment(&state, &b64_decode(&commitment).unwrap(), &message)
+                .expect("the joiner's message opens its commitment");
+            let keys = finish_pairing(state, &message).unwrap();
+            let sas = short_authentication_string(
+                &keys,
+                if acknowledged {
+                    SasProtection::Committed
+                } else {
+                    SasProtection::Uncommitted
+                },
+            );
             if rename {
                 try_send(
                     &mut socket,
@@ -1567,6 +1990,7 @@ mod tests {
                 sid.clone(),
                 room.clone(),
                 rename,
+                CreatorWire::Committing,
             )
             .await;
             let connection = RelayConnection::connect(&join_ws(&server.url, "/v1/ws"))
@@ -1588,6 +2012,7 @@ mod tests {
                     Some(HOSTILE_PEER_NAME.into()),
                     room,
                     DeviceRole::Member,
+                    CommitmentPolicy::Prefer,
                     move |check: SasCheck| async move {
                         let _ = shown_tx.send(check);
                         SasDecision::Rejected
@@ -1622,12 +2047,293 @@ mod tests {
         }
     }
 
+    /// Run the creator side against [`scripted_joiner`] and compare codes the
+    /// way two users would. Returns the pairing result, the check shown, the
+    /// joiner's SAS, the frames after key confirmation and the store.
+    async fn creator_against(
+        wire: JoinerWire,
+        policy: CommitmentPolicy,
+        seed: u8,
+    ) -> (
+        Result<(), CoreError>,
+        Option<SasCheck>,
+        Option<String>,
+        Vec<ControlMessage>,
+        LocalStore,
+        tempfile::TempDir,
+    ) {
+        let directory = tempfile::TempDir::new().unwrap();
+        let store =
+            LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+        let identity =
+            DeviceIdentity::from_bytes(format!("commit-local-{seed}").into(), [seed; 32]);
+        let sid = PairingSessionId::new();
+        let room = clipsync_protocol::RoomId::new();
+        let budget = COMMITMENT_WAIT + SCRIPT_DEADLINE;
+        let (mut server, peer_sas, frame, release) = scripted_joiner(
+            identity.device_id.clone(),
+            sid.clone(),
+            room.clone(),
+            Joiner::BindsAfterUs,
+            wire,
+            budget,
+        )
+        .await;
+        let connection = RelayConnection::connect(&join_ws(&server.url, "/v1/ws"))
+            .await
+            .unwrap();
+        let (shown_tx, mut shown) = tokio::sync::oneshot::channel();
+        let (theirs_tx, theirs) = tokio::sync::oneshot::channel::<String>();
+        let result = tokio::time::timeout(budget, async {
+            let pairing = run_pairing(
+                &store,
+                &identity,
+                connection,
+                PairingRole::A,
+                &TEST_CODE,
+                sid,
+                identity.device_id.clone(),
+                DeviceId::new(),
+                None,
+                room,
+                DeviceRole::Owner,
+                policy,
+                move |check: SasCheck| async move {
+                    let _ = shown_tx.send(check.clone());
+                    match theirs.await {
+                        Ok(other) if check.matches(&other) => SasDecision::Confirmed,
+                        _ => SasDecision::Rejected,
+                    }
+                },
+            );
+            let relay_sas = async {
+                let sas = peer_sas.await.ok();
+                if let Some(sas) = &sas {
+                    let _ = theirs_tx.send(sas.clone());
+                }
+                sas
+            };
+            tokio::join!(pairing, relay_sas)
+        })
+        .await
+        .expect("pairing outlived its budget");
+        let (result, relay_sas) = result;
+        let frames = frame.await.unwrap_or_default();
+        let _ = release.send(());
+        server.finish().await;
+        (
+            result,
+            shown.try_recv().ok(),
+            relay_sas,
+            frames,
+            store,
+            directory,
+        )
+    }
+
+    #[tokio::test]
+    async fn creator_sends_spake2_only_after_the_joiners_commitment() {
+        for wire in [JoinerWire::Committing, JoinerWire::CommitsLate] {
+            let (result, check, peer_sas, frames, store, _dir) =
+                creator_against(wire, CommitmentPolicy::Prefer, 41).await;
+            result.unwrap();
+            let check = check.expect("SAS never shown");
+            assert_eq!(check.protection, SasProtection::Committed, "{wire:?}");
+            assert_eq!(
+                Some(check.sas.clone()),
+                peer_sas,
+                "{wire:?}: honest peers agree"
+            );
+            assert!(check.protection_notice().contains("full"));
+            assert!(matches!(
+                frames.as_slice(),
+                [ControlMessage::DeviceBind { .. }]
+            ));
+            assert!(store.current_room().is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn older_joiners_and_old_relays_pair_with_reduced_protection_shown() {
+        for wire in [JoinerWire::Legacy, JoinerWire::BehindOldRelay] {
+            let started = tokio::time::Instant::now();
+            let (result, check, peer_sas, _frames, store, _dir) =
+                creator_against(wire, CommitmentPolicy::Prefer, 42).await;
+            result.unwrap();
+            let check = check.expect("SAS never shown");
+            assert_eq!(check.protection, SasProtection::Uncommitted, "{wire:?}");
+            assert_eq!(
+                Some(check.sas.clone()),
+                peer_sas,
+                "{wire:?}: fallback peers agree"
+            );
+            assert!(check.protection_notice().contains("REDUCED"), "{wire:?}");
+            if wire == JoinerWire::Legacy {
+                // An older joiner's message ends the wait at once.
+                assert!(started.elapsed() < COMMITMENT_WAIT, "{wire:?}");
+            } else {
+                // A dropped commitment is waited for, but only so long.
+                assert!(started.elapsed() >= COMMITMENT_WAIT, "{wire:?}");
+            }
+            assert!(store.current_room().is_ok(), "{wire:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn required_commitment_refuses_a_pairing_without_one_and_stores_nothing() {
+        for wire in [JoinerWire::Legacy, JoinerWire::BehindOldRelay] {
+            let (result, check, _peer_sas, frames, store, _dir) =
+                creator_against(wire, CommitmentPolicy::Require, 43).await;
+            let error = result.expect_err("an uncommitted pairing passed strict mode");
+            assert!(
+                error.to_string().contains("pairing.require_commitment"),
+                "{wire:?}: {error}"
+            );
+            assert!(check.is_none(), "{wire:?}: SAS shown in strict mode");
+            assert!(
+                matches!(frames.as_slice(), [ControlMessage::Error { code, .. }] if code == COMMITMENT_REQUIRED_CODE),
+                "{wire:?}: {frames:?}"
+            );
+            assert!(store.load_state().unwrap().rooms.is_empty());
+            assert!(secret_files(&store).is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_commitment_that_does_not_open_aborts_and_stores_nothing() {
+        let (result, check, _peer_sas, frames, store, _dir) =
+            creator_against(JoinerWire::WrongOpening, CommitmentPolicy::Prefer, 44).await;
+        let error = result.expect_err("a mismatched opening was accepted");
+        assert!(
+            error.to_string().contains("does not match the commitment"),
+            "{error}"
+        );
+        assert!(check.is_none(), "SAS shown for a mismatched opening");
+        // The client stops before key confirmation.
+        assert!(
+            matches!(frames.as_slice(), [ControlMessage::Error { code, .. }] if code == COMMITMENT_MISMATCH_CODE),
+            "{frames:?}"
+        );
+        assert!(store.load_state().unwrap().rooms.is_empty());
+        assert!(secret_files(&store).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_stripped_acknowledgement_alone_changes_the_sas() {
+        // The creator ran the commitment round; the joiner was told it did
+        // not. Without further search the two derive their codes in
+        // different modes, so the users see a mismatch, and nothing is
+        // stored. (A relay that also searches on a downgraded side can still
+        // match the codes; that is why both screens must show full.)
+        let (result, check, peer_sas, _frames, store, _dir) =
+            creator_against(JoinerWire::AckStripped, CommitmentPolicy::Prefer, 45).await;
+        let check = check.expect("SAS never shown");
+        assert_eq!(check.protection, SasProtection::Committed);
+        assert_ne!(
+            Some(check.sas),
+            peer_sas,
+            "a stripped acknowledgement kept the SAS"
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("verification code rejected"));
+        assert!(store.load_state().unwrap().rooms.is_empty());
+        assert!(secret_files(&store).is_empty());
+    }
+
+    #[tokio::test]
+    async fn joiner_commits_first_and_reveals_only_after_the_creators_message() {
+        for (creator_wire, policy, expected) in [
+            (
+                CreatorWire::Committing,
+                CommitmentPolicy::Prefer,
+                Some(SasProtection::Committed),
+            ),
+            (
+                CreatorWire::Legacy,
+                CommitmentPolicy::Prefer,
+                Some(SasProtection::Uncommitted),
+            ),
+            (CreatorWire::Legacy, CommitmentPolicy::Require, None),
+        ] {
+            let directory = tempfile::TempDir::new().unwrap();
+            let store =
+                LocalStore::open_from(crate::AppPaths::from_root(directory.path().into())).unwrap();
+            let identity = DeviceIdentity::from_bytes("commit-joiner-local".into(), [46; 32]);
+            let creator = DeviceId::from("commit-creator-remote");
+            let sid = PairingSessionId::new();
+            let room = clipsync_protocol::RoomId::new();
+            let (mut server, creator_sas, release) = honest_creator(
+                identity.device_id.clone(),
+                creator.clone(),
+                sid.clone(),
+                room.clone(),
+                false,
+                creator_wire,
+            )
+            .await;
+            let connection = RelayConnection::connect(&join_ws(&server.url, "/v1/ws"))
+                .await
+                .unwrap();
+            let (shown_tx, mut shown) = tokio::sync::oneshot::channel();
+            let result = tokio::time::timeout(
+                Duration::from_secs(10),
+                run_pairing(
+                    &store,
+                    &identity,
+                    connection,
+                    PairingRole::B,
+                    &TEST_CODE,
+                    sid,
+                    creator.clone(),
+                    identity.device_id.clone(),
+                    Some("Laptop".into()),
+                    room,
+                    DeviceRole::Member,
+                    policy,
+                    move |check: SasCheck| async move {
+                        let _ = shown_tx.send(check);
+                        SasDecision::Rejected
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+            let creator_sas = creator_sas.await;
+            let _ = release.send(());
+            server.finish().await;
+            let error = result.expect_err("the prompt rejected, so pairing must fail");
+            match expected {
+                Some(protection) => {
+                    let check = shown.try_recv().expect("joiner never showed the SAS");
+                    assert_eq!(check.protection, protection, "{creator_wire:?}");
+                    assert_eq!(
+                        Ok(check.sas),
+                        creator_sas,
+                        "{creator_wire:?}: honest peers agree"
+                    );
+                }
+                None => {
+                    assert!(shown.try_recv().is_err(), "SAS shown in strict mode");
+                    assert!(
+                        error.to_string().contains("pairing.require_commitment"),
+                        "{error}"
+                    );
+                }
+            }
+            assert!(store.load_state().unwrap().rooms.is_empty());
+            assert!(secret_files(&store).is_empty());
+        }
+    }
+
     #[test]
     fn sas_check_matching_ignores_grouping_and_rejects_empty_input() {
         let check = SasCheck {
             sas: "482913".into(),
             peer_device_id: DeviceId::from("peer"),
             peer_device_name: "peer".into(),
+            protection: SasProtection::Committed,
         };
         assert_eq!(check.display(), "482 913");
         for same in ["482913", "482 913", "482-913", " 48 29 13 "] {
@@ -2050,7 +2756,7 @@ mod tests {
                 room_id,
                 pairing_code,
                 pairing_token: "synthetic-token".into(),
-                expires_at: Utc::now(),
+                expires_at: Timestamp::now(),
                 ws_path: "/v1/ws".into(),
             };
             let server = crate::test_relay::Server::http(Router::new().route(
@@ -2078,7 +2784,7 @@ mod tests {
                 room_id,
                 pairing_token: "synthetic-token".into(),
                 peer,
-                expires_at: Utc::now(),
+                expires_at: Timestamp::now(),
                 ws_path: "/v1/ws".into(),
             };
             let server = crate::test_relay::Server::http(Router::new().route(
@@ -2141,6 +2847,7 @@ mod tests {
                 None,
                 clipsync_protocol::RoomId::new(),
                 DeviceRole::Owner,
+                CommitmentPolicy::Prefer,
                 accept,
             ),
         )
@@ -2198,6 +2905,7 @@ mod tests {
                 None,
                 clipsync_protocol::RoomId::new(),
                 DeviceRole::Owner,
+                CommitmentPolicy::Prefer,
                 accept,
             )
             .await
@@ -2254,6 +2962,7 @@ mod tests {
                 None,
                 clipsync_protocol::RoomId::new(),
                 DeviceRole::Owner,
+                CommitmentPolicy::Prefer,
                 accept,
             ),
         )
@@ -2302,6 +3011,26 @@ mod tests {
                     },
                 )
                 .await;
+                let state = start_pairing_b(&TEST_CODE, session.clone(), local, peer_id).unwrap();
+                // Commit to exactly what is revealed below, so the client
+                // reaches the hostile frame itself.
+                let hostile_spake = [0];
+                let committed = commitment_for(
+                    &state,
+                    if attack == "spake" {
+                        &hostile_spake
+                    } else {
+                        &state.outbound
+                    },
+                );
+                send(
+                    &mut socket,
+                    ControlMessage::Spake2Commit {
+                        pairing_session_id: session.clone(),
+                        commitment: b64_encode(&committed),
+                    },
+                )
+                .await;
                 let ControlMessage::Spake2Msg { message, .. } = receive(&mut socket).await else {
                     panic!("client did not initiate SPAKE2")
                 };
@@ -2313,8 +3042,9 @@ mod tests {
                             message: if attack == "base64" {
                                 "!".into()
                             } else {
-                                b64_encode(&[0])
+                                b64_encode(&hostile_spake)
                             },
+                            after_commitment: false,
                         },
                     )
                     .await;
@@ -2323,7 +3053,6 @@ mod tests {
                     let _ = release.await;
                     return;
                 }
-                let state = start_pairing_b(&TEST_CODE, session.clone(), local, peer_id).unwrap();
                 let outbound = state.outbound.clone();
                 let keys = finish_pairing(state, &b64_decode(&message).unwrap()).unwrap();
                 send(
@@ -2331,6 +3060,7 @@ mod tests {
                     ControlMessage::Spake2Msg {
                         pairing_session_id: session.clone(),
                         message: b64_encode(&outbound),
+                        after_commitment: false,
                     },
                 )
                 .await;
@@ -2393,6 +3123,7 @@ mod tests {
                     None,
                     clipsync_protocol::RoomId::new(),
                     DeviceRole::Owner,
+                    CommitmentPolicy::Prefer,
                     accept,
                 ),
             )
