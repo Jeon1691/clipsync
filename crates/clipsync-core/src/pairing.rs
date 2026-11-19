@@ -2193,9 +2193,11 @@ mod tests {
         )
     }
 
-    /// Calls per wake-priority check. Tokio's unbiased `select!` starts at a
-    /// random arm, so an arm that wins only by luck wins every call with
-    /// probability at most 2^-64.
+    /// Calls per wake-priority check. Without `biased;`, Tokio's `select!`
+    /// starts at a random one of the four arms and moves on past a pending or
+    /// disabled one, so in the loop's arm order the arm a check expects can
+    /// still win from up to three of the four start points. An unbiased
+    /// select passes all 64 calls with probability at most (3/4)^64 ≈ 1e-8.
     const PRIORITY_ROUNDS: usize = 64;
 
     /// How far a stalled loop overshoots a deadline before it polls again.
