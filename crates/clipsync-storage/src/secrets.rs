@@ -3,22 +3,90 @@
 use clipsync_crypto::{DeviceIdentity, StoredIdentity};
 use std::io::Write;
 use std::path::Path;
+use std::sync::Once;
 use tracing::warn;
 
 use crate::paths::{set_private_file, AppPaths};
 use crate::{Result, StorageError};
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+/// Keychain service the product mirrors secrets under.
 const SERVICE: &str = "dev.clipsync.cli";
+
+/// Keychain service for test runs that deliberately reach the native keychain,
+/// kept apart from [`SERVICE`] so that their entries can be found and removed.
+const TEST_KEYCHAIN_SERVICE: &str = "dev.clipsync.test";
+
+/// Whether this platform has an OS keychain to mirror secrets into.
+const PLATFORM_HAS_KEYCHAIN: bool = cfg!(any(target_os = "macos", target_os = "windows"));
+
+/// Whether this is a test build: this crate's own unit tests, or a build with
+/// the `test-isolated-keychain` feature, which only `[dev-dependencies]` enable.
+const TEST_BUILD: bool = cfg!(any(test, feature = "test-isolated-keychain"));
+
+/// Whether `test-isolated-keychain` is on outside this crate's own unit tests.
+/// Workspace `cargo test` and `--all-targets` builds unify the dev-only feature
+/// into every debug binary they build, product binaries such as
+/// `target/debug/clipsync` included.
+const FEATURE_OUTSIDE_UNIT_TESTS: bool = cfg!(all(feature = "test-isolated-keychain", not(test)));
+
+/// Set to [`TEST_NATIVE_KEYCHAIN_OPT_IN`] in a test build to mirror under
+/// [`TEST_KEYCHAIN_SERVICE`], for the harness that measures native keychain
+/// latency. Product builds do not contain this switch.
+#[cfg(any(test, feature = "test-isolated-keychain"))]
+const TEST_NATIVE_KEYCHAIN_ENV: &str = "CLIPSYNC_TEST_NATIVE_KEYCHAIN";
+
+/// The only [`TEST_NATIVE_KEYCHAIN_ENV`] value that opts in.
+#[cfg(any(test, feature = "test-isolated-keychain"))]
+const TEST_NATIVE_KEYCHAIN_OPT_IN: &str = "1";
+
+// Release artifacts come from the release profile; on a platform with a
+// keychain, refuse a release-profile build, or any build without debug
+// assertions, that could skip the keychain. build.rs sets
+// `clipsync_release_profile` from Cargo's PROFILE, so a release profile that
+// re-enables debug assertions is refused too.
+#[cfg(all(
+    feature = "test-isolated-keychain",
+    any(not(debug_assertions), clipsync_release_profile),
+    any(target_os = "macos", target_os = "windows")
+))]
+compile_error!("test-isolated-keychain is for test builds; enable it only from [dev-dependencies]");
 
 #[derive(Clone)]
 pub struct SecretStore {
     paths: AppPaths,
+    /// Service secrets are mirrored under in the OS keychain, or `None` to
+    /// keep them in their private files only.
+    keychain: Option<&'static str>,
 }
 
 impl SecretStore {
     pub fn new(paths: AppPaths) -> Self {
-        Self { paths }
+        let keychain = keychain_service();
+        if notes_file_only_test_build(PLATFORM_HAS_KEYCHAIN, FEATURE_OUTSIDE_UNIT_TESTS, keychain) {
+            static NOTICE: Once = Once::new();
+            NOTICE.call_once(|| {
+                warn!(
+                    "clipsync-storage/test-isolated-keychain is enabled: secrets are file-only \
+                     in this test build and are not mirrored into the OS keychain"
+                );
+            });
+        }
+        Self { paths, keychain }
+    }
+
+    fn set_keyring(&self, account: &str, value: &str) -> std::result::Result<(), String> {
+        let service = self.keychain.ok_or(NO_KEYCHAIN)?;
+        native_set(service, account, value)
+    }
+
+    fn get_keyring(&self, account: &str) -> std::result::Result<String, String> {
+        let service = self.keychain.ok_or(NO_KEYCHAIN)?;
+        native_get(service, account)
+    }
+
+    fn delete_keyring(&self, account: &str) -> std::result::Result<(), String> {
+        self.keychain
+            .map_or(Ok(()), |service| native_delete(service, account))
     }
 
     fn account(&self, name: &str) -> String {
@@ -30,14 +98,14 @@ impl SecretStore {
         let payload = serde_json::to_string(&stored)?;
         let path = self.paths.identity_file();
         write_private(&path, payload.as_bytes())?;
-        if let Err(e) = set_keyring(&self.account("identity"), &payload) {
+        if let Err(e) = self.set_keyring(&self.account("identity"), &payload) {
             warn!(error = %e, "keychain unavailable; identity kept in 0600 file");
         }
         Ok(())
     }
 
     pub fn load_identity(&self) -> Result<DeviceIdentity> {
-        self.load_identity_with(get_keyring)
+        self.load_identity_with(|account| self.get_keyring(account))
     }
 
     /// `keychain` is the native-keychain reader; tests inject a stub so the
@@ -68,7 +136,7 @@ impl SecretStore {
     pub fn save_named(&self, name: &str, value: &str) -> Result<()> {
         let path = self.paths.data_dir.join(format!("{name}.secret"));
         write_private(&path, value.as_bytes())?;
-        if let Err(e) = set_keyring(&self.account(name), value) {
+        if let Err(e) = self.set_keyring(&self.account(name), value) {
             warn!(error = %e, key = name, "keychain unavailable");
         }
         Ok(())
@@ -79,11 +147,12 @@ impl SecretStore {
         if let Some(value) = crate::sharing::read_if_present(&path)? {
             return Ok(value);
         }
-        get_keyring(&self.account(name)).map_err(|_| StorageError::NotPaired)
+        self.get_keyring(&self.account(name))
+            .map_err(|_| StorageError::NotPaired)
     }
 
     pub fn delete_named(&self, name: &str) -> Result<()> {
-        let _ = delete_keyring(&self.account(name));
+        let _ = self.delete_keyring(&self.account(name));
         let path = self.paths.data_dir.join(format!("{name}.secret"));
         let _ = std::fs::remove_file(path);
         Ok(())
@@ -131,36 +200,94 @@ fn write_private_pausing(path: &Path, value: &[u8], pause: impl FnMut()) -> std:
     Ok(())
 }
 
+/// Why a store without a keychain service reports the mirror unavailable.
+const NO_KEYCHAIN: &str = if PLATFORM_HAS_KEYCHAIN {
+    "os keychain not used by test builds"
+} else {
+    "os keychain not enabled on this platform"
+};
+
+/// The keychain service a new store mirrors under.
+fn keychain_service() -> Option<&'static str> {
+    select_service(
+        PLATFORM_HAS_KEYCHAIN,
+        TEST_BUILD,
+        test_native_keychain_requested(),
+    )
+}
+
+/// Choose the keychain service from the build and the opt-in.
+///
+/// Test builds never reach the product service: every secret stays in its
+/// private file, as on Linux, so the outcome cannot depend on keychain
+/// contents, `securityd` latency or which test ran first. This is a pure
+/// function compiled into every build, so its product branch is tested even
+/// though no test build takes it.
+const fn select_service(
+    platform_has_keychain: bool,
+    test_build: bool,
+    native_opt_in: bool,
+) -> Option<&'static str> {
+    match (platform_has_keychain, test_build, native_opt_in) {
+        (false, _, _) => None,
+        (true, false, _) => Some(SERVICE),
+        (true, true, true) => Some(TEST_KEYCHAIN_SERVICE),
+        (true, true, false) => None,
+    }
+}
+
+/// Whether to say, once per process, that a binary skips the keychain mirror
+/// only because it is a test build. A debug product binary from a workspace
+/// test build would otherwise lose keychain recovery without a trace.
+const fn notes_file_only_test_build(
+    platform_has_keychain: bool,
+    feature_outside_unit_tests: bool,
+    service: Option<&'static str>,
+) -> bool {
+    platform_has_keychain && feature_outside_unit_tests && service.is_none()
+}
+
+#[cfg(any(test, feature = "test-isolated-keychain"))]
+fn test_native_keychain_requested() -> bool {
+    std::env::var_os(TEST_NATIVE_KEYCHAIN_ENV)
+        .is_some_and(|value| value == TEST_NATIVE_KEYCHAIN_OPT_IN)
+}
+
+#[cfg(not(any(test, feature = "test-isolated-keychain")))]
+fn test_native_keychain_requested() -> bool {
+    false
+}
+
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn set_keyring(user: &str, value: &str) -> std::result::Result<(), String> {
-    let entry = keyring::Entry::new(SERVICE, user).map_err(|e| e.to_string())?;
+fn native_set(service: &str, user: &str, value: &str) -> std::result::Result<(), String> {
+    let entry = keyring::Entry::new(service, user).map_err(|e| e.to_string())?;
     entry.set_password(value).map_err(|e| e.to_string())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn set_keyring(_user: &str, _value: &str) -> std::result::Result<(), String> {
+fn native_set(_service: &str, _user: &str, _value: &str) -> std::result::Result<(), String> {
     Err("os keychain not enabled on this platform".into())
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn get_keyring(user: &str) -> std::result::Result<String, String> {
-    let entry = keyring::Entry::new(SERVICE, user).map_err(|e| e.to_string())?;
+fn native_get(service: &str, user: &str) -> std::result::Result<String, String> {
+    let entry = keyring::Entry::new(service, user).map_err(|e| e.to_string())?;
     entry.get_password().map_err(|e| e.to_string())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn get_keyring(_user: &str) -> std::result::Result<String, String> {
+fn native_get(_service: &str, _user: &str) -> std::result::Result<String, String> {
     Err("os keychain not enabled on this platform".into())
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn delete_keyring(user: &str) -> std::result::Result<(), String> {
-    let entry = keyring::Entry::new(SERVICE, user).map_err(|e| e.to_string())?;
+fn native_delete(service: &str, user: &str) -> std::result::Result<(), String> {
+    let entry = keyring::Entry::new(service, user).map_err(|e| e.to_string())?;
     entry.delete_credential().map_err(|e| e.to_string())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn delete_keyring(_user: &str) -> std::result::Result<(), String> {
+fn native_delete(_service: &str, _user: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
@@ -322,6 +449,80 @@ mod identity_cache_tests {
     }
 }
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod keychain_isolation_tests {
+    use super::*;
+
+    #[test]
+    fn only_product_builds_on_keychain_platforms_mirror_under_the_product_service() {
+        for opt_in in [false, true] {
+            assert_eq!(select_service(false, false, opt_in), None);
+            assert_eq!(select_service(false, true, opt_in), None);
+            assert_eq!(select_service(true, false, opt_in), Some(SERVICE));
+        }
+        assert_eq!(select_service(true, true, false), None);
+        assert_eq!(
+            select_service(true, true, true),
+            Some(TEST_KEYCHAIN_SERVICE)
+        );
+        assert_eq!(
+            SERVICE, "dev.clipsync.cli",
+            "existing entries use this name"
+        );
+        assert_ne!(TEST_KEYCHAIN_SERVICE, SERVICE);
+        const { assert!(TEST_BUILD) };
+    }
+
+    #[test]
+    fn only_a_file_only_test_build_outside_unit_tests_on_a_keychain_platform_says_so() {
+        for service in [None, Some(SERVICE), Some(TEST_KEYCHAIN_SERVICE)] {
+            for feature_outside_unit_tests in [false, true] {
+                assert!(!notes_file_only_test_build(
+                    false,
+                    feature_outside_unit_tests,
+                    service
+                ));
+            }
+            assert!(!notes_file_only_test_build(true, false, service));
+        }
+        assert!(notes_file_only_test_build(true, true, None));
+        // An opted-in run mirrors under the test service, so it is not file-only.
+        assert!(!notes_file_only_test_build(
+            true,
+            true,
+            Some(TEST_KEYCHAIN_SERVICE)
+        ));
+        // This crate's own unit tests stay quiet.
+        const { assert!(!FEATURE_OUTSIDE_UNIT_TESTS) };
+    }
+
+    #[test]
+    fn test_builds_keep_secrets_out_of_the_os_keychain_unless_opted_in() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(root.path().into());
+        paths.ensure().unwrap();
+        let store = SecretStore::new(paths.clone());
+        let opted_in = PLATFORM_HAS_KEYCHAIN && test_native_keychain_requested();
+        store.save_named("keychain-probe", "synthetic").unwrap();
+        let account = store.account("keychain-probe");
+        // Read the native keychain directly, so a write that a read-side
+        // gate would hide is still caught.
+        let product_entry = native_get(SERVICE, &account).is_ok();
+        let test_entry = native_get(TEST_KEYCHAIN_SERVICE, &account).is_ok();
+        std::fs::remove_file(paths.data_dir.join("keychain-probe.secret")).unwrap();
+        let restored = store.load_named("keychain-probe").is_ok();
+        let _ = store.delete_keyring(&account);
+        assert!(!product_entry, "a test build wrote the product service");
+        assert_eq!(test_entry, opted_in, "only an opted-in run writes");
+        assert_eq!(restored, opted_in, "only an opted-in run restores");
+    }
+}
+
+/// The test that always uses the native keychain (an opted-in run also
+/// reaches it above). It writes only under [`TEST_KEYCHAIN_SERVICE`], to an
+/// account named after its own temporary directory, and removes the entry
+/// even when an assertion fails.
 #[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod regression_tests {
@@ -332,16 +533,19 @@ mod regression_tests {
         let root = tempfile::tempdir().unwrap();
         let paths = AppPaths::from_root(root.path().to_path_buf());
         paths.ensure().unwrap();
-        let store = SecretStore::new(paths.clone());
+        let store = SecretStore {
+            keychain: Some(TEST_KEYCHAIN_SERVICE),
+            ..SecretStore::new(paths.clone())
+        };
         let identity = DeviceIdentity::generate();
         store.save_identity(&identity).unwrap();
-        struct Cleanup(String);
-        impl Drop for Cleanup {
+        struct Cleanup<'a>(&'a SecretStore, String);
+        impl Drop for Cleanup<'_> {
             fn drop(&mut self) {
-                let _ = delete_keyring(&self.0);
+                let _ = self.0.delete_keyring(&self.1);
             }
         }
-        let _cleanup = Cleanup(store.account("identity"));
+        let _cleanup = Cleanup(&store, store.account("identity"));
         std::fs::remove_file(paths.identity_file()).unwrap();
         let loaded = store
             .load_identity()
@@ -352,18 +556,19 @@ mod regression_tests {
             "background clients need the recovered file cache"
         );
         // A subsequent read must work even after the native entry is removed.
-        delete_keyring(&store.account("identity")).unwrap();
+        store.delete_keyring(&store.account("identity")).unwrap();
         assert_eq!(store.load_identity().unwrap().device_id, identity.device_id);
         #[cfg(unix)]
         {
+            use crate::paths::{PERMISSION_BITS, PRIVATE_FILE_MODE};
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(
                 std::fs::metadata(paths.identity_file())
                     .unwrap()
                     .permissions()
                     .mode()
-                    & 0o777,
-                0o600
+                    & PERMISSION_BITS,
+                PRIVATE_FILE_MODE
             );
         }
     }

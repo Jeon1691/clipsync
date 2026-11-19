@@ -11,9 +11,38 @@ cargo test --workspace --locked -- --test-threads=1
 
 The real host clipboard roundtrip requires `CLIPSYNC_TEST_HOST_CLIPBOARD=1`;
 enable it only in a disposable test session. Ordinary local tests use private
-named pasteboards or isolated adapters. Full foreground CLI completion on macOS
-also requires `CLIPSYNC_TEST_DISPOSABLE_HOST=1`; local validation leaves that flag
-unset. Hosted CI supplies both flags. On Linux, install `xclip`, `xvfb`,
+named pasteboards or isolated adapters. Hosted CI supplies that flag.
+
+Test builds never write to the macOS keychain or Windows Credential Manager.
+Every crate whose tests open a store enables the non-default
+`clipsync-storage/test-isolated-keychain` feature from `[dev-dependencies]`, so
+secrets stay in their private files, as on Linux, and a test's outcome cannot
+depend on keychain contents or `securityd` latency.
+[A script test](../scripts/tests/test_test_keychain_isolation.py) checks that no
+product build selects the feature, and, on macOS, that a release-profile build
+with it fails to compile. On macOS and Windows the feature is refused in the
+release profile, and in any profile inherited from it, even with
+`CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true`, and in any build without debug
+assertions. `cargo test --release` therefore fails there; test in the default
+profile. The [Nix flake](../flake.nix) runs its check phase in the debug profile
+for this reason.
+
+Cargo applies features per build, not per binary. A `cargo test` or
+`--all-targets` build of the workspace, or of a product crate such as
+`clipsync-cli`, also builds its product binaries in `target/debug` (for example
+`clipsync` and `clipsync-desktop`) with the feature on. On macOS and Windows such a debug binary keeps every secret in its private
+file and never mirrors it into the keychain, so it cannot recover a deleted
+identity or key from there. It logs a one-time warning when it opens its secret
+store: "secrets are file-only in this test build". Run a plain
+`cargo build -p clipsync-cli` (or the release artifacts) when you need the
+keychain mirror. Release builds never enable the feature. Two tests
+deliberately use the native keychain, under
+the separate `dev.clipsync.test` service, and remove what they write: the
+storage round-trip test, and the macOS
+[pairing-concurrency harness](../scripts/test-pairing-concurrency.py), which
+sets `CLIPSYNC_TEST_NATIVE_KEYCHAIN=1` to measure keychain latency.
+
+On Linux, install `xclip`, `xvfb`,
 `libgtk-3-dev`, `libxkbcommon-dev`, `libwayland-dev`, `libxkbcommon-x11-dev`,
 `libfontconfig1-dev` and `libfreetype6-dev`, then run through `xvfb-run -a`.
 Native behavior still needs the three-platform CI matrix and manual testing.
@@ -199,7 +228,7 @@ dynamic-analysis coverage.
 ## Regression policy and remaining higher-tier work
 
 The [full audit](regression-audit.md) and [machine-readable ledger](regressions.json)
-now register **86/136 (63.24%)** distinct corrected defects, exceeding the 50%
+now register **87/137 (63.50%)** distinct corrected defects, exceeding the 50%
 Silver regression requirement. The checker validates real test references and
 the full denominator in all three CI platform jobs; future fixes must update
 the ledger and cannot silently delete uncovered cases. This fraction is separate

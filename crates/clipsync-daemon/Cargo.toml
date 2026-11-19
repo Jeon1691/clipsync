@@ -20,6 +20,8 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# Test builds never mirror secrets into the OS keychain (see clipsync-storage).
+clipsync-storage = { workspace = true, features = ["test-isolated-keychain"] }
 tempfile.workspace = true
 
 [lints]

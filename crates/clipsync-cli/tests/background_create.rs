@@ -262,22 +262,9 @@ async fn foreground_offer_is_flushed_before_a_peer_joins() {
         child.try_wait().unwrap().is_none(),
         "pairing still waits for its peer"
     );
-    // A separate CLI process cannot inherit a test keyring builder. Complete
-    // this extra pairing only on Linux or an explicitly disposable CI host.
-    if !cfg!(target_os = "linux")
-        && std::env::var("CLIPSYNC_TEST_DISPOSABLE_HOST").as_deref() != Ok("1")
-    {
-        tokio::time::timeout(Duration::from_secs(5), child.kill())
-            .await
-            .unwrap()
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap();
-        relay_task.abort();
-        return;
-    }
+    // Complete the pairing on every platform: this test build of the CLI keeps
+    // room keys in private files and never mirrors them into the OS keychain
+    // (clipsync-storage/test-isolated-keychain).
     let peer = TempDir::new().unwrap();
     seed_identity_file(peer.path());
     let mut joiner = spawn_cli(

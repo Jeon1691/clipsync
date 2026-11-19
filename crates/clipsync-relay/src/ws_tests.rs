@@ -1197,9 +1197,6 @@ fn regression_f98_late_creator_completes_real_core_pairing_and_persists_matching
         );
         return;
     }
-    // Select the library's memory-only test backend before constructing any
-    // credential entries, and only in this exact-test child process.
-    keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()

@@ -477,6 +477,11 @@ basis (a failure is logged and the file remains authoritative). The mirror is
 consulted only when the file is missing; a recovered identity is re-cached as
 the private file, while recovered room/epoch keys are not. Linux and other Unix
 platforms use the private files only; there is no Secret Service backend.
+Debug binaries from a workspace `cargo test` or `--all-targets` build carry the
+test-only `clipsync-storage/test-isolated-keychain` feature. On macOS and
+Windows they keep secrets in the private files only, and they log a one-time
+warning saying so. Release-profile builds refuse to compile with that feature;
+see [testing](testing.md).
 
 Every secret file, and `pairing.json` (which holds the live pairing code), is
 written through one helper: a temporary file in the destination directory is

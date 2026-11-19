@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 # Copyright the ClipSync contributors.
 # SPDX-License-Identifier: MIT
-"""Run three complete parallel relay e2e suites under one bounded deadline."""
+"""Run three complete parallel relay e2e suites under one bounded deadline.
+
+The suites deliberately use the native macOS keychain: the workload exists to
+expose its latency (F107). Test builds otherwise keep secrets out of the
+keychain, so the copies opt in, which mirrors them under a test-only service;
+every entry under that service is removed afterwards.
+"""
 
 import argparse
 from contextlib import ExitStack
@@ -12,6 +18,23 @@ import signal
 import subprocess
 import sys
 import time
+
+# Opts a test build into the native keychain (clipsync-storage secrets.rs TEST_NATIVE_KEYCHAIN_ENV).
+NATIVE_KEYCHAIN_ENV = "CLIPSYNC_TEST_NATIVE_KEYCHAIN"
+# The only service an opted-in test build writes (clipsync-storage secrets.rs TEST_KEYCHAIN_SERVICE).
+TEST_KEYCHAIN_SERVICE = "dev.clipsync.test"
+# Asserts that test builds skip the keychain, which an opted-in run does not.
+ISOLATION_PROBE = "e2e_stores_never_mirror_secrets_into_the_os_keychain"
+# The opt-in value clipsync-storage accepts (secrets.rs TEST_NATIVE_KEYCHAIN_OPT_IN).
+NATIVE_KEYCHAIN_OPT_IN = "1"
+# Upper bound on deletions: three suites create a few dozen entries each, so
+# reaching this means `security` is not making progress.
+MAX_KEYCHAIN_DELETIONS = 10_000
+# One deletion is a local securityd call; a wait this long means the keychain
+# is locked or an authorization prompt is waiting.
+SECURITY_TIMEOUT_SECONDS = 10
+# security(1) exit status for errSecItemNotFound: nothing is left to delete.
+SECURITY_ITEM_NOT_FOUND = 44
 
 
 def remaining(deadline):
@@ -40,6 +63,26 @@ def cleanup(children):
         except subprocess.TimeoutExpired:
             unreaped.append(child.pid)
     return unreaped
+
+
+def remove_test_keychain_items():
+    """Delete every macOS keychain entry under the test service; return the count."""
+    if sys.platform != "darwin":
+        return 0
+    for removed in range(MAX_KEYCHAIN_DELETIONS):
+        deleted = subprocess.run(
+            ["security", "delete-generic-password", "-s", TEST_KEYCHAIN_SERVICE],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=SECURITY_TIMEOUT_SECONDS,
+        )
+        if deleted.returncode == SECURITY_ITEM_NOT_FOUND:
+            return removed
+        if deleted.returncode != 0:
+            raise RuntimeError(
+                f"security could not delete {TEST_KEYCHAIN_SERVICE} entries "
+                f"(exit {deleted.returncode}) after removing {removed}"
+            )
+    raise RuntimeError(f"more than {MAX_KEYCHAIN_DELETIONS} {TEST_KEYCHAIN_SERVICE} keychain entries")
 
 
 def main():
@@ -99,7 +142,11 @@ def main():
                     raise RuntimeError(f"expected one e2e executable, found {len(executables)}")
                 executable = Path(executables.pop())
 
-            command = [str(executable.resolve()), "--nocapture", "--test-threads=10"]
+            command = [
+                str(executable.resolve()), "--nocapture", "--test-threads=10",
+                "--skip", ISOLATION_PROBE,
+            ]
+            environment = dict(os.environ, **{NATIVE_KEYCHAIN_ENV: NATIVE_KEYCHAIN_OPT_IN})
             report["executable"] = command[0]
             report["command"] = command
             for number in range(1, 4):
@@ -107,6 +154,7 @@ def main():
                 log = args.output_dir / f"copy-{number}.log"
                 child = subprocess.Popen(
                     command,
+                    env=environment,
                     stdout=files.enter_context(log.open("w")),
                     stderr=subprocess.STDOUT,
                     start_new_session=os.name == "posix",
@@ -133,6 +181,15 @@ def main():
             unreaped = cleanup(children)
             if unreaped:
                 report.update(status="failed", unreaped_pids=unreaped)
+            try:
+                removed = remove_test_keychain_items()
+                report["test_keychain_entries_removed"] = removed
+                # Passing suites that left nothing to remove never reached the
+                # native keychain, so they did not measure its latency.
+                if sys.platform == "darwin" and report["status"] == "passed" and removed == 0:
+                    report.update(status="failed", error="no test keychain entries: the opt-in had no effect")
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                report.update(status="failed", keychain_cleanup_error=str(error))
             if build is not None:
                 report["build"]["exit_code"] = build.returncode
             for copy, child in zip(report["copies"], copies):

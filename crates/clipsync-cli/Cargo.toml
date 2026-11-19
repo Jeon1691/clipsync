@@ -33,6 +33,8 @@ tracing-subscriber.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
+# Test builds never mirror secrets into the OS keychain (see clipsync-storage).
+clipsync-storage = { workspace = true, features = ["test-isolated-keychain"] }
 clipsync-crypto.workspace = true
 axum.workspace = true
 clipsync-relay = { path = "../clipsync-relay" }

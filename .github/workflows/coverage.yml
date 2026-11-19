@@ -24,7 +24,6 @@ env:
   RUSTUP_TOOLCHAIN: nightly-2026-11-11
   # Hosted runners provide disposable clipboard sessions for the host contract.
   CLIPSYNC_TEST_HOST_CLIPBOARD: '1'
-  CLIPSYNC_TEST_DISPOSABLE_HOST: '1'
 
 jobs:
   coverage:
