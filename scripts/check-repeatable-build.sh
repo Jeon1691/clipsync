@@ -129,7 +129,11 @@ for repeat_build in "${repeat_builds[@]}"; do
     export RUSTC_WORKSPACE_WRAPPER=""
     export CCACHE_DISABLE=1
     export SCCACHE_DISABLE=1
-    cargo build --release --workspace --all-features --locked --offline \
+    # Build the product feature set release.yml ships: default features only.
+    # The workspace's one non-default feature,
+    # clipsync-storage/test-isolated-keychain, is test-only, so --all-features
+    # would compare binaries that no release contains.
+    cargo build --release --workspace --locked --offline \
       --target-dir "$repeat_tree/target"
   ) 2>&1 | tee "$repeat_report/build-$repeat_build.log"
 done
