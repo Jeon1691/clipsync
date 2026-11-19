@@ -247,10 +247,6 @@ pub fn replaceable(wait: &PairingWait) -> bool {
 }
 
 /// `clipsync room confirm [CODE]` and `clipsync room reject`.
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 pub async fn answer_background(
     app: &App,
     shown_on_other_device: Option<&str>,
@@ -261,10 +257,6 @@ pub async fn answer_background(
 }
 
 /// [`answer_background`] with the terminal prompt supplied by the caller.
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 async fn answer_background_with<A, F>(
     app: &App,
     shown_on_other_device: Option<&str>,
@@ -431,10 +423,6 @@ where
     }
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 async fn reject_background(
     app: &App,
     wait: PairingWait,
@@ -492,10 +480,6 @@ async fn reject_background(
 
 /// Wait until the worker that owns `answered` gave up, re-asserting the
 /// rejection if a concurrent write by the worker dropped it.
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 async fn wait_for_worker_exit(
     app: &App,
     answered: &PairingWait,
@@ -562,10 +546,6 @@ async fn pairing_ended(app: &App, asked: &PairingWait, deadline: Instant) -> Cor
     }
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 fn load_live(app: &App) -> Result<PairingWait, CoreError> {
     app.store.load_pairing_wait()?.ok_or_else(no_pairing)
 }

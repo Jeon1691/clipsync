@@ -83,7 +83,7 @@ thiserror = "2"
 # keep chrono's exact RFC 3339 spelling.
 time = { version = "0.3.47", default-features = false, features = ["std", "large-dates"] }
 tokio = { version = "1.47", features = ["full"] }
-tokio-tungstenite = { version = "0.26", features = [
+tokio-tungstenite = { version = "0.29", features = [
     "connect",
     "rustls-tls-native-roots",
     "rustls-tls-webpki-roots",
@@ -95,7 +95,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"]
 ulid = { version = "3", features = ["serde"] }
 uniffi = "0.32.2"
 url = "2"
-which = "7"
+which = "8"
 x25519-dalek = { version = "3", features = ["static_secrets", "getrandom", "zeroize"] }
 zeroize = { version = "1", features = ["zeroize_derive"] }
 
