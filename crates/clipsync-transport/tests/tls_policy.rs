@@ -12,8 +12,8 @@ use clipsync_protocol::ControlMessage;
 use clipsync_transport::{configure_reqwest, Incoming, RelayConnection, CA_FILE_ENV};
 use futures_util::{SinkExt, StreamExt};
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
-    KeyUsagePurpose,
+    BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa,
+    KeyPair, KeyUsagePurpose,
 };
 use rustls::pki_types::PrivatePkcs8KeyDer;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -23,8 +23,15 @@ use tokio_tungstenite::tungstenite::Message;
 
 const CHILD_MODE: &str = "CLIPSYNC_TEST_TLS_MODE";
 const CHILD_URL: &str = "CLIPSYNC_TEST_TLS_URL";
+/// Backdating `notBefore` by a day keeps the fixtures valid on hosts whose
+/// clock is slightly behind the one that minted them.
+const CERTIFICATE_BACKDATE: Duration = Duration::from_secs(24 * 60 * 60);
+/// A week comfortably outlives any test run while staying short-lived.
+const CERTIFICATE_LIFETIME: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-fn private_ca() -> (rcgen::Certificate, KeyPair) {
+/// Self-signed root plus the issuer (subject name, key identifier method, key
+/// usages and signing key) that leaves are signed with.
+fn private_ca() -> CertifiedIssuer<'static, KeyPair> {
     let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
     params
         .distinguished_name
@@ -32,14 +39,14 @@ fn private_ca() -> (rcgen::Certificate, KeyPair) {
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     let now = SystemTime::now();
-    params.not_before = (now - Duration::from_secs(86_400)).into();
-    params.not_after = (now + Duration::from_secs(7 * 86_400)).into();
+    params.not_before = (now - CERTIFICATE_BACKDATE).into();
+    params.not_after = (now + CERTIFICATE_LIFETIME).into();
     let key = KeyPair::generate().unwrap();
-    (params.self_signed(&key).unwrap(), key)
+    CertifiedIssuer::self_signed(params, key).unwrap()
 }
 
 async fn private_server(websocket: bool) -> (u16, tempfile::TempDir, tokio::task::JoinHandle<()>) {
-    let (ca, ca_key) = private_ca();
+    let ca = private_ca();
     let mut params = CertificateParams::new(vec!["localhost".into()]).unwrap();
     params
         .distinguished_name
@@ -48,10 +55,10 @@ async fn private_server(websocket: bool) -> (u16, tempfile::TempDir, tokio::task
     params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     let now = SystemTime::now();
-    params.not_before = (now - Duration::from_secs(86_400)).into();
-    params.not_after = (now + Duration::from_secs(7 * 86_400)).into();
+    params.not_before = (now - CERTIFICATE_BACKDATE).into();
+    params.not_after = (now + CERTIFICATE_LIFETIME).into();
     let key = KeyPair::generate().unwrap();
-    let leaf = params.signed_by(&key, &ca, &ca_key).unwrap();
+    let leaf = params.signed_by(&key, &ca).unwrap();
     let _ = rustls::crypto::ring::default_provider().install_default();
     let config = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -62,7 +69,7 @@ async fn private_server(websocket: bool) -> (u16, tempfile::TempDir, tokio::task
         .unwrap();
     let roots = tempfile::tempdir().unwrap();
     std::fs::write(roots.path().join("trusted.pem"), ca.pem()).unwrap();
-    let (unrelated, _) = private_ca();
+    let unrelated = private_ca();
     std::fs::write(roots.path().join("unrelated.pem"), unrelated.pem()).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
