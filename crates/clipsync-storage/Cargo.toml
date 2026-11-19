@@ -13,8 +13,9 @@ description = "ClipSync local config, credentials, and secret storage"
 [features]
 # Test builds only: keep every secret in its private file and never mirror it
 # into the OS keychain, unless CLIPSYNC_TEST_NATIVE_KEYCHAIN=1 opts a run into
-# a separate test service. Enable it from [dev-dependencies] alone; an
-# optimized macOS/Windows build that enables it fails to compile, and
+# a separate test service. Enable it from [dev-dependencies] alone; a
+# macOS/Windows release-profile build (build.rs reads Cargo's PROFILE) or build
+# without debug assertions that enables it fails to compile, and
 # scripts/tests/test_test_keychain_isolation.py checks no product selects it.
 test-isolated-keychain = []
 
@@ -43,6 +44,7 @@ keyring = { workspace = true, features = ["windows-native"] }
 [dev-dependencies]
 # The storage integration tests are test builds too.
 clipsync-storage = { path = ".", features = ["test-isolated-keychain"] }
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

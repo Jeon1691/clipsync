@@ -19,9 +19,24 @@ Every crate whose tests open a store enables the non-default
 secrets stay in their private files, as on Linux, and a test's outcome cannot
 depend on keychain contents or `securityd` latency.
 [A script test](../scripts/tests/test_test_keychain_isolation.py) checks that no
-product build selects the feature. An optimized macOS or Windows build with the
-feature fails to compile, so `cargo test --release` there needs a profile that
-keeps debug assertions. Two tests deliberately use the native keychain, under
+product build selects the feature, and, on macOS, that a release-profile build
+with it fails to compile. On macOS and Windows the feature is refused in the
+release profile, and in any profile inherited from it, even with
+`CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true`, and in any build without debug
+assertions. `cargo test --release` therefore fails there; test in the default
+profile. The [Nix flake](../flake.nix) runs its check phase in the debug profile
+for this reason.
+
+Cargo applies features per build, not per binary. A `cargo test` or
+`--all-targets` build of the workspace, or of a product crate such as
+`clipsync-cli`, also builds its product binaries in `target/debug` (for example
+`clipsync` and `clipsync-desktop`) with the feature on. On macOS and Windows such a debug binary keeps every secret in its private
+file and never mirrors it into the keychain, so it cannot recover a deleted
+identity or key from there. It logs a one-time warning when it opens its secret
+store: "secrets are file-only in this test build". Run a plain
+`cargo build -p clipsync-cli` (or the release artifacts) when you need the
+keychain mirror. Release builds never enable the feature. Two tests
+deliberately use the native keychain, under
 the separate `dev.clipsync.test` service, and remove what they write: the
 storage round-trip test, and the macOS
 [pairing-concurrency harness](../scripts/test-pairing-concurrency.py), which

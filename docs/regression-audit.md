@@ -242,8 +242,10 @@ depended on whether a pairing test ran first. A non-default
 `[dev-dependencies]`, now keeps every secret in its private file in test
 builds, as on Linux. Every test binary adds 0 items.
 [A script test](../scripts/tests/test_test_keychain_isolation.py) checks that no
-product's normal dependency graph selects the feature. An optimized macOS or
-Windows build that enables it fails to compile. The storage round-trip test and
+product's normal dependency graph selects the feature. A macOS or Windows
+build that enables it fails to compile in the release profile, even with debug
+assertions turned back on, and in any build without debug assertions; the
+script test checks the release case on macOS. The storage round-trip test and
 the macOS concurrency harness still use the native keychain, under a separate
 `dev.clipsync.test` service, and remove their entries. The two focused checks
 fail on the old code when run alone, because a removed secret is restored from

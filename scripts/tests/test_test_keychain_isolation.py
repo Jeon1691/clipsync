@@ -9,19 +9,27 @@ to test targets and never to a `cargo build`/`cargo install` of a product.
 """
 
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
 STORAGE = "clipsync-storage"
 FEATURE = "test-isolated-keychain"
+# `sys.platform` of the hosts whose OS keychain the feature skips; only there
+# does `clipsync-storage` refuse an optimized build that enables it.
+KEYCHAIN_PLATFORMS = ("darwin", "win32")
+# Start of the `compile_error!` text in crates/clipsync-storage/src/secrets.rs.
+GUARD_MESSAGE = "test-isolated-keychain is for test builds"
 
 
-def cargo(*args, check=True):
+def cargo(*args, check=True, env=None):
     completed = subprocess.run(
         ["cargo", *args, "--locked"], cwd=ROOT, check=check, capture_output=True, text=True,
+        env=None if env is None else {**os.environ, **env},
     )
     return completed.stdout if check else completed
 
@@ -92,6 +100,21 @@ class TestKeychainIsolationTests(unittest.TestCase):
         for name in reaching:
             with self.subTest(package=name):
                 self.assertIn(name, enabling, f"{name}'s tests reach {STORAGE} without {FEATURE}")
+
+    @unittest.skipUnless(sys.platform in KEYCHAIN_PLATFORMS,
+                         "this host has no OS keychain, so the feature changes nothing and "
+                         "the guard is compiled out")
+    def test_a_release_profile_build_with_the_feature_fails_to_compile(self):
+        # Turning debug assertions back on must not reopen the release path.
+        for label, env in (("release", {}),
+                           ("release with debug assertions",
+                            {"CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS": "true"})):
+            with self.subTest(profile=label):
+                completed = cargo("check", "--release", "-p", STORAGE, "--features", FEATURE,
+                                  check=False, env=env)
+                self.assertNotEqual(completed.returncode, 0,
+                                    f"{label} build with {FEATURE} compiled")
+                self.assertIn(GUARD_MESSAGE, completed.stderr)
 
 
 if __name__ == "__main__":

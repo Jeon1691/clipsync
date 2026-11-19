@@ -4929,9 +4929,17 @@
             "macos",
             "windows"
           ]
+        },
+        {
+          "kind": "python",
+          "source": "scripts/tests/test_test_keychain_isolation.py",
+          "test": "test_test_keychain_isolation.TestKeychainIsolationTests.test_a_release_profile_build_with_the_feature_fails_to_compile",
+          "platforms": [
+            "macos"
+          ]
         }
       ],
-      "notes": "On unchanged d540e70 macOS, both checks fail when run alone (a named secret is restored from the keychain after its private file is removed), and measured login-keychain growth per run was 4 items for the clipsync-core lib, 36 for clipsync-relay --test e2e and 8 for the clipsync-mobile lib; every other test binary added 0. With the fix every test binary adds 0 and the checks pass. Linux has no keychain mirror, so the checks are scoped to macOS and Windows; the Windows failure on old code is inferred from the shared keyring path, not run. The test-isolated-keychain feature is enabled only from [dev-dependencies]; scripts/tests/test_test_keychain_isolation.py verifies that no product dependency graph selects it. F135 is the pairing-only predecessor."
+      "notes": "On unchanged d540e70 macOS, both checks fail when run alone (a named secret is restored from the keychain after its private file is removed), and measured login-keychain growth per run was 4 items for the clipsync-core lib, 36 for clipsync-relay --test e2e and 8 for the clipsync-mobile lib; every other test binary added 0. With the fix every test binary adds 0 and the checks pass. Linux has no keychain mirror, so the checks are scoped to macOS and Windows; the Windows failure on old code is inferred from the shared keyring path, not run. The test-isolated-keychain feature is enabled only from [dev-dependencies]; scripts/tests/test_test_keychain_isolation.py verifies that no product dependency graph selects it and, on macOS, that a release-profile build with it fails to compile even with CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true (that variant compiled before build.rs keyed the guard on Cargo's PROFILE; script tests do not run on Windows in CI). F135 is the pairing-only predecessor."
     }
   ]
 }

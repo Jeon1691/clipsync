@@ -3,6 +3,7 @@
 use clipsync_crypto::{DeviceIdentity, StoredIdentity};
 use std::io::Write;
 use std::path::Path;
+use std::sync::Once;
 use tracing::warn;
 
 use crate::paths::{set_private_file, AppPaths};
@@ -22,6 +23,12 @@ const PLATFORM_HAS_KEYCHAIN: bool = cfg!(any(target_os = "macos", target_os = "w
 /// the `test-isolated-keychain` feature, which only `[dev-dependencies]` enable.
 const TEST_BUILD: bool = cfg!(any(test, feature = "test-isolated-keychain"));
 
+/// Whether `test-isolated-keychain` is on outside this crate's own unit tests.
+/// Workspace `cargo test` and `--all-targets` builds unify the dev-only feature
+/// into every debug binary they build, product binaries such as
+/// `target/debug/clipsync` included.
+const FEATURE_OUTSIDE_UNIT_TESTS: bool = cfg!(all(feature = "test-isolated-keychain", not(test)));
+
 /// Set to [`TEST_NATIVE_KEYCHAIN_OPT_IN`] in a test build to mirror under
 /// [`TEST_KEYCHAIN_SERVICE`], for the harness that measures native keychain
 /// latency. Product builds do not contain this switch.
@@ -32,11 +39,14 @@ const TEST_NATIVE_KEYCHAIN_ENV: &str = "CLIPSYNC_TEST_NATIVE_KEYCHAIN";
 #[cfg(any(test, feature = "test-isolated-keychain"))]
 const TEST_NATIVE_KEYCHAIN_OPT_IN: &str = "1";
 
-// Release artifacts are optimized builds; refuse one that could skip the
-// keychain on a platform that has one.
+// Release artifacts come from the release profile; on a platform with a
+// keychain, refuse a release-profile build, or any build without debug
+// assertions, that could skip the keychain. build.rs sets
+// `clipsync_release_profile` from Cargo's PROFILE, so a release profile that
+// re-enables debug assertions is refused too.
 #[cfg(all(
     feature = "test-isolated-keychain",
-    not(debug_assertions),
+    any(not(debug_assertions), clipsync_release_profile),
     any(target_os = "macos", target_os = "windows")
 ))]
 compile_error!("test-isolated-keychain is for test builds; enable it only from [dev-dependencies]");
@@ -51,10 +61,17 @@ pub struct SecretStore {
 
 impl SecretStore {
     pub fn new(paths: AppPaths) -> Self {
-        Self {
-            paths,
-            keychain: keychain_service(),
+        let keychain = keychain_service();
+        if notes_file_only_test_build(PLATFORM_HAS_KEYCHAIN, FEATURE_OUTSIDE_UNIT_TESTS, keychain) {
+            static NOTICE: Once = Once::new();
+            NOTICE.call_once(|| {
+                warn!(
+                    "clipsync-storage/test-isolated-keychain is enabled: secrets are file-only \
+                     in this test build and are not mirrored into the OS keychain"
+                );
+            });
         }
+        Self { paths, keychain }
     }
 
     fn set_keyring(&self, account: &str, value: &str) -> std::result::Result<(), String> {
@@ -217,6 +234,17 @@ const fn select_service(
         (true, true, true) => Some(TEST_KEYCHAIN_SERVICE),
         (true, true, false) => None,
     }
+}
+
+/// Whether to say, once per process, that a binary skips the keychain mirror
+/// only because it is a test build. A debug product binary from a workspace
+/// test build would otherwise lose keychain recovery without a trace.
+const fn notes_file_only_test_build(
+    platform_has_keychain: bool,
+    feature_outside_unit_tests: bool,
+    service: Option<&'static str>,
+) -> bool {
+    platform_has_keychain && feature_outside_unit_tests && service.is_none()
 }
 
 #[cfg(any(test, feature = "test-isolated-keychain"))]
@@ -444,6 +472,29 @@ mod keychain_isolation_tests {
         );
         assert_ne!(TEST_KEYCHAIN_SERVICE, SERVICE);
         const { assert!(TEST_BUILD) };
+    }
+
+    #[test]
+    fn only_a_file_only_test_build_outside_unit_tests_on_a_keychain_platform_says_so() {
+        for service in [None, Some(SERVICE), Some(TEST_KEYCHAIN_SERVICE)] {
+            for feature_outside_unit_tests in [false, true] {
+                assert!(!notes_file_only_test_build(
+                    false,
+                    feature_outside_unit_tests,
+                    service
+                ));
+            }
+            assert!(!notes_file_only_test_build(true, false, service));
+        }
+        assert!(notes_file_only_test_build(true, true, None));
+        // An opted-in run mirrors under the test service, so it is not file-only.
+        assert!(!notes_file_only_test_build(
+            true,
+            true,
+            Some(TEST_KEYCHAIN_SERVICE)
+        ));
+        // This crate's own unit tests stay quiet.
+        const { assert!(!FEATURE_OUTSIDE_UNIT_TESTS) };
     }
 
     #[test]
