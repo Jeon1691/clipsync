@@ -46,10 +46,6 @@ pub struct SyncHandle {
     pub last_item: Arc<Mutex<Option<ClipboardItem>>>,
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 pub async fn run_daemon(clipboard: Option<SystemClipboard>) -> Result<(), CoreError> {
     let store = LocalStore::open()?;
     let _ = crate::App {
@@ -240,10 +236,6 @@ async fn sync_loop(
     }
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 async fn run_session(
     store: &LocalStore,
     clipboard: &SystemClipboard,
@@ -456,10 +448,6 @@ async fn run_session(
     }
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 async fn send_item(
     conn: &RelayConnection,
     identity: &DeviceIdentity,
@@ -546,10 +534,6 @@ async fn send_item(
     Ok(())
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 async fn send_binary(
     conn: &RelayConnection,
     epoch_key: &[u8; 32],
@@ -575,10 +559,6 @@ async fn send_binary(
     Ok(())
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 fn open_text(
     epoch_key: &[u8; 32],
     routing: &RoutingHeader,
@@ -594,10 +574,6 @@ fn open_text(
     Ok(ClipboardItem::Text { text })
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 fn open_manifest(
     epoch_key: &[u8; 32],
     routing: &RoutingHeader,
@@ -624,10 +600,6 @@ impl EnvelopeStamp {
     /// persisted, strictly increasing `seq`. Both happen under the replay-state
     /// lock, so a one-shot process that switches the room to v2 concurrently
     /// is either seen here or ordered after this stamp.
-    #[expect(
-        clippy::result_large_err,
-        reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-    )]
     fn next(
         store: &LocalStore,
         room: &RoomRecord,
@@ -660,10 +632,6 @@ struct Inbound<'a> {
 }
 
 impl Inbound<'_> {
-    #[expect(
-        clippy::result_large_err,
-        reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-    )]
     fn text(
         &self,
         routing: &RoutingHeader,
@@ -683,10 +651,6 @@ impl Inbound<'_> {
         Ok(item)
     }
 
-    #[expect(
-        clippy::result_large_err,
-        reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-    )]
     fn manifest(
         &self,
         routing: &RoutingHeader,
@@ -724,10 +688,6 @@ fn open_pending_chunk(
     ))
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 fn seal_text(
     epoch_key: &[u8; 32],
     routing: &RoutingHeader,
@@ -740,10 +700,6 @@ fn seal_text(
     Ok((hex::encode(nonce), hex::encode(ct)))
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 fn seal_manifest(
     epoch_key: &[u8; 32],
     routing: &RoutingHeader,
@@ -762,10 +718,6 @@ const TEXT_NONCE_INDEX: u32 = 0;
 /// the top index never collides with a chunk of a valid transfer.
 const MANIFEST_NONCE_INDEX: u32 = u32::MAX;
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 fn decode_nonce(hex_str: &str) -> Result<[u8; 12], CoreError> {
     let b = hex::decode(hex_str).map_err(|e| CoreError::Message(e.to_string()))?;
     if b.len() != 12 {
@@ -776,10 +728,6 @@ fn decode_nonce(hex_str: &str) -> Result<[u8; 12], CoreError> {
     Ok(n)
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 async fn item_from_payload(
     manifest: &ManifestPlain,
     payload: Vec<u8>,
@@ -852,10 +800,6 @@ async fn apply_remote(
     }
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 pub async fn oneshot_push(store: &LocalStore, item: ClipboardItem) -> Result<(), CoreError> {
     let cfg = store.load_config()?;
     let identity = store.secrets.load_identity()?;
@@ -887,18 +831,10 @@ pub async fn oneshot_push(store: &LocalStore, item: ClipboardItem) -> Result<(),
     Ok(())
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 async fn wait_hello_ok(conn: &mut RelayConnection) -> Result<(), CoreError> {
     wait_hello_ok_msg(conn).await.map(|_| ())
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 async fn wait_hello_ok_msg(conn: &mut RelayConnection) -> Result<ControlMessage, CoreError> {
     let deadline = tokio::time::sleep(Duration::from_secs(10));
     tokio::pin!(deadline);
@@ -1021,10 +957,6 @@ async fn finish_handshake(
     }
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 pub async fn oneshot_pull(
     store: &LocalStore,
     copy: bool,
@@ -1119,10 +1051,6 @@ pub async fn oneshot_pull(
     }
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 async fn finish_pull(
     item: ClipboardItem,
     copy: bool,

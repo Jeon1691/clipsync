@@ -52,10 +52,6 @@ fn init_tracing(json: bool) {
     }
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "Preserve the public CoreError payload and conversions; see docs/compiler-warnings.md."
-)]
 async fn run(cli: Cli) -> Result<(), CoreError> {
     if let Commands::Room(RoomCmd::Create {
         background_worker: true,
