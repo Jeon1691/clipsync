@@ -19,10 +19,17 @@ STORAGE = "clipsync-storage"
 FEATURE = "test-isolated-keychain"
 
 
-def cargo(*args):
-    return subprocess.run(
-        ["cargo", *args, "--locked"], cwd=ROOT, check=True, capture_output=True, text=True,
-    ).stdout
+def cargo(*args, check=True):
+    completed = subprocess.run(
+        ["cargo", *args, "--locked"], cwd=ROOT, check=check, capture_output=True, text=True,
+    )
+    return completed.stdout if check else completed
+
+
+def storage_tree(package, edges):
+    """`cargo tree` of the paths from `package` to clipsync-storage over `edges`."""
+    return cargo("tree", "-p", package, "--target", "all", "-e", edges,
+                 "-i", STORAGE, "--prefix", "none", check=False)
 
 
 class TestKeychainIsolationTests(unittest.TestCase):
@@ -62,13 +69,29 @@ class TestKeychainIsolationTests(unittest.TestCase):
         products = sorted({package["name"] for package, dependency in self.storage_dependencies()
                            if dependency["kind"] is None})
         self.assertTrue(products, "no product depends on clipsync-storage")
+        # Positive control: the same query with dev edges shows the feature, so
+        # its absence below is not an artifact of the output format.
+        with_dev = storage_tree(products[0], "normal,build,dev,features")
+        self.assertIn(f'feature "{FEATURE}"', with_dev.stdout)
         for product in products:
             with self.subTest(product=product):
                 # Normal and build edges are what `cargo build -p <product>` resolves.
-                tree = cargo("tree", "-p", product, "--target", "all", "-e", "normal,build,features",
-                             "-i", STORAGE, "--prefix", "none")
-                self.assertIn(STORAGE, tree)
-                self.assertNotIn(f'feature "{FEATURE}"', tree)
+                tree = storage_tree(product, "normal,build,features")
+                self.assertEqual(tree.returncode, 0, tree.stderr)
+                self.assertIn(STORAGE, tree.stdout)
+                self.assertNotIn(f'feature "{FEATURE}"', tree.stdout)
+
+    def test_every_crate_whose_tests_reach_storage_enables_the_feature(self):
+        # Workspace runs merge features across crates, but `cargo test -p <crate>`
+        # alone sees only that crate's own dev-dependencies.
+        enabling = {package["name"] for package, dependency in self.storage_dependencies()
+                    if dependency["kind"] == "dev" and FEATURE in dependency["features"]}
+        reaching = [package["name"] for package in self.packages
+                    if storage_tree(package["name"], "normal,build,dev").returncode == 0]
+        self.assertIn(STORAGE, reaching)
+        for name in reaching:
+            with self.subTest(package=name):
+                self.assertIn(name, enabling, f"{name}'s tests reach {STORAGE} without {FEATURE}")
 
 
 if __name__ == "__main__":

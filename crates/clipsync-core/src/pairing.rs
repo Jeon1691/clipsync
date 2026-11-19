@@ -2043,7 +2043,7 @@ mod tests {
         // that answers at once. What else runs inside it is loopback round
         // trips and the file store's writes, well under a second; the OS
         // keychain, which a loaded runner stalls for longer than the whole
-        // budget, is kept out by `open_store`.
+        // budget, is kept out of test builds by `test-isolated-keychain`.
         let budget = COMMITMENT_WAIT + SCRIPT_DEADLINE;
         let (mut server, peer_sas, frame, release) = scripted_joiner(
             identity.device_id.clone(),

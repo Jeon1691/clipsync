@@ -11,9 +11,23 @@ cargo test --workspace --locked -- --test-threads=1
 
 The real host clipboard roundtrip requires `CLIPSYNC_TEST_HOST_CLIPBOARD=1`;
 enable it only in a disposable test session. Ordinary local tests use private
-named pasteboards or isolated adapters. Full foreground CLI completion on macOS
-also requires `CLIPSYNC_TEST_DISPOSABLE_HOST=1`; local validation leaves that flag
-unset. Hosted CI supplies both flags. On Linux, install `xclip`, `xvfb`,
+named pasteboards or isolated adapters. Hosted CI supplies that flag.
+
+Test builds never write to the macOS keychain or Windows Credential Manager.
+Every crate whose tests open a store enables the non-default
+`clipsync-storage/test-isolated-keychain` feature from `[dev-dependencies]`, so
+secrets stay in their private files, as on Linux, and a test's outcome cannot
+depend on keychain contents or `securityd` latency.
+[A script test](../scripts/tests/test_test_keychain_isolation.py) checks that no
+product build selects the feature. An optimized macOS or Windows build with the
+feature fails to compile, so `cargo test --release` there needs a profile that
+keeps debug assertions. Two tests deliberately use the native keychain, under
+the separate `dev.clipsync.test` service, and remove what they write: the
+storage round-trip test, and the macOS
+[pairing-concurrency harness](../scripts/test-pairing-concurrency.py), which
+sets `CLIPSYNC_TEST_NATIVE_KEYCHAIN=1` to measure keychain latency.
+
+On Linux, install `xclip`, `xvfb`,
 `libgtk-3-dev`, `libxkbcommon-dev`, `libwayland-dev`, `libxkbcommon-x11-dev`,
 `libfontconfig1-dev` and `libfreetype6-dev`, then run through `xvfb-run -a`.
 Native behavior still needs the three-platform CI matrix and manual testing.

@@ -9,20 +9,28 @@ use crate::paths::{set_private_file, AppPaths};
 use crate::{Result, StorageError};
 
 /// Keychain service the product mirrors secrets under.
-#[cfg(not(any(test, feature = "test-isolated-keychain")))]
 const SERVICE: &str = "dev.clipsync.cli";
 
 /// Keychain service for test runs that deliberately reach the native keychain,
-/// kept apart from the product's `dev.clipsync.cli` entries so that theirs
-/// can be found and removed.
-#[cfg(any(test, feature = "test-isolated-keychain"))]
+/// kept apart from [`SERVICE`] so that their entries can be found and removed.
 const TEST_KEYCHAIN_SERVICE: &str = "dev.clipsync.test";
 
-/// Set to `1` in a `test-isolated-keychain` build to mirror under
+/// Whether this platform has an OS keychain to mirror secrets into.
+const PLATFORM_HAS_KEYCHAIN: bool = cfg!(any(target_os = "macos", target_os = "windows"));
+
+/// Whether this is a test build: this crate's own unit tests, or a build with
+/// the `test-isolated-keychain` feature, which only `[dev-dependencies]` enable.
+const TEST_BUILD: bool = cfg!(any(test, feature = "test-isolated-keychain"));
+
+/// Set to [`TEST_NATIVE_KEYCHAIN_OPT_IN`] in a test build to mirror under
 /// [`TEST_KEYCHAIN_SERVICE`], for the harness that measures native keychain
 /// latency. Product builds do not contain this switch.
-#[cfg(feature = "test-isolated-keychain")]
+#[cfg(any(test, feature = "test-isolated-keychain"))]
 const TEST_NATIVE_KEYCHAIN_ENV: &str = "CLIPSYNC_TEST_NATIVE_KEYCHAIN";
+
+/// The only [`TEST_NATIVE_KEYCHAIN_ENV`] value that opts in.
+#[cfg(any(test, feature = "test-isolated-keychain"))]
+const TEST_NATIVE_KEYCHAIN_OPT_IN: &str = "1";
 
 // Release artifacts are optimized builds; refuse one that could skip the
 // keychain on a platform that has one.
@@ -176,30 +184,48 @@ fn write_private_pausing(path: &Path, value: &[u8], pause: impl FnMut()) -> std:
 }
 
 /// Why a store without a keychain service reports the mirror unavailable.
-const NO_KEYCHAIN: &str = "os keychain not used by this build";
+const NO_KEYCHAIN: &str = if PLATFORM_HAS_KEYCHAIN {
+    "os keychain not used by test builds"
+} else {
+    "os keychain not enabled on this platform"
+};
 
 /// The keychain service a new store mirrors under.
-///
-/// Test builds (this crate's own unit tests, or any build with the
-/// `test-isolated-keychain` feature) never reach the real service: every
-/// secret stays in its private file, as on Linux, so the outcome cannot depend
-/// on keychain contents, `securityd` latency or which test ran first.
 fn keychain_service() -> Option<&'static str> {
-    if !cfg!(any(target_os = "macos", target_os = "windows")) {
-        return None;
+    select_service(
+        PLATFORM_HAS_KEYCHAIN,
+        TEST_BUILD,
+        test_native_keychain_requested(),
+    )
+}
+
+/// Choose the keychain service from the build and the opt-in.
+///
+/// Test builds never reach the product service: every secret stays in its
+/// private file, as on Linux, so the outcome cannot depend on keychain
+/// contents, `securityd` latency or which test ran first. This is a pure
+/// function compiled into every build, so its product branch is tested even
+/// though no test build takes it.
+const fn select_service(
+    platform_has_keychain: bool,
+    test_build: bool,
+    native_opt_in: bool,
+) -> Option<&'static str> {
+    match (platform_has_keychain, test_build, native_opt_in) {
+        (false, _, _) => None,
+        (true, false, _) => Some(SERVICE),
+        (true, true, true) => Some(TEST_KEYCHAIN_SERVICE),
+        (true, true, false) => None,
     }
-    #[cfg(any(test, feature = "test-isolated-keychain"))]
-    return test_native_keychain_requested().then_some(TEST_KEYCHAIN_SERVICE);
-    #[cfg(not(any(test, feature = "test-isolated-keychain")))]
-    Some(SERVICE)
 }
 
-#[cfg(feature = "test-isolated-keychain")]
+#[cfg(any(test, feature = "test-isolated-keychain"))]
 fn test_native_keychain_requested() -> bool {
-    std::env::var_os(TEST_NATIVE_KEYCHAIN_ENV).is_some_and(|value| value == "1")
+    std::env::var_os(TEST_NATIVE_KEYCHAIN_ENV)
+        .is_some_and(|value| value == TEST_NATIVE_KEYCHAIN_OPT_IN)
 }
 
-#[cfg(all(test, not(feature = "test-isolated-keychain")))]
+#[cfg(not(any(test, feature = "test-isolated-keychain")))]
 fn test_native_keychain_requested() -> bool {
     false
 }
@@ -401,30 +427,51 @@ mod keychain_isolation_tests {
     use super::*;
 
     #[test]
+    fn only_product_builds_on_keychain_platforms_mirror_under_the_product_service() {
+        for opt_in in [false, true] {
+            assert_eq!(select_service(false, false, opt_in), None);
+            assert_eq!(select_service(false, true, opt_in), None);
+            assert_eq!(select_service(true, false, opt_in), Some(SERVICE));
+        }
+        assert_eq!(select_service(true, true, false), None);
+        assert_eq!(
+            select_service(true, true, true),
+            Some(TEST_KEYCHAIN_SERVICE)
+        );
+        assert_eq!(
+            SERVICE, "dev.clipsync.cli",
+            "existing entries use this name"
+        );
+        assert_ne!(TEST_KEYCHAIN_SERVICE, SERVICE);
+        const { assert!(TEST_BUILD) };
+    }
+
+    #[test]
     fn test_builds_keep_secrets_out_of_the_os_keychain_unless_opted_in() {
         let root = tempfile::tempdir().unwrap();
         let paths = AppPaths::from_root(root.path().into());
         paths.ensure().unwrap();
         let store = SecretStore::new(paths.clone());
-        #[cfg(feature = "test-isolated-keychain")]
-        let opted_in = test_native_keychain_requested();
-        #[cfg(not(feature = "test-isolated-keychain"))]
-        let opted_in = false;
-        let native = opted_in && cfg!(any(target_os = "macos", target_os = "windows"));
+        let opted_in = PLATFORM_HAS_KEYCHAIN && test_native_keychain_requested();
         store.save_named("keychain-probe", "synthetic").unwrap();
+        let account = store.account("keychain-probe");
+        // Read the native keychain directly, so a write that a read-side
+        // gate would hide is still caught.
+        let product_entry = native_get(SERVICE, &account).is_ok();
+        let test_entry = native_get(TEST_KEYCHAIN_SERVICE, &account).is_ok();
         std::fs::remove_file(paths.data_dir.join("keychain-probe.secret")).unwrap();
         let restored = store.load_named("keychain-probe").is_ok();
-        let _ = store.delete_keyring(&store.account("keychain-probe"));
-        assert_eq!(
-            restored, native,
-            "only an opted-in run reaches the keychain"
-        );
+        let _ = store.delete_keyring(&account);
+        assert!(!product_entry, "a test build wrote the product service");
+        assert_eq!(test_entry, opted_in, "only an opted-in run writes");
+        assert_eq!(restored, opted_in, "only an opted-in run restores");
     }
 }
 
-/// The one test that deliberately uses the native keychain. It writes only
-/// under [`TEST_KEYCHAIN_SERVICE`], to an account named after its own
-/// temporary directory, and removes the entry even when an assertion fails.
+/// The test that always uses the native keychain (an opted-in run also
+/// reaches it above). It writes only under [`TEST_KEYCHAIN_SERVICE`], to an
+/// account named after its own temporary directory, and removes the entry
+/// even when an assertion fails.
 #[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod regression_tests {
@@ -462,14 +509,15 @@ mod regression_tests {
         assert_eq!(store.load_identity().unwrap().device_id, identity.device_id);
         #[cfg(unix)]
         {
+            use crate::paths::{PERMISSION_BITS, PRIVATE_FILE_MODE};
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(
                 std::fs::metadata(paths.identity_file())
                     .unwrap()
                     .permissions()
                     .mode()
-                    & 0o777,
-                0o600
+                    & PERMISSION_BITS,
+                PRIVATE_FILE_MODE
             );
         }
     }

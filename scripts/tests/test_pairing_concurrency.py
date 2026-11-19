@@ -20,6 +20,17 @@ class PairingConcurrencyTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory(prefix="clipsync-concurrency-harness-")
         self.addCleanup(directory.cleanup)
         self.base = Path(directory.name)
+        # Keep these tests off the real keychain: a fake security(1) logs each
+        # deletion and reports one remaining test entry, then none (exit 44).
+        self.security_calls = self.base / "security-calls"
+        self.executable(
+            "import sys\n"
+            f"with open({str(self.security_calls)!r}, 'a') as log:\n"
+            "    log.write(' '.join(sys.argv[1:]) + '\\n')\n"
+            f"sys.exit(0 if len(open({str(self.security_calls)!r}).readlines()) == 1 else 44)\n",
+            name="security",
+        )
+        self.env = dict(os.environ, PATH=str(self.base) + os.pathsep + os.environ["PATH"])
 
     def executable(self, body, name="e2e"):
         filename = self.base / name
@@ -41,7 +52,7 @@ class PairingConcurrencyTests(unittest.TestCase):
             f"print(json.dumps({artifact!r}))\n",
             name="cargo",
         )
-        return dict(os.environ, PATH=str(self.base) + os.pathsep + os.environ["PATH"])
+        return self.env
 
     def invoke(self, executable=None, timeout=5, env=None):
         args = [
@@ -50,7 +61,9 @@ class PairingConcurrencyTests(unittest.TestCase):
         ]
         if executable is not None:
             args += ["--executable", str(executable)]
-        completed = subprocess.run(args, capture_output=True, text=True, timeout=15, env=env)
+        completed = subprocess.run(
+            args, capture_output=True, text=True, timeout=15, env=self.env if env is None else env,
+        )
         report_file = self.base / "logs/report.json"
         self.assertTrue(report_file.is_file(), completed.stderr)
         return completed, json.loads(report_file.read_text())
@@ -78,25 +91,42 @@ class PairingConcurrencyTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "darwin", "only macOS runs use the native keychain")
     def test_removes_every_test_service_entry_and_nothing_else(self):
-        calls = self.base / "security-calls"
-        # Two entries exist; the third deletion finds none and fails, as security does.
-        self.executable(
-            "import sys\n"
-            f"log = open({str(calls)!r}, 'a')\n"
-            "log.write(' '.join(sys.argv[1:]) + '\\n')\n"
-            "log.close()\n"
-            f"sys.exit(0 if len(open({str(calls)!r}).readlines()) <= 2 else 44)\n",
-            name="security",
-        )
-        binary = self.executable("print('suite ran')\n")
-        env = dict(os.environ, PATH=str(self.base) + os.pathsep + os.environ["PATH"])
-        completed, report = self.invoke(binary, env=env)
+        completed, report = self.invoke(self.executable("print('suite ran')\n"))
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(report["test_keychain_entries_removed"], 2)
+        self.assertEqual(report["test_keychain_entries_removed"], 1)
         self.assertEqual(
-            calls.read_text().splitlines(),
-            ["delete-generic-password -s dev.clipsync.test"] * 3,
+            self.security_calls.read_text().splitlines(),
+            ["delete-generic-password -s dev.clipsync.test"] * 2,
         )
+
+    @unittest.skipUnless(sys.platform == "darwin", "only macOS runs use the native keychain")
+    def test_passing_suites_that_never_reached_the_keychain_fail(self):
+        self.security_calls.write_text("already empty\n")
+        completed, report = self.invoke(self.executable("print('suite ran')\n"))
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(report["test_keychain_entries_removed"], 0)
+        self.assertIn("opt-in had no effect", report["error"])
+
+    @unittest.skipUnless(sys.platform == "darwin", "only macOS runs use the native keychain")
+    def test_a_keychain_that_refuses_deletion_fails_the_run(self):
+        self.executable("import sys\nsys.exit(51)\n", name="security")
+        completed, report = self.invoke(self.executable("print('suite ran')\n"))
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("exit 51", report["keychain_cleanup_error"])
+
+    def test_opt_in_names_match_clipsync_storage(self):
+        harness = (SCRIPT.parent / "test-pairing-concurrency.py").read_text()
+        storage = (SCRIPT.parents[1] / "crates/clipsync-storage/src/secrets.rs").read_text()
+        for name, value in [
+            ("TEST_NATIVE_KEYCHAIN_ENV", "CLIPSYNC_TEST_NATIVE_KEYCHAIN"),
+            ("TEST_NATIVE_KEYCHAIN_OPT_IN", "1"),
+            ("TEST_KEYCHAIN_SERVICE", "dev.clipsync.test"),
+        ]:
+            with self.subTest(name=name):
+                self.assertIn(f'const {name}: &str = "{value}";', storage)
+                self.assertIn(f'"{value}"', harness)
 
     def test_timeout_kills_and_reaps_all_three_children(self):
         binary = self.executable("import time\ntime.sleep(60)\n")
