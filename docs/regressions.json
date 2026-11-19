@@ -2237,6 +2237,2623 @@
         }
       ],
       "notes": "On unchanged 76c63f9 the focused HTTP sweep failed with \"wrong-code sweep was never throttled\": every unknown code returned 404, record_ip_fail had no caller and the correct code then joined. Every failed join now reserves per-client and relay-wide budget before the lookup; the relay-wide check bounds distributed guessing. Pre-merge review variants of the same invariant (one shared budget behind the Proxmox Cloudflare Tunnel, and an opaque client-written X-Forwarded-For hop) have their own focused tests in the same PR and are not counted as separate defects because no released code contained them."
+    },
+    {
+      "id": "F109",
+      "kind": "Runtime",
+      "fixes": [
+        "22671a15e1c76124b42232842cf279a57eaadc2f"
+      ],
+      "description": "Relay routes and queued text were keyed only by device ID, so an unauthenticated pairing socket or another room naming a member's device ID could take over or shadow its room route",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/connection_registry.rs",
+          "package": "clipsync-relay",
+          "target": "test:connection_registry",
+          "test": "pairing_token_for_a_member_device_id_cannot_take_over_its_room_route",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/connection_registry.rs",
+          "package": "clipsync-relay",
+          "target": "test:connection_registry",
+          "test": "same_device_id_in_another_room_cannot_shadow_a_member_route",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/connection_registry.rs",
+          "package": "clipsync-relay",
+          "target": "test:connection_registry",
+          "test": "queued_text_for_a_device_id_is_scoped_to_its_room",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/connection_registry.rs",
+          "package": "clipsync-relay",
+          "target": "test:connection_registry",
+          "test": "pairing_socket_kept_open_after_completion_cannot_send_room_traffic",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/connection_registry.rs",
+          "package": "clipsync-relay",
+          "target": "test:connection_registry",
+          "test": "every_socket_of_a_member_gets_room_traffic_and_closes_independently",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/connection_registry.rs",
+          "package": "clipsync-relay",
+          "target": "test:connection_registry",
+          "test": "a_member_past_the_socket_cap_loses_only_its_oldest_socket",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/connection_registry.rs",
+          "package": "clipsync-relay",
+          "target": "test:connection_registry",
+          "test": "revocation_closes_every_socket_of_the_member_and_none_can_send",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/e2e.rs",
+          "package": "clipsync-relay",
+          "target": "test:e2e",
+          "test": "oneshot_pull_works_while_the_device_daemon_session_reconnects",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/e2e.rs",
+          "package": "clipsync-relay",
+          "target": "test:e2e",
+          "test": "multi_chunk_oneshot_push_works_while_the_device_daemon_session_reconnects",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "On master before the fix, the four hijack/scoping tests in connection_registry.rs failed on the misrouting itself: the member never received text, another room's ciphertext replaced its queued text, and a completed pairing socket could still send room traffic. The two e2e and three multi-socket registry tests were written for review findings on the same unmerged change (one device's daemon and one-shot sockets evicting each other) and failed on its intermediate head 5fec359; they are variants of the per-room authenticated-membership invariant, not separate defects. Payloads stayed end-to-end encrypted; the defect was traffic redirection and targeted denial of service."
+    },
+    {
+      "id": "F110",
+      "kind": "Runtime",
+      "fixes": [
+        "22671a15e1c76124b42232842cf279a57eaadc2f"
+      ],
+      "description": "A silent or stalled member socket kept the member online and blocked delivery: text acked as delivered into a half-open socket was lost, and an evicted socket with a full queue never closed",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/ws_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "ws::tests::liveness::a_silent_socket_is_dropped_so_text_is_queued_once_the_live_socket_quits",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/ws_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "ws::tests::liveness::stalled_older_sockets_delay_one_delivery_by_one_stall_timeout_in_total",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/ws_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "ws::tests::liveness::an_evicted_socket_with_a_full_queue_closes_and_frees_its_resources",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "The three liveness tests failed with the production sources at a5875f9: peer_left never came for a silent socket, delivery waited on each stalled older socket in turn, and an evicted socket with a full outbound queue never closed or released its frames. The single-socket relay acked text Delivered into a half-open socket left behind by sleep or network change; multi-socket stall variants of the same unbounded-liveness defect found in review are not counted separately."
+    },
+    {
+      "id": "F111",
+      "kind": "Runtime",
+      "fixes": [
+        "22671a15e1c76124b42232842cf279a57eaadc2f"
+      ],
+      "description": "Concurrent or retried commits of one transfer ID shared staging state, so stale files survived a retry, a cancelled commit left a partial directory, and receivers could retire each other's published files",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/tests/regressions.rs",
+          "package": "clipsync-transfer",
+          "target": "test:regressions",
+          "test": "regression_concurrent_receivers_of_one_transfer_keep_each_others_files",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/tests/regressions.rs",
+          "package": "clipsync-transfer",
+          "target": "test:regressions",
+          "test": "regression_retry_with_a_different_file_list_publishes_only_the_new_manifest",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/tests/regressions.rs",
+          "package": "clipsync-transfer",
+          "target": "test:regressions",
+          "test": "regression_cancelled_commit_leaves_no_partial_directory",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/src/staging.rs",
+          "package": "clipsync-transfer",
+          "target": "lib:clipsync_transfer",
+          "test": "staging::tests::publication_waits_for_the_inbox_publish_lock",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/src/staging.rs",
+          "package": "clipsync-transfer",
+          "target": "lib:clipsync_transfer",
+          "test": "staging::tests::an_interrupted_replacement_is_restored_and_finished_ones_are_removed",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/src/staging.rs",
+          "package": "clipsync-transfer",
+          "target": "lib:clipsync_transfer",
+          "test": "staging::tests::abandoned_staging_is_reclaimed_before_a_commit_writes_its_own",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/src/staging.rs",
+          "package": "clipsync-transfer",
+          "target": "lib:clipsync_transfer",
+          "test": "staging::tests::foreign_partial_markers_blocked_destinations_and_unsafe_names_leave_existing_data_intact",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/src/staging.rs",
+          "package": "clipsync-transfer",
+          "target": "lib:clipsync_transfer",
+          "test": "staging::tests::publish_lock_excludes_a_second_handle_until_released",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/src/staging.rs",
+          "package": "clipsync-transfer",
+          "target": "lib:clipsync_transfer",
+          "test": "staging::tests::a_symlinked_publish_lock_is_not_followed_and_fails_the_commit",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        }
+      ],
+      "notes": "Each registered staging test was written first and failed on the PR head before its fix: shared partial directory before 799f827, stale draft/notes files surviving a retry and a leftover .partial on 799f827, unlocked publication on 0b3f655, an interrupted replacement on 8b6d9f6, staging written before reclaim on 87229c7 and a followed .publish.lock symlink on 0759a10. A file at the destination being replaced by a directory rename failed on Windows. Concurrent receivers became reachable when every routed socket of a member receives transfers (F109); retry and cancellation variants existed before. These are variants of one commit-atomicity invariant."
+    },
+    {
+      "id": "F112",
+      "kind": "Runtime",
+      "fixes": [
+        "22671a15e1c76124b42232842cf279a57eaadc2f"
+      ],
+      "description": "Received manifest names that the destination filesystem folds to one entry (case-only differences, precomposed and decomposed Unicode) overwrote each other instead of being rejected",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/tests/regressions.rs",
+          "package": "clipsync-transfer",
+          "target": "test:regressions",
+          "test": "regression_names_differing_only_by_case_are_rejected",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/tests/regressions.rs",
+          "package": "clipsync-transfer",
+          "target": "test:regressions",
+          "test": "regression_names_one_filesystem_entry_would_share_are_rejected",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Both tests failed on 0b3f655/0759a10 on APFS: two case-colliding files were committed into one entry, and two Unicode spellings shared one directory entry. F37 rejects byte-identical duplicates only; this row is the distinct filesystem-folding failure. The normalization test asserts rejection only where the filesystem merges the names and otherwise checks each path keeps its own bytes."
+    },
+    {
+      "id": "F113",
+      "kind": "Runtime",
+      "fixes": [
+        "22671a15e1c76124b42232842cf279a57eaadc2f"
+      ],
+      "description": "Manifest file sizes were summed without overflow checks, so a wrapping manifest panicked instead of failing integrity validation",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/tests/regressions.rs",
+          "package": "clipsync-transfer",
+          "target": "test:regressions",
+          "test": "regression_overflowing_file_sizes_are_rejected_without_panicking",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Failed on 0b3f655 with an attempt to add with overflow panic; checked addition now returns an integrity error before any file is written."
+    },
+    {
+      "id": "F114",
+      "kind": "Runtime",
+      "fixes": [
+        "2431cc30bcb7bc4a9f30ce68c670f1f7f61a9615"
+      ],
+      "description": "Envelope AEAD did not authenticate routing headers and receivers never checked expiry or addressing, so a relay could rewrite room, sender, recipient, kind or lifetime and still have the envelope accepted",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/tests/support/envelope_security.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "engine::behavior_tests::envelope_security::expired_and_misaddressed_text_envelopes_never_reach_the_clipboard",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/tests/support/envelope_security.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "engine::behavior_tests::envelope_security::header_checks_cover_addressing_lifetime_and_frame_kind",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/tests/support/envelope_security.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "engine::behavior_tests::envelope_security::relay_rewritten_routing_fields_are_rejected",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/tests/support/envelope_security.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "engine::behavior_tests::envelope_security::tampering_any_authenticated_routing_field_fails_text_and_manifest_decryption",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-protocol/src/envelope.rs",
+          "package": "clipsync-protocol",
+          "target": "lib:clipsync_protocol",
+          "test": "envelope::tests::authenticated_aad_changes_with_every_routing_field_and_frame",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/src/lib.rs",
+          "package": "clipsync-transfer",
+          "target": "lib:clipsync_transfer",
+          "test": "tests::authenticated_chunks_reject_any_routing_or_frame_header_change",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/tests/support/envelope_security.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "engine::behavior_tests::envelope_security::legacy_envelopes_are_accepted_until_the_sender_upgrades_then_refused_across_restarts",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/tests/support/envelope_security.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "engine::behavior_tests::envelope_security::updated_and_released_clients_keep_syncing_both_ways_without_configuration",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/tests/support/envelope_security.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "engine::behavior_tests::envelope_security::an_updated_initiator_completes_the_handshake_with_a_released_responder",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/tests/support/envelope_security.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "engine::behavior_tests::envelope_security::strict_mode_refuses_every_legacy_envelope",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/tests/support/envelope_security.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "engine::behavior_tests::envelope_security::updated_clients_converge_on_v2_through_the_handshake_in_either_start_order",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/handshake.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "handshake::tests::unpinned_tampered_or_garbage_handshakes_complete_nothing",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/tests/support/envelope_security.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "engine::behavior_tests::envelope_security::extreme_header_timestamps_are_rejected_without_panicking",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "In the first revision the expired/misaddressed and relay-rewritten-header regressions failed on unchanged code (accepted counts \"4\" vs \"1\" and \"2\" vs \"1\"). Envelope v2 binds the canonical routing header and frame tag into text, manifest and chunk AAD. The transition, downgrade, handshake-convergence and timestamp-overflow tests protect the same authenticated-header invariant across released v1 peers and were added for review of the unmerged change; they are not separate defects. Released v1 envelopes keep the receiver checks on unauthenticated values."
+    },
+    {
+      "id": "F115",
+      "kind": "Runtime",
+      "fixes": [
+        "2431cc30bcb7bc4a9f30ce68c670f1f7f61a9615"
+      ],
+      "description": "Replay protection was an in-memory 120-second message-ID cache, so a relay could replay a recorded envelope after the window or after a receiver restart and overwrite the clipboard",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/tests/support/envelope_security.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "engine::behavior_tests::envelope_security::replayed_text_is_rejected_within_the_session_and_after_a_restart",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/tests/support/envelope_security.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "engine::behavior_tests::envelope_security::replays_are_rejected_without_the_memory_cache_and_after_reopening_the_store",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/src/replay.rs",
+          "package": "clipsync-storage",
+          "target": "lib:clipsync_storage",
+          "test": "replay::tests::accepted_sequence_numbers_survive_reopening_the_store",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/src/replay.rs",
+          "package": "clipsync-storage",
+          "target": "lib:clipsync_storage",
+          "test": "replay::tests::send_sequence_is_monotonic_across_restarts_clock_steps_and_lost_state",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/src/replay.rs",
+          "package": "clipsync-storage",
+          "target": "lib:clipsync_storage",
+          "test": "replay::tests::concurrent_stores_on_one_directory_do_not_lose_replay_updates",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/src/replay.rs",
+          "package": "clipsync-storage",
+          "target": "lib:clipsync_storage",
+          "test": "replay::tests::replay_lock_excludes_other_handles_until_released",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/tests/support/envelope_security.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "engine::behavior_tests::envelope_security::concurrent_stamps_never_send_v1_after_v2_went_into_the_room",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "The replay-after-restart regression failed on unchanged code (\"2\" vs \"1\"). The highest authenticated v2 seq per room and sender is persisted privately and committed only after AEAD succeeds. The monotonic-seq, cross-process lock and send-version-under-lock tests cover review findings on the same unmerged replay store (concurrent daemon/one-shot updates could roll back highest_seq) and are counted as one replay-persistence defect."
+    },
+    {
+      "id": "F116",
+      "kind": "Runtime",
+      "fixes": [
+        "6662fff05d94456b286049bf8e97ae869583f5d8"
+      ],
+      "description": "Pairing committed without an out-of-band verification code, so a relay running SPAKE2 with each device, or anyone who guessed the code, paired silently and held the room keys",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-crypto/src/pairing.rs",
+          "package": "clipsync-crypto",
+          "target": "lib:clipsync_crypto",
+          "test": "pairing::tests::honest_peers_derive_the_same_sas",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-crypto/src/pairing.rs",
+          "package": "clipsync-crypto",
+          "target": "lib:clipsync_crypto",
+          "test": "pairing::tests::relay_mitm_with_the_code_yields_different_sas_on_each_device",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-crypto/src/pairing.rs",
+          "package": "clipsync-crypto",
+          "target": "lib:clipsync_crypto",
+          "test": "pairing::tests::wrong_peer_with_a_guessed_code_yields_a_different_sas",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-crypto/src/pairing.rs",
+          "package": "clipsync-crypto",
+          "target": "lib:clipsync_crypto",
+          "test": "pairing::tests::sas_derivation_matches_independent_hkdf_vector",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-crypto/src/pairing.rs",
+          "package": "clipsync-crypto",
+          "target": "lib:clipsync_crypto",
+          "test": "pairing::tests::sas_rendering_zero_pads_and_reduces_the_leading_bytes",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-crypto/src/pairing.rs",
+          "package": "clipsync-crypto",
+          "target": "lib:clipsync_crypto",
+          "test": "pairing::tests::seeded_pairing_pins_the_end_to_end_sas_vector",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::pairing_commits_only_after_the_user_confirms_a_matching_sas",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::rejected_sas_sends_no_binding_and_stores_no_room_keys_or_credentials",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::peer_rejection_after_our_confirmation_ends_pairing_promptly",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::unanswered_sas_prompt_times_out_without_storing_anything",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::sas_check_matching_ignores_grouping_and_rejects_empty_input",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/src/store.rs",
+          "package": "clipsync-storage",
+          "target": "lib:clipsync_storage",
+          "test": "store::failure_tests::pairing_file_updates_are_serialized_so_an_answer_is_never_lost",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::answers_accept_the_matching_code_and_yes_only_at_a_terminal",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::terminal_confirmer_fails_closed_without_a_terminal_answer_unless_skipped",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::background_confirmer_rejects_requests_it_does_not_own",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::background_confirmer_publishes_the_code_and_accepts_only_its_confirmation",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::background_confirmer_stops_on_a_rejection_or_a_removed_request",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::room_confirm_explains_requests_it_cannot_answer",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::room_confirm_accepts_only_the_digits_shown_on_the_other_device",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::room_confirm_records_a_mismatch_as_a_rejection",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::room_confirm_waits_for_a_joiner_then_reports_the_worker_outcome",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::room_confirm_reports_a_worker_that_fails_stops_or_is_cancelled",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::room_reject_before_a_joiner_records_the_rejection_at_once",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::room_reject_waits_for_the_worker_and_reasserts_a_dropped_rejection",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::room_reject_reports_a_pairing_that_completed_first_or_was_removed",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::room_confirm_prompt_ends_when_the_pairing_does",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::room_confirm_prompt_answer_still_reaches_the_worker",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::discarding_pending_input_drops_lines_typed_before_the_prompt",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::discarding_pending_input_fails_for_a_handle_that_is_not_a_console",
+          "platforms": [
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/pairing_bg.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "pairing_bg::tests::a_live_background_pairing_blocks_a_new_create_with_its_next_step",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/pairing_bg.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "pairing_bg::tests::worker_log_errors_prefer_the_last_relay_or_error_line",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/tests/background_create.rs",
+          "package": "clipsync-cli",
+          "target": "test:background_create",
+          "test": "mismatched_or_rejected_verification_codes_store_nothing_on_either_device",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/tests/background_create.rs",
+          "package": "clipsync-cli",
+          "target": "test:background_create",
+          "test": "piped_yes_does_not_confirm_a_join",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/tests/background_create.rs",
+          "package": "clipsync-cli",
+          "target": "test:background_create",
+          "test": "rejecting_before_a_join_lets_a_new_room_create_replace_the_pairing",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/tests/background_create.rs",
+          "package": "clipsync-cli",
+          "target": "test:background_create",
+          "test": "yes_typed_before_the_code_is_shown_does_not_confirm_room_confirm",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/tests/background_create.rs",
+          "package": "clipsync-cli",
+          "target": "test:background_create",
+          "test": "yes_typed_after_the_code_is_shown_confirms_room_confirm",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/tests/background_create.rs",
+          "package": "clipsync-cli",
+          "target": "test:background_create",
+          "test": "yes_typed_before_the_code_is_shown_does_not_confirm_room_join",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/tests/sas_terminal.rs",
+          "package": "clipsync-cli",
+          "target": "test:sas_terminal",
+          "test": "prompt_ends_without_input_when_the_pairing_ends",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-desktop/src/lib.rs",
+          "package": "clipsync-desktop",
+          "target": "lib:clipsync_desktop",
+          "test": "tests::window_confirmer_forwards_the_check_and_rejects_unanswered_prompts",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-desktop/src/main.rs",
+          "package": "clipsync-desktop",
+          "target": "bin:clipsync-desktop",
+          "test": "tests::headless_sas_prompt_shows_code_and_peer_and_reports_the_answer",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-desktop/src/main.rs",
+          "package": "clipsync-desktop",
+          "target": "bin:clipsync-desktop",
+          "test": "tests::prompts_close_when_their_pairing_ends_without_an_answer",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-mobile/src/lib.rs",
+          "package": "clipsync-mobile",
+          "target": "lib:clipsync_mobile",
+          "test": "tests::ended_pairings_tell_the_host_to_dismiss_an_unanswered_prompt",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/e2e.rs",
+          "package": "clipsync-relay",
+          "target": "test:e2e",
+          "test": "real_relay_pairing_shows_both_devices_the_same_sas_and_names",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/e2e.rs",
+          "package": "clipsync-relay",
+          "target": "test:e2e",
+          "test": "rejected_sas_leaves_both_devices_without_room_keys_or_credentials",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/e2e.rs",
+          "package": "clipsync-relay",
+          "target": "test:e2e",
+          "test": "joiner_rejection_after_creator_confirmed_ends_the_creator_promptly",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Registered tests cover the SAS derivation and independent vectors, commit-only-after-confirmation and nothing-stored-on-reject/timeout in core, every CLI confirmation path (terminal, background worker, room confirm/reject, piped and type-ahead answers), desktop and mobile prompts, and the real-relay e2e exchange. Review findings on the unmerged change (room confirm yes pre-approving an unseen code, type-ahead yes, a lost early rejection, prompts outliving the pairing, an exited worker) were written first against the previous head and are variants of this defect. Unix pty tests and the Windows console flush check are platform scoped. pairing_file_updates_are_serialized_so_an_answer_is_never_lost protects the confirmation handoff."
+    },
+    {
+      "id": "F117",
+      "kind": "Runtime",
+      "fixes": [
+        "6662fff05d94456b286049bf8e97ae869583f5d8"
+      ],
+      "description": "Relay-supplied peer names, error text, pairing codes and identifiers were accepted unvalidated and printed raw, so terminal escapes, bidi controls or wrapping text could forge a displayed code line",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/untrusted_text.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "untrusted_text::tests::hostile_text_is_shown_inert",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/untrusted_text.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "untrusted_text::tests::ordinary_names_are_unchanged",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/untrusted_text.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "untrusted_text::tests::long_text_is_cut_to_the_bound_and_sanitizing_twice_changes_nothing",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/untrusted_text.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "untrusted_text::tests::blank_and_invisible_characters_are_shown_as_escapes",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/untrusted_text.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "untrusted_text::tests::width_is_bounded_in_terminal_columns_not_characters",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/untrusted_text.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "untrusted_text::tests::stacked_combining_marks_are_capped_per_base_character",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/untrusted_text.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "untrusted_text::tests::identifiers_are_printed_only_when_plain",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::a_relay_cannot_rename_the_peer_after_spake2_started",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::joiner_shows_the_creator_name_inert_and_refuses_a_late_rename",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::relay_codes_and_ids_that_could_reach_the_terminal_are_refused",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::a_completion_for_another_room_stores_nothing",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::hostile_peer_names_never_share_or_follow_the_code_line",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::peer_names_cannot_wrap_into_a_forged_code_row",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/tests/sas_terminal.rs",
+          "package": "clipsync-cli",
+          "target": "test:sas_terminal",
+          "test": "hostile_peer_name_is_shown_inert_and_never_shares_the_code_line",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-desktop/src/main.rs",
+          "package": "clipsync-desktop",
+          "target": "bin:clipsync-desktop",
+          "test": "tests::headless_sas_prompt_shows_a_hostile_peer_name_inert",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-mobile/src/lib.rs",
+          "package": "clipsync-mobile",
+          "target": "lib:clipsync_mobile",
+          "test": "tests::hostile_peer_names_reach_the_host_inert",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "The hostile relay-reported name and error tests and the pty hostile-name test were written first and failed on the previous head. Released clipsync devices and error output also printed relay-supplied strings raw. Display sanitization, the column bound, combining-mark cap, pinned peer identity before SPAKE2, plain-identifier and six-digit code validation and the matching pairing_complete room are variants of one untrusted-text invariant. The 26-29 column wrap residual is documented in docs/security.md."
+    },
+    {
+      "id": "F118",
+      "kind": "Runtime",
+      "fixes": [
+        "6662fff05d94456b286049bf8e97ae869583f5d8"
+      ],
+      "description": "Reading the device identity re-saved config.toml, so a status read racing a pairing in another process restored the old configuration and left sync disabled",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/lib.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "regression_tests::reading_the_identity_leaves_the_configuration_file_untouched",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "App::identity() ran init, which loaded and saved config.toml on every command. The regression was written first and failed on b30977d with the configuration rewritten; the mobile verified-pairing test failed 3 of 12 runs locally before 590df24 and 15 of 15 passed after. This lost update is a plausible product cause of the earlier F94 fixture symptom; F94 is left unchanged."
+    },
+    {
+      "id": "F119",
+      "kind": "Runtime",
+      "fixes": [
+        "6662fff05d94456b286049bf8e97ae869583f5d8"
+      ],
+      "description": "Local storage reads and replaces failed when another process removed or held the file: an exists-then-read race reported an error for a removed pairing file, and Windows sharing violations surfaced as access denied",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/src/store.rs",
+          "package": "clipsync-storage",
+          "target": "lib:clipsync_storage",
+          "test": "store::failure_tests::a_pairing_file_removed_while_it_is_read_reads_as_no_pairing",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/src/store.rs",
+          "package": "clipsync-storage",
+          "target": "lib:clipsync_storage",
+          "test": "store::failure_tests::a_pairing_file_that_stays_delete_pending_is_an_error_after_bounded_retries",
+          "platforms": [
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/src/secrets.rs",
+          "package": "clipsync-storage",
+          "target": "lib:clipsync_storage",
+          "test": "secrets::file_failure_tests::a_private_file_open_in_another_reader_is_replaced_once_the_reader_closes",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/src/secrets.rs",
+          "package": "clipsync-storage",
+          "target": "lib:clipsync_storage",
+          "test": "secrets::file_failure_tests::a_private_file_that_stays_open_keeps_its_contents_after_bounded_retries",
+          "platforms": [
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/src/sharing.rs",
+          "package": "clipsync-storage",
+          "target": "lib:clipsync_storage",
+          "test": "sharing::tests::access_denied_is_retried_until_the_file_is_gone",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/src/sharing.rs",
+          "package": "clipsync-storage",
+          "target": "lib:clipsync_storage",
+          "test": "sharing::tests::access_denied_that_outlasts_the_retries_is_returned",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/src/sharing.rs",
+          "package": "clipsync-storage",
+          "target": "lib:clipsync_storage",
+          "test": "sharing::tests::a_retried_operation_returns_the_first_success",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/src/sharing.rs",
+          "package": "clipsync-storage",
+          "target": "lib:clipsync_storage",
+          "test": "sharing::tests::other_read_errors_are_returned_without_a_retry",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/src/sharing.rs",
+          "package": "clipsync-storage",
+          "target": "lib:clipsync_storage",
+          "test": "sharing::tests::access_denied_is_returned_at_once_outside_windows",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        }
+      ],
+      "notes": "a_pairing_file_removed_while_it_is_read_reads_as_no_pairing failed on 8379e7f with os error 2 and now holds the file open while deleting it (FILE_FLAG_DELETE_ON_CLOSE on Windows). The Windows replace-while-open and delete-pending tests assert the first refusal and bounded retries; the scripted sharing.rs tests pin the retry helper on every platform and the immediate return outside Windows. Windows CI failed 2 of 4 and 1 of 4 runs before these fixes and passed 6 of 6 after."
+    },
+    {
+      "id": "F120",
+      "kind": "Runtime",
+      "fixes": [
+        "6662fff05d94456b286049bf8e97ae869583f5d8"
+      ],
+      "description": "A closing relay connection dropped its socket immediately after its Close frame, so a reset caused by unread input could discard frames sent just before, such as a pairing abort error",
+      "checks": [],
+      "notes": "CI showed a peer that saw the SAS rejection notice but no error frame (macOS) or a connection reset (Windows). The connection now reads until the peer answers the close, bounded by CLOSE_HANDSHAKE_WAIT. The same commit was carried into #35 as 09049e9; a cherry-pick is not another defect. No run count isolates this fix: the 5-of-96 rejection failures #35 measured belong to its separate commitment-abort flush. No deterministic focused transport regression has been added, so this row is conservatively uncredited, as the load-dependent Runtime row F107 is."
+    },
+    {
+      "id": "F121",
+      "kind": "Runtime",
+      "fixes": [
+        "0937556e9b0f975b1abff78e89b23d9947b40828"
+      ],
+      "description": "Unauthenticated pairing creation was unlimited, so one client could reserve most of the 6-digit code space within a pairing TTL and make code allocation fail for every user",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/state_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "state::tests::pairing_creation_is_rate_limited_per_client_and_relay_wide",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/state_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "state::tests::open_pairing_sessions_are_capped_well_below_the_code_space",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/state_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "state::tests::ipv6_pairing_creation_is_also_limited_per_48_site",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "Focused probes on unchanged 731b0bf accepted 21 creations from one address and a 1,001st open session. Per-client, IPv6 /48 and relay-wide creation budgets reuse the F108 limiter, and open sessions are capped at 0.1% of the code space."
+    },
+    {
+      "id": "F122",
+      "kind": "Runtime",
+      "fixes": [
+        "0937556e9b0f975b1abff78e89b23d9947b40828"
+      ],
+      "description": "Relay state grew without bound: pairing_by_id was never pruned, rooms were never removed, and the offline text queue kept entries until a sender-chosen expiry",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/state_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "state::tests::gc_prunes_pairing_by_id_with_expired_completed_and_aborted_sessions",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/state_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "state::tests::regression_filled_room_cap_never_blocks_a_fresh_pairing",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/state_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "state::tests::rooms_with_a_device_online_are_never_evicted",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/state_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "state::tests::room_eviction_follows_least_recent_use",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/state_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "state::tests::regression_one_client_cannot_fill_the_relay_wide_offline_queue",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/ws_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "ws::tests::regression_a_client_with_many_rooms_gets_only_its_share_of_the_offline_queue",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/state_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "state::tests::a_room_stays_unevictable_until_its_members_last_socket_closes",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "On unchanged 731b0bf pairing_by_id kept an expired session after GC; on 128ef02 a fresh client was refused at a full room cap after GC. The bounded design's own attacks found in review (filling the room cap with self-paired rooms, one client filling the relay-wide offline queue, evicting a room with a device online) are variants of the same bounded-state invariant."
+    },
+    {
+      "id": "F123",
+      "kind": "Runtime",
+      "fixes": [
+        "0937556e9b0f975b1abff78e89b23d9947b40828"
+      ],
+      "description": "WebSocket connections were unlimited per client and relay-wide, and a pre-hello socket that never read its replies blocked its read loop past the hello deadline and held its slot",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/http_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "http_tests::websocket_connections_past_the_client_and_relay_caps_are_refused",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/http_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "http_tests::a_newcomer_evicts_the_oldest_unauthenticated_socket_instead_of_being_refused",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/ws_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "ws::tests::regression_unauthenticated_socket_that_never_reads_still_meets_its_hello_deadline",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/ws_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "ws::tests::regression_a_valid_hello_on_a_full_queue_never_blocks",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/ws_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "ws::tests::a_pairing_socket_stays_evictable_after_its_hello",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/connection_limits_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "connection_limits::tests::regression_pre_hello_sockets_cannot_fill_the_relay_once_members_hold_the_reserve",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/ws_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "ws::tests::regression_a_closing_pairing_socket_never_waits_on_a_stalled_peer",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/ws_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "ws::tests::regression_a_member_hello_never_waits_on_a_peer_with_a_full_queue",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/ws_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "ws::tests::a_pairing_socket_stalled_on_its_peer_closes_at_its_deadline",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/ws_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "ws::tests::a_pairing_socket_stalled_on_its_peer_closes_when_evicted",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/ws_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "ws::tests::a_silent_pairing_socket_is_closed_after_the_read_idle_limit",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "On unchanged 731b0bf a 33rd socket from one address was accepted; on 128ef02 a never-reading pre-hello socket held its slot 10 s past a 25 s hello deadline. The kept regression drives read_loop deterministically with a full outbound queue. Non-member share, eviction and closing-socket variants were found in review of the unmerged change. The four ws::tests from #41 (ee36110, coverage only) pin the same read-loop deadlines and pairing-socket closing behavior after merge; they add checks, not a defect."
+    },
+    {
+      "id": "F124",
+      "kind": "Runtime",
+      "fixes": [
+        "c8d8434857afeddda926933d38e8463597d07498"
+      ],
+      "description": "The relay served /metrics to anyone on the client listener, exposing connection and pairing counters that revealed activity on a public relay",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/http_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "http_tests::metrics_route_is_absent_unless_explicitly_configured",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/http_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "http_tests::enabled_metrics_reject_missing_malformed_and_wrong_bearer_tokens",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/http_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "http_tests::enabled_metrics_serve_the_metrics_text_to_the_configured_bearer",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/binary_contract.rs",
+          "package": "clipsync-relay",
+          "target": "test:binary_contract",
+          "test": "relay_binary_serves_metrics_only_to_the_configured_bearer",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "/metrics is now absent unless configured and requires a bearer token of at least 32 bytes. The unit tests cover absent, missing, malformed and wrong tokens and the authorized scrape; the binary contract runs the real relay executable."
+    },
+    {
+      "id": "F125",
+      "kind": "Runtime",
+      "fixes": [
+        "ebd6f5e434b372dbab2eb24bea8cf68fb302ca58"
+      ],
+      "description": "Keychain-restored identity, the pairing wait file and the background pairing log were written with default permissions or through planted links, and the log recorded the live pairing code",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/src/secrets.rs",
+          "package": "clipsync-storage",
+          "target": "lib:clipsync_storage",
+          "test": "secrets::identity_cache_tests::keychain_restore_creates_a_private_regular_file_without_following_a_planted_link",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/src/store.rs",
+          "package": "clipsync-storage",
+          "target": "lib:clipsync_storage",
+          "test": "store::failure_tests::pairing_wait_is_written_privately_without_following_a_planted_temp_link",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/tests/background_create.rs",
+          "package": "clipsync-cli",
+          "target": "test:background_create",
+          "test": "background_worker_log_is_private_and_never_holds_the_pairing_code",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        }
+      ],
+      "notes": "All three regressions failed on unchanged 76c63f9: the restored identity and the pairing wait were written through planted links, and the worker log held the code; with only the output fix it still failed on mode 0644. Unix-only because they assert POSIX modes and symlink handling."
+    },
+    {
+      "id": "F126",
+      "kind": "Runtime",
+      "fixes": [
+        "2664eca66854f266e12734b0cc53be77c0a8e1af"
+      ],
+      "description": "Clients accepted plaintext and scheme-less relay URLs to non-loopback hosts and followed relay redirects and ambient proxies, so pairing codes and traffic could leave the machine unencrypted",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transport/tests/relay_url_policy.rs",
+          "package": "clipsync-transport",
+          "target": "test:relay_url_policy",
+          "test": "plaintext_to_non_loopback_hosts_is_rejected_with_an_actionable_error",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transport/tests/relay_url_policy.rs",
+          "package": "clipsync-transport",
+          "target": "test:relay_url_policy",
+          "test": "scheme_less_and_unsupported_relay_urls_are_rejected_even_for_loopback",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transport/tests/relay_url_policy.rs",
+          "package": "clipsync-transport",
+          "target": "test:relay_url_policy",
+          "test": "connect_refuses_plaintext_before_opening_a_socket",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transport/tests/relay_url_policy.rs",
+          "package": "clipsync-transport",
+          "target": "test:relay_url_policy",
+          "test": "connect_dials_only_the_host_the_policy_classified",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transport/tests/url_contract.rs",
+          "package": "clipsync-transport",
+          "target": "test:url_contract",
+          "test": "scheme_less_relay_urls_are_never_downgraded_to_plaintext_websockets",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/tests/local_commands.rs",
+          "package": "clipsync-cli",
+          "target": "test:local_commands",
+          "test": "init_and_config_set_refuse_plaintext_relays_unless_loopback_or_opted_in",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transport/tests/relay_url_policy.rs",
+          "package": "clipsync-transport",
+          "target": "test:relay_url_policy",
+          "test": "non_canonical_hosts_are_rejected_when_the_url_is_checked",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::pairing_refuses_plaintext_relays_before_sending_the_code",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::pairing_never_follows_relay_redirects",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/lib.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "regression_tests::plaintext_relay_requests_bypass_ambient_proxies",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "On unchanged 76c63f9 a scheme-less URL was downgraded to ws:// and init accepted http://relay.example.test; the relay_url_policy suite did not compile because the policy API did not exist. Review follow-ups on 685a4f7 (pairing re-POSTed to a 307 target, a capturing proxy intercepting a loopback join, a non-canonical 0x7f.1 host) failed first and are variants of the same transport-policy defect."
+    },
+    {
+      "id": "F127",
+      "kind": "Runtime",
+      "fixes": [
+        "1a62572737d4c592d7dc9a8fc87befb5419f8fd5"
+      ],
+      "description": "Desktop notifications interpolated clipboard-derived text into AppleScript and PowerShell source and passed it to notify-send without ending option parsing, allowing script and option injection",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/notify.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "notify::command_tests::macos_notification_passes_text_as_argv_to_a_constant_applescript",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/notify.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "notify::command_tests::linux_notification_ends_option_parsing_before_user_text",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/notify.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "notify::command_tests::windows_notification_reads_text_from_environment_in_a_constant_script",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "All three command-builder regressions failed on the previous construction after a behavior-preserving extract and pin the program, full argv and environment for nine hostile title/body strings. Each builder is a pure function exercised on every CI platform; only the send path is target-specific."
+    },
+    {
+      "id": "F128",
+      "kind": "Runtime",
+      "fixes": [
+        "5348f35fddc644a64c6611d910d74db0cdf6fc19"
+      ],
+      "description": "Wire identifiers were not validated at decode, so path separators, control characters or empty IDs reached relay routing and local room-key paths",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-protocol/tests/id_contract.rs",
+          "package": "clipsync-protocol",
+          "target": "test:id_contract",
+          "test": "wire_identifiers_reject_path_and_control_characters_at_decode",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-protocol/tests/id_contract.rs",
+          "package": "clipsync-protocol",
+          "target": "test:id_contract",
+          "test": "control_messages_carrying_unsafe_identifiers_do_not_decode",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/src/store.rs",
+          "package": "clipsync-storage",
+          "target": "lib:clipsync_storage",
+          "test": "store::failure_tests::room_key_paths_refuse_identifiers_that_are_not_file_name_components",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/src/http_tests.rs",
+          "package": "clipsync-relay",
+          "target": "lib:clipsync_relay",
+          "test": "http_tests::pairing_endpoints_reject_unsafe_wire_identifiers_with_bad_request",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "All four regressions failed on unchanged master: the protocol accepted an empty ID, a hostile peer_left decoded, storage read a secret outside its directory, and the relay returned 200 for ../../outside."
+    },
+    {
+      "id": "F129",
+      "kind": "Runtime",
+      "fixes": [
+        "ae09ad283ae9d52a91f8909b760a5cf81af5d673"
+      ],
+      "description": "The SAS exchange let a relay see the creator's SPAKE2 message before fixing its own, so it could search for messages that make both devices show matching codes",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-crypto/src/pairing.rs",
+          "package": "clipsync-crypto",
+          "target": "lib:clipsync_crypto",
+          "test": "pairing::tests::honest_committed_pairing_opens_the_commitment_and_derives_the_same_sas",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-crypto/src/pairing.rs",
+          "package": "clipsync-crypto",
+          "target": "lib:clipsync_crypto",
+          "test": "pairing::tests::a_relay_must_fix_its_message_before_it_sees_the_creators",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-crypto/src/pairing.rs",
+          "package": "clipsync-crypto",
+          "target": "lib:clipsync_crypto",
+          "test": "pairing::tests::commitment_binds_version_session_devices_role_and_message",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-crypto/src/pairing.rs",
+          "package": "clipsync-crypto",
+          "target": "lib:clipsync_crypto",
+          "test": "pairing::tests::commitment_matches_independent_sha256_vector",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-crypto/src/pairing.rs",
+          "package": "clipsync-crypto",
+          "target": "lib:clipsync_crypto",
+          "test": "pairing::tests::the_mode_is_an_input_to_the_sas",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-crypto/src/pairing.rs",
+          "package": "clipsync-crypto",
+          "target": "lib:clipsync_crypto",
+          "test": "pairing::tests::a_commitment_field_longer_than_its_length_prefix_is_refused",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-protocol/tests/pairing_commitment_wire.rs",
+          "package": "clipsync-protocol",
+          "target": "test:pairing_commitment_wire",
+          "test": "spake2_frames_stay_compatible_with_peers_and_relays_without_commitments",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::creator_sends_spake2_only_after_the_joiners_commitment",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::older_joiners_and_old_relays_pair_with_reduced_protection_shown",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::required_commitment_refuses_a_pairing_without_one_and_stores_nothing",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::a_commitment_that_does_not_open_aborts_and_stores_nothing",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::a_stripped_acknowledgement_alone_changes_the_sas",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/src/pairing.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "pairing::tests::joiner_commits_first_and_reveals_only_after_the_creators_message",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/pairing_order.rs",
+          "package": "clipsync-relay",
+          "target": "test:pairing_order",
+          "test": "regression_pairing_commitment_is_bounded_buffered_and_only_from_the_joiner",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-relay/tests/pairing_order.rs",
+          "package": "clipsync-relay",
+          "target": "test:pairing_order",
+          "test": "regression_buffered_creator_message_keeps_its_commitment_acknowledgement",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::the_confirmation_screen_states_whether_the_commitment_round_ran",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-desktop/src/main.rs",
+          "package": "clipsync-desktop",
+          "target": "bin:clipsync-desktop",
+          "test": "tests::headless_sas_prompt_states_reduced_protection_without_a_commitment",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-mobile/src/lib.rs",
+          "package": "clipsync-mobile",
+          "target": "lib:clipsync_mobile",
+          "test": "tests::the_host_is_told_whether_the_commitment_round_ran",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/tests/confirm_protection.rs",
+          "package": "clipsync-cli",
+          "target": "test:confirm_protection",
+          "test": "positional_confirm_under_reduced_protection_is_refused_without_acknowledgement",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/tests/confirm_protection.rs",
+          "package": "clipsync-cli",
+          "target": "test:confirm_protection",
+          "test": "positional_confirm_under_reduced_protection_pairs_once_acknowledged",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/tests/confirm_protection.rs",
+          "package": "clipsync-cli",
+          "target": "test:confirm_protection",
+          "test": "positional_confirm_under_full_protection_states_it_and_pairs",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/tests/confirm_protection.rs",
+          "package": "clipsync-cli",
+          "target": "test:confirm_protection",
+          "test": "piped_prompt_answer_under_reduced_protection_needs_acknowledgement",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::reduced_protection_counts_only_when_acknowledged",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::positional_confirm_under_reduced_protection_records_nothing",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/sas_prompt.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "sas_prompt::tests::terminal_prompt_under_reduced_protection_needs_a_person_or_the_flag",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/tests/sas_terminal.rs",
+          "package": "clipsync-cli",
+          "target": "test:sas_terminal",
+          "test": "reduced_protection_is_refused_when_the_announcement_missed_the_terminal",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        }
+      ],
+      "notes": "Tests were written first and did not build against the unchanged code (missing commitment API); disabling each core safeguard makes its named test fail. The joiner now commits to its SPAKE2 message before seeing the creator's, and the mode is an SAS input. The protection-on-every-confirmation and REDUCED-gate follow-ups (0a9f938, 37df04a) and the length-prefix refusal failed first or were mutation-checked and are variants of this defect. #28's SAS vector and e2e tests extended for committed mode remain registered on F116."
+    },
+    {
+      "id": "F130",
+      "kind": "Runtime",
+      "fixes": [
+        "ae09ad283ae9d52a91f8909b760a5cf81af5d673"
+      ],
+      "description": "config set stored false for any value of a boolean key that was not recognized, so a typo silently left a security opt-in such as pairing.require_commitment off",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/tests/config_contract.rs",
+          "package": "clipsync-storage",
+          "target": "test:config_contract",
+          "test": "boolean_keys_reject_values_that_are_not_an_explicit_boolean",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-storage/tests/config_contract.rs",
+          "package": "clipsync-storage",
+          "target": "test:config_contract",
+          "test": "supported_configuration_keys_roundtrip_and_unknown_keys_do_not_mutate",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "The regression failed on unchanged code (sync.enabled accepted an empty string). Boolean keys accept only explicit true/false spellings and a rejected value leaves the configuration unchanged; the extended round-trip contract covers the new keys. #35 also extended the broad engine test app_commands_use_real_ipc_and_persist_pause_config_and_status (listed there without a name) to report an invalid boolean as an invalid value; it is not separately registered because the focused contract test covers the defect."
+    },
+    {
+      "id": "F131",
+      "kind": "Runtime",
+      "fixes": [
+        "d94556aaefee181abdfee4797b79a67e7740741d",
+        "c97bc110eb43c39c4e4d5dbcb092523c5469559d"
+      ],
+      "description": "Files received over sync, pull output and pasteboard image sidecars were written without the macOS quarantine attribute, bypassing Gatekeeper checks on downloaded content",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/src/staging.rs",
+          "package": "clipsync-transfer",
+          "target": "lib:clipsync_transfer",
+          "test": "staging::tests::committed_files_carry_launch_services_quarantine_attribute",
+          "platforms": [
+            "macos"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/src/quarantine.rs",
+          "package": "clipsync-transfer",
+          "target": "lib:clipsync_transfer",
+          "test": "quarantine::tests::event_uuid_is_rfc9562_version_8_and_unique",
+          "platforms": [
+            "macos"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/src/quarantine.rs",
+          "package": "clipsync-transfer",
+          "target": "lib:clipsync_transfer",
+          "test": "quarantine::tests::mark_reports_failure_instead_of_panicking",
+          "platforms": [
+            "macos"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/src/quarantine.rs",
+          "package": "clipsync-transfer",
+          "target": "lib:clipsync_transfer",
+          "test": "quarantine::tests::value_of_distinguishes_absent_from_marked_and_marks_through_descriptors",
+          "platforms": [
+            "macos"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-core/tests/support/engine_behavior.rs",
+          "package": "clipsync-core",
+          "target": "lib:clipsync_core",
+          "test": "engine::behavior_tests::pull_output_files_carry_launch_services_quarantine_attribute",
+          "platforms": [
+            "macos"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-clipboard/src/stage.rs",
+          "package": "clipsync-clipboard",
+          "target": "lib:clipsync_clipboard",
+          "test": "stage::tests::staged_image_sidecar_carries_launch_services_quarantine_attribute",
+          "platforms": [
+            "macos"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-transfer/src/staging.rs",
+          "package": "clipsync-transfer",
+          "target": "lib:clipsync_transfer",
+          "test": "staging::tests::a_failed_replacement_marks_the_previous_commit_before_restoring_it",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        }
+      ],
+      "notes": "On unchanged code the inbox, pull output and pasteboard sidecar each lacked com.apple.quarantine. c97bc11 closes a gap in the same invariant from #36: a failed replacement restored the previous commit without backfilling quarantine first; its test failed with backfill on the published path instead of the retired directory. The rollback test runs on every platform and asserts the attribute on macOS."
+    },
+    {
+      "id": "F132",
+      "kind": "Build/CI",
+      "fixes": [
+        "298b7a0b63efc2abe4e8416d13b71e5eff45cb36"
+      ],
+      "description": "The live-presence engine fixture's scripted relay closed abruptly while a client heartbeat was unread, intermittently resetting the connection before hello",
+      "checks": [],
+      "notes": "Reproduced on unchanged 2431cc3: 4 of 200 and 5 of 400 sequential runs and 4 of 800 parallel runs failed with relay closed before hello after Io(ConnectionReset); 2,000 consecutive runs passed after the graceful close. The proposed check (engine::behavior_tests::coverage_expansion::live_presence_and_untrusted_noise_do_not_replace_the_last_authenticated_clipboard_item) is the affected test itself and the old fixture usually passes, so, as with F94 and F101, no deterministic focused regression is credited."
+    },
+    {
+      "id": "F133",
+      "kind": "Runtime",
+      "fixes": [
+        "9a242177ff5b64f0395adde5e99697bef347dca3"
+      ],
+      "description": "Overflowing --ttl durations panicked in the humantime parser instead of reporting an error",
+      "checks": [
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/src/duration.rs",
+          "package": "clipsync-cli",
+          "target": "bin:clipsync",
+          "test": "duration::tests::ttl_duration_nanosecond_carry_overflow_is_an_error_not_a_panic",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ]
+        },
+        {
+          "kind": "rust",
+          "source": "crates/clipsync-cli/tests/local_commands.rs",
+          "package": "clipsync-cli",
+          "target": "test:local_commands",
+          "test": "daemon_commands_write_only_isolated_service_files_and_preserve_json_contracts",
+          "platforms": [
+            "linux",
+            "macos"
+          ]
+        }
+      ],
+      "notes": "Both regressions fail on the humantime-backed code: the unit test panics in Duration::new and the CLI exits 101 instead of 1. The in-house parser matched humantime on 10,000,000 generated inputs except the 381 that panicked. The characterization pins that pass before and after are not credited. Removing the unmaintained humantime dependency and time-boxing the chrono unmaintained advisory are dependency maintenance, not separately counted defects."
+    },
+    {
+      "id": "F134",
+      "kind": "Build/CI",
+      "fixes": [
+        "9705c9bb408dcaf7f16b58bd84b72ee417753cf4"
+      ],
+      "description": "secure_listener and binary_contract fixtures reserved a port and dropped it before the relay bound it, so parallel processes could take the port between readiness and use",
+      "checks": [],
+      "notes": "Under 4 concurrent copies of each binary plus a parallel build, the old harness failed 12 of 480 process runs (connection reset or refused after readiness) and the new port-0 harness failed 0 of 480. The tests proposed in #42 are the affected tests themselves and the race is load-dependent, so, as with F94 and F101, no deterministic focused regression is credited. A mutation of --bind precedence fails relay_binary_honors_bind_and_serves_health_before_shutdown, which pins the binary contract rather than the race."
     }
   ]
 }
