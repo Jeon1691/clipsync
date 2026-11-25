@@ -52,7 +52,7 @@ hkdf = "0.13"
 hmac = "0.13"
 hostname = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
-infer = "0.19"
+infer = "0.22"
 ipnet = "2"
 keyring = { version = "3.6", default-features = false }
 parking_lot = "0.13"
