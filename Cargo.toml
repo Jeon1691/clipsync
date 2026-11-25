@@ -68,7 +68,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 # `Unsupported` on Android before Rust 1.98, above the workspace MSRV.
 rustix = { version = "1.1.6", default-features = false, features = ["fs", "std"] }
 rustls = { version = "0.23.46", default-features = false, features = ["std", "tls12", "ring"] }
-rustls-platform-verifier = "0.5"
+rustls-platform-verifier = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
